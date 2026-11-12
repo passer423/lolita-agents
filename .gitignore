@@ -1,0 +1,26 @@
+# 交付前请确认：content/ 是**必须进 git** 的（知识库、尺码表、洗护规则）——
+# 那是产品真正的价值，丢了就重写不出来。
+
+# 密钥
+.env
+.env.bak*
+
+# 运行时数据：用户衣柜、照片、索引、备份包
+# 整目录排除而不是逐条列举——逐条列一定会漏，而漏进去的是别人的照片和聊天记录。
+data/
+
+# 上游管线是从本机路径导入的，不复制进来
+lolita-rag/
+
+# 测试与缓存
+.pytest-tmp/
+.pytest_cache/
+pytest-cache-files-*/
+.ruff_cache/
+tests/.data/
+tests/.tmp/
+.screenshots/
+__pycache__/
+*.py[cod]
+*.log
+stderr.log

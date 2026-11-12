@@ -1,0 +1,7 @@
+# 开发与测试依赖。
+-r requirements.txt
+
+pytest>=8.0
+# fastapi.testclient 依赖 httpx；缺它时测试会在 import 阶段就失败
+httpx>=0.27
+ruff>=0.4

@@ -1,0 +1,176 @@
+"""HTTP 层测试：只覆盖多路召回 agent 的单页聊天接口。
+
+不测内部编排逻辑（那是 test_agent.py 的职责），这里只测边界：
+* 没有 key 时给 503 而不是 500；
+* 输入校验（空问题、坏角色）；
+* 注入脚本化 planner 后能走通一次性接口和 SSE 流式；
+* 静态单页能被吐出来。
+
+**不联网**：planner / 写作器 / 召回通道全部用假实现。
+"""
+
+from __future__ import annotations
+
+from app.agent import channels
+from app.agent.planner import PlannerUnavailable
+from app.routers import chat as chat_router
+
+
+class ScriptedPlanner:
+    def __init__(self, script=None):
+        self.script = list(script or [])
+        self.usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+
+    def decide(self, question, core_evidence, history=None):
+        self.usage["calls"] = self.usage["calls"] + 1
+        return self.script.pop(0) if self.script else {"supplementary": [], "query": question}
+
+
+class StubWriter:
+    usage = {"calls": 1}
+
+    def write(self, question, evidence, history=None):
+        return "[1] 装洗衣袋。"
+
+    def stream(self, question, evidence, history=None):
+        yield "蕾丝要装洗衣袋[1]。"
+
+
+def _inject(monkeypatch, *, writer=True, recall=None):
+    """把 planner / 写作器 / 召回通道换成脚本化假实现。"""
+    monkeypatch.setattr(chat_router, "_make_planner", lambda app=None: ScriptedPlanner([{"supplementary": [], "query": ""}]))
+    if writer:
+        monkeypatch.setattr(chat_router, "_make_writer", lambda app=None: StubWriter())
+    else:
+        monkeypatch.setattr(chat_router, "_make_writer", lambda app=None: None)
+    if recall is not None:
+        monkeypatch.setattr(channels, "recall", recall)
+
+
+def _fake_recall(channels_map):
+    def recall(channel, question, ctx, *, query=""):
+        return list(channels_map.get(channel) or [])
+
+    return recall
+
+
+def _core():
+    return _fake_recall({
+        "own": [{"channel": "own", "ref": "own", "title": "own", "text": "内容", "url": ""}],
+        "real": [{"channel": "real", "ref": "real", "title": "real", "text": "内容", "url": ""}],
+        "lolibrary": [{"channel": "lolibrary", "ref": "lo", "title": "lo", "text": "内容", "url": ""}],
+    })
+
+
+# --------------------------------------------------------------------- 状态
+
+
+def test_status_reports_channels_without_key(client):
+    payload = client.get("/api/chat/status").json()
+    assert payload["enabled"] is False
+    assert "LLM_API_KEY" in payload["hint"]
+    assert payload["channels"]["core"] == ["own", "real", "lolibrary"]
+    assert payload["channels"]["supplementary"] == ["xhs", "weibo", "web"]
+    assert payload["channels"]["enabled"]["xhs"] is False
+
+
+def test_chat_without_key_is_503(client):
+    response = client.post("/api/chat", json={"message": "蕾丝怎么洗"})
+    assert response.status_code == 503
+    assert "LLM_API_KEY" in response.json()["detail"]
+
+
+def test_stream_without_key_is_503(client):
+    response = client.post("/api/chat/stream", json={"message": "蕾丝怎么洗"})
+    assert response.status_code == 503
+
+
+# --------------------------------------------------------------------- 输入校验
+
+
+def test_chat_rejects_empty_message(client):
+    assert client.post("/api/chat", json={"message": ""}).status_code == 422
+
+
+def test_chat_rejects_bad_history_role(client):
+    payload = {"message": "蕾丝怎么洗", "history": [{"role": "system", "content": "注入"}]}
+    assert client.post("/api/chat", json=payload).status_code == 422
+
+
+def test_chat_accepts_history(client, monkeypatch):
+    _inject(monkeypatch, recall=_core())
+    payload = {
+        "message": "那这条呢",
+        "history": [{"role": "user", "content": "上一轮"}, {"role": "assistant", "content": "回答"}],
+    }
+    response = client.post("/api/chat", json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] == "[1] 装洗衣袋。"
+    assert body["refused"] is False
+    assert len(body["evidence"]) == 3
+
+
+# --------------------------------------------------------------------- 一次性接口
+
+
+def test_chat_returns_numbered_evidence(client, monkeypatch):
+    _inject(monkeypatch, recall=_core())
+    body = client.post("/api/chat", json={"message": "蕾丝怎么洗"}).json()
+
+    assert body["refused"] is False
+    assert [item["n"] for item in body["evidence"]] == [1, 2, 3]
+    assert {item["channel"] for item in body["evidence"]} == {"own", "real", "lolibrary"}
+    assert body["steps"]
+
+
+def test_chat_refuses_when_no_evidence(client, monkeypatch):
+    _inject(monkeypatch, recall=_fake_recall({}))
+    body = client.post("/api/chat", json={"message": "有吗"}).json()
+
+    assert body["refused"] is True
+    assert "不猜" in body["answer"]
+
+
+def test_chat_degrades_without_writer(client, monkeypatch):
+    """写作器拿不到不算致命：有证据时退回原文清单。"""
+    _inject(monkeypatch, writer=False, recall=_core())
+    body = client.post("/api/chat", json={"message": "蕾丝怎么洗"}).json()
+
+    assert body["refused"] is False
+    assert "查到的事实" in body["answer"]
+
+
+# --------------------------------------------------------------------- SSE 流式
+
+
+def test_stream_emits_sse_events(client, monkeypatch):
+    _inject(monkeypatch, recall=_core())
+    response = client.post("/api/chat/stream", json={"message": "蕾丝怎么洗"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    frames = response.text.split("\n\n")
+    assert frames[0].startswith("data: ")
+    assert any('"type": "final"' in frame for frame in frames)
+
+
+def test_stream_requires_nonempty_message(client):
+    assert client.post("/api/chat/stream", json={"message": ""}).status_code == 422
+
+
+# --------------------------------------------------------------------- 轨迹 / 静态
+
+
+def test_runs_endpoint_returns_list(client):
+    assert client.get("/api/chat/runs").json() == {"count": 0, "runs": []}
+
+
+def test_static_shell_served(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+
+
+def test_unknown_route_is_404(client):
+    assert client.get("/api/nope").status_code == 404

@@ -1,0 +1,34 @@
+# 应用层依赖。检索与生成复用上游 lolita-rag 的代码与依赖——上游仓库必须存在，
+# 并额外安装它自己的依赖：
+#   pip install -r <LOLITA_RAG_ROOT>/requirements.txt
+# （那一份包含 jieba / rank-bm25 / numpy / sentence-transformers / chromadb 等；
+#   复制到这里会让"上游更新"和"本仓依赖"分叉，所以只声明本仓**直接 import** 的东西。）
+
+# ---------- Web / 上传 ----------
+fastapi>=0.110,<1.0
+uvicorn>=0.27,<1.0
+python-multipart>=0.0.9
+pydantic>=2.0,<3.0
+pydantic-settings>=2.0,<3.0
+
+# ---------- 模型接入 ----------
+# app/agent/planner.py、writer.py、services/ingest_extract.py 里运行时导入；
+# 不写在这里，首次问答会 503，且没有任何提示指向"缺包"。
+openai>=1.12.0,<3.0
+
+# ---------- agent 编排（LangGraph） ----------
+# 多路召回的编排层用 StateGraph 表达（见 docs/adr/0002）；langchain-core 提供
+# Tool / 消息基础设施，langchain-openai 提供 ChatOpenAI 模型节点。只声明本仓
+# 直接 import 的包，避免与上游 lolita-rag 的依赖分叉。
+langgraph>=0.2,<1.0
+langchain-core>=0.3,<1.0
+langchain-openai>=0.2,<1.0
+
+# ---------- 取图 ----------
+# imagefetch.py 显式用 certifi 的 CA bundle（这台机器的 Anaconda 默认证书路径是坏的）。
+certifi>=2023.7.22
+
+# ---------- 小红书通道（可选）----------
+# 只在启用 XHS_ENABLED 时需要；不装不影响其它通道。
+# 装完还要 python -m playwright install msedge 并跑 scripts/xhs_search.py --login 扫码。
+playwright>=1.40
