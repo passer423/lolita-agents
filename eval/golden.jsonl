@@ -1,0 +1,44 @@
+{"id": "own-01", "channel": "own", "query": "烫金和亮片的裙子怎么洗", "expected_refs": ["care-jinshu#0"], "support_terms": ["烫金", "冷水", "翻面"], "note": "content/kb/care-jinshu.md 明写冷水翻面手洗"}
+{"id": "own-02", "channel": "own", "query": "蕾丝和雪纺怎么洗才不勾丝", "expected_refs": ["care-lace#0"], "support_terms": ["蕾丝", "雪纺", "手洗"], "note": "care-lace.md 覆盖蕾丝/雪纺洗护"}
+{"id": "own-03", "channel": "own", "query": "裙撑长度怎么选", "expected_refs": ["guide-chengqun#0"], "support_terms": ["裙撑", "三到五厘米"], "note": "guide-chengqun.md 的长度规则"}
+{"id": "own-04", "channel": "own", "query": "新手入坑第一套lo裙先买什么", "expected_refs": ["guide-newbie#0"], "support_terms": ["JSK", "六件", "裙撑"], "note": "guide-newbie.md 的最小六件套"}
+{"id": "own-05", "channel": "own", "query": "lo裙尺码偏大偏小怎么判断", "expected_refs": ["size-version#0"], "support_terms": ["胸围", "腰围", "肩宽"], "note": "size-version.md 的三围量法"}
+{"id": "own-06", "channel": "own", "query": "柄图是什么意思", "expected_refs": ["term-bingtu#0"], "support_terms": ["柄图", "印花"], "note": "term-bingtu.md 的定义"}
+{"id": "own-07", "channel": "own", "query": "第一次去茶会要注意什么", "expected_refs": ["term-chahui#0"], "support_terms": ["茶会", "正装", "拍照"], "note": "term-chahui.md 的礼仪条目"}
+{"id": "own-08", "channel": "own", "query": "JSK 和 OP 有什么区别", "expected_refs": ["term-jsk-op#0"], "support_terms": ["JSK", "OP", "袖子"], "note": "term-jsk-op.md 的对比条目"}
+{"id": "own-09", "channel": "own", "query": "KC 是什么", "expected_refs": ["term-kc#0"], "support_terms": ["Katyusha", "发箍"], "note": "term-kc.md 的缩写解释"}
+{"id": "own-10", "channel": "own", "query": "怎么判断山正", "expected_refs": ["term-shanzheng#0"], "support_terms": ["山正", "吊牌", "走线"], "note": "term-shanzheng.md 的核查项"}
+{"id": "own-11", "channel": "own", "query": "SK 和 JSK 怎么搭配", "expected_refs": ["term-sk#0"], "support_terms": ["SK", "半身裙", "腰围"], "note": "term-sk.md 的搭配建议"}
+{"id": "own-12", "channel": "own", "query": "痛lo是什么意思", "expected_refs": ["term-tonglo#0"], "support_terms": ["痛 lo", "痛包", "周边"], "note": "term-tonglo.md 的定义"}
+{"id": "real-01", "channel": "real", "query": "林檎之森 OP 再贩的蓝色绿色会掉色吗", "expected_refs": ["5015120407953851#0"], "support_terms": ["浮色", "掉色", "染色"], "note": "再贩公告：红色面料导致浮色，需取下蝴蝶结"}
+{"id": "real-02", "channel": "real", "query": "珀茵特庄园的裙子有浮色怎么处理", "expected_refs": ["4845985355010428#0", "4845985355010428#1"], "support_terms": ["浮色", "水洗", "清洗"], "note": "店家质检与水洗实验说明"}
+{"id": "real-03", "channel": "real", "query": "AP 和 Baby 的水洗标是什么意思 不能湿洗怎么办", "expected_refs": ["4580969816785987#0", "4580969816785987#1"], "support_terms": ["不能湿洗", "干洗", "水洗标"], "note": "水洗标图解与不能湿洗的后果"}
+{"id": "real-04", "channel": "real", "query": "灵珑2024版布料怎么洗护", "expected_refs": ["5043352800592972#0"], "support_terms": ["手洗", "不能烫", "不能烘干"], "note": "布料洗护提醒：手洗、避高温"}
+{"id": "real-05", "channel": "real", "query": "白色款模特 162 胸围80 建议穿S还是M", "expected_refs": ["5320190369729950#0"], "support_terms": ["162", "胸围80", "M码"], "note": "商品页模特数据：S 偏小，建议 M"}
+{"id": "real-06", "channel": "real", "query": "lo裙尺码比地球人女装宽容吗", "expected_refs": ["5353227454518428#0"], "support_terms": ["尺码", "地球人"], "note": "用户讨论：lo 裙尺码比地球人女装宽容"}
+{"id": "real-07", "channel": "real", "query": "安东尼蛋糕再贩心愿池怎么参与", "expected_refs": ["5348194363900206#0"], "support_terms": ["再贩心愿池", "评论区"], "note": "官方公告：评论区留言许愿"}
+{"id": "real-08", "channel": "real", "query": "安东尼蛋糕再贩结果哪个组", "expected_refs": ["5351822843972375#0"], "support_terms": ["紫藤组", "2027"], "note": "官方公告：紫藤组 2027 年 1 月再贩"}
+{"id": "real-09", "channel": "real", "query": "小饼干二贩什么时候开 有几个色", "expected_refs": ["5351412252283440#0"], "support_terms": ["小饼干", "二贩", "4个色"], "note": "再贩通知：4 个色，10/08 20:00"}
+{"id": "real-10", "channel": "real", "query": "宝石芭蕾的预约和尾款什么时候公布", "expected_refs": ["5349998252264023#0"], "support_terms": ["宝石芭蕾", "预约", "尾款"], "note": "官方公告：10.3-10.9 公布预约/尾款"}
+{"id": "real-11", "channel": "real", "query": "闲鱼收二手lo裙怎么判断山正 要不要细节图", "expected_refs": ["5060688686876341#0"], "support_terms": ["山正", "细节图"], "note": "求助帖：二手收裙如何区别山正"}
+{"id": "real-12", "channel": "real", "query": "小魔女山版和正版差在哪", "expected_refs": ["5083998678421418#0"], "support_terms": ["山版", "版型", "布料"], "note": "店家山正对比：版型/布料/做工差距"}
+{"id": "real-13", "channel": "real", "query": "腰围95 胸围105 收现货大码lo裙", "expected_refs": ["5353173200929039#0"], "support_terms": ["腰围95", "胸围105"], "note": "出物帖：收大码现货的身材数据"}
+{"id": "real-14", "channel": "real", "query": "150cm 毕业典礼穿什么狗短JSK", "expected_refs": ["5349689487790537#0"], "support_terms": ["150cm", "狗短", "毕业"], "note": "求推荐帖：150cm 要狗短不压个子"}
+{"id": "real-15", "channel": "real", "query": "为什么叫高个子天空树 适合什么风格", "expected_refs": ["5225768642153336#1"], "support_terms": ["天空树", "古典"], "note": "圈内称呼解释：天空树适合古典风格"}
+{"id": "real-16", "channel": "real", "query": "冬日白桦林SP有现货吗 杏色长OP", "expected_refs": ["5352811274698975#0"], "support_terms": ["白桦林", "现货", "杏色"], "note": "现货帖：白桦林 sp 杏色长 OP 掉落"}
+{"id": "lolibrary-01", "channel": "lolibrary", "query": "Baby 的 White Rabbit Bunny Ear Bonnet 是什么", "expected_refs": ["btssb-white-rabbit-bunny-ear-bonnet-2026"], "support_terms": ["White Rabbit Bunny Ear Bonnet", "Baby"], "note": "catalog.jsonl 品牌+系列唯一命中"}
+{"id": "lolibrary-02", "channel": "lolibrary", "query": "Angelic Pretty Whip Heart Tote Bag 是什么品类", "expected_refs": ["ap-whip-heart-tote-bag-2026"], "support_terms": ["Whip Heart Tote Bag", "Angelic Pretty"], "note": "档案记录品类为 Bag"}
+{"id": "lolibrary-03", "channel": "lolibrary", "query": "Innocent World White Lily OP 2026 是裙子吗", "expected_refs": ["iw-white-lily-op-2026"], "support_terms": ["White Lily OP", "Innocent World"], "note": "档案记录品类为 OP"}
+{"id": "lolibrary-04", "channel": "lolibrary", "query": "Victorian Maiden Tyrolean Apron Skirt 是什么", "expected_refs": ["victorian-maiden-tyrolean-apron-skirt"], "support_terms": ["Tyrolean Apron Skirt", "Victorian Maiden"], "note": "档案记录品类为 Skirt"}
+{"id": "lolibrary-05", "channel": "lolibrary", "query": "Mary Magdalene Whyteleafe OP 2008 再版", "expected_refs": ["mary-magdalene-whyteleafe-op-2008"], "support_terms": ["Whyteleafe OP", "Mary Magdalene"], "note": "档案记录 2008 2nd release"}
+{"id": "lolibrary-06", "channel": "lolibrary", "query": "Juliette et Justine Viola Dans la Brume JSK", "expected_refs": ["j-et-j-viola-dans-la-brume-jsk"], "support_terms": ["Viola Dans la Brume", "Juliette et Justine"], "note": "档案记录品类为 JSK"}
+{"id": "lolibrary-07", "channel": "lolibrary", "query": "Alice and the Pirates Torchon Lace Headdress 是什么", "expected_refs": ["aatp-torchon-lace-headdress"], "support_terms": ["Torchon Lace Headdress", "Alice and the Pirates"], "note": "档案记录品类为 Hair Accessory"}
+{"id": "lolibrary-08", "channel": "lolibrary", "query": "Moi-même-Moitié Sleeping Garden Long OP 2026", "expected_refs": ["moitie-sleeping-garden-long-op-2026"], "support_terms": ["Sleeping Garden Long OP", "Moitié"], "note": "档案记录品类为 OP"}
+{"id": "xhs-01", "channel": "xhs", "query": "花与珍珠匣 三丽鸥合作系列 实拍", "expected_refs": [], "support_terms": ["花与珍珠匣", "三丽鸥"], "requires_online": true, "note": "小红书实拍场景；离线跳过，--online 才跑"}
+{"id": "xhs-02", "channel": "xhs", "query": "Baby 秋日私语 JSK 上身效果", "expected_refs": [], "support_terms": ["秋日私语", "JSK"], "requires_online": true, "note": "品牌系列上身效果场景；离线跳过"}
+{"id": "xhs-03", "channel": "xhs", "query": "四时花 预约 价格", "expected_refs": [], "support_terms": ["四时花"], "requires_online": true, "note": "预约价格场景；离线跳过"}
+{"id": "weibo-01", "channel": "weibo", "query": "安东尼蛋糕 再贩 微博 讨论", "expected_refs": [], "support_terms": ["安东尼蛋糕", "再贩"], "requires_online": true, "note": "微博网友讨论场景；离线跳过"}
+{"id": "weibo-02", "channel": "weibo", "query": "小魔女 山正 对比 微博", "expected_refs": [], "support_terms": ["小魔女", "山正"], "requires_online": true, "note": "微博山正讨论场景；离线跳过"}
+{"id": "weibo-03", "channel": "weibo", "query": "珀茵特庄园 浮色 微博", "expected_refs": [], "support_terms": ["珀茵特庄园", "浮色"], "requires_online": true, "note": "微博质量反馈场景；离线跳过"}
+{"id": "web-01", "channel": "web", "query": "lolita 茶会 第一次去 着装要求", "expected_refs": [], "support_terms": ["茶会", "着装"], "requires_online": true, "note": "网页检索茶会礼仪；离线跳过"}
+{"id": "web-02", "channel": "web", "query": "JSK 和 OP 有什么区别 网站", "expected_refs": [], "support_terms": ["JSK", "OP"], "requires_online": true, "note": "网页检索品类区别；离线跳过"}
