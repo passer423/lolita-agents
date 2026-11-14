@@ -33,8 +33,10 @@ class _FakeCompletions:
     def __init__(self, *, content: str = "", chunks: list[str] | None = None):
         self.content = content
         self.chunks = list(chunks or [])
+        self.calls: list[dict] = []
 
     def create(self, **kwargs):
+        self.calls.append(kwargs)
         if kwargs.get("stream"):
             stream = [
                 _Obj(choices=[_Obj(delta=_Obj(content=piece))], usage=None)
@@ -55,6 +57,26 @@ def make_writer(*, content: str = "", chunks: list[str] | None = None) -> DeepSe
     writer = DeepSeekWriter(app)
     writer._client = _Obj(chat=_Obj(completions=_FakeCompletions(content=content, chunks=chunks)))
     return writer
+
+
+def test_writer_uses_configured_max_tokens(monkeypatch):
+    """上限必须来自配置：推理模型的推理 token 也占这个预算，600 会截断。"""
+    monkeypatch.setattr(settings, "writer_max_tokens", 1800)
+    writer = make_writer(content="[1] 可以。")
+    writer.write("蕾丝怎么洗", evidence())
+
+    call = writer._client.chat.completions.calls[-1]
+    assert call["max_tokens"] == 1800
+    assert writer._max_tokens == 1800
+
+
+def test_stream_uses_configured_max_tokens(monkeypatch):
+    monkeypatch.setattr(settings, "writer_max_tokens", 1600)
+    writer = make_writer(chunks=["[1] 可以。"])
+    list(writer.stream("蕾丝怎么洗", evidence()))
+
+    call = writer._client.chat.completions.calls[-1]
+    assert call["max_tokens"] == 1600
 
 
 def evidence(**overrides) -> list[dict]:

@@ -29,7 +29,6 @@ from app.config import AppSettings
 
 logger = logging.getLogger(__name__)
 
-WRITER_MAX_TOKENS = 600
 WRITER_TIMEOUT = 60.0
 
 # 多轮：最多带几轮历史、每条多长。上下文是有限资源，历史无限增长就是给自己制造噪声。
@@ -437,6 +436,8 @@ class DeepSeekWriter:
             timeout=WRITER_TIMEOUT,
         )
         self._model = app.llm_model.strip()
+        # 上限放配置：推理模型的推理 token 也计入这个预算，600 会截断长答案。
+        self._max_tokens = max(1, int(app.writer_max_tokens))
         self.usage = {
             "calls": 0,
             "prompt_tokens": 0,
@@ -480,7 +481,7 @@ class DeepSeekWriter:
             model=picked,
             messages=build_synth_messages(question, evidence, history),
             temperature=0.2,
-            max_tokens=WRITER_MAX_TOKENS,
+            max_tokens=self._max_tokens,
         )
         self._record(getattr(response, "usage", None), picked)
         text = (response.choices[0].message.content or "").strip()
@@ -509,7 +510,7 @@ class DeepSeekWriter:
             model=picked,
             messages=build_synth_messages(question, evidence, history),
             temperature=0.2,
-            max_tokens=WRITER_MAX_TOKENS,
+            max_tokens=self._max_tokens,
             stream=True,
             stream_options={"include_usage": True},
         )

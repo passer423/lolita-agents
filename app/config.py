@@ -81,6 +81,11 @@ class AppSettings(BaseSettings):
     # 失败/超时一律按便宜档兜底，不影响回答。
     model_routing_llm: bool = True
 
+    # 写作单次输出的 token 上限。推理模型（如 deepseek-reasoner）的推理 token
+    # 也计入这个预算：600 会在长证据题上先把预算烧在推理上，正文被截断甚至为空。
+    # 放宽后模型写完就停，不会为了填满上限而多花钱。
+    writer_max_tokens: int = 1800
+
     # ---------- 成本核算 ----------
     # 每 1K token 的单价，形如：
     #   {"deepseek-chat": {"prompt_per_1k": 0.002, "completion_per_1k": 0.008}}
