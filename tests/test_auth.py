@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import base64
 import time
 from datetime import datetime, timedelta
 
@@ -145,7 +146,18 @@ def test_jwt_roundtrip_and_expiry(tmp_path):
     )
     assert client.get("/api/ping", headers={"Authorization": f"Bearer {expired}"}).status_code == 401
 
-    tampered = token[:-2] + ("aa" if not token.endswith("aa") else "bb")
+    # 篡改必须改到字节本身：base64 末尾字符可能只影响 padding 位，
+    # 换字符常常解出同一串字节，那样的"篡改"前提就不成立。
+    header, payload, signature = token.split(".")
+    raw = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
+    flipped = bytes([raw[0] ^ 0x01]) + raw[1:]
+    tampered_sig = base64.urlsafe_b64encode(flipped).rstrip(b"=").decode("ascii")
+    assert tampered_sig != signature
+    assert (
+        base64.urlsafe_b64decode(tampered_sig + "=" * (-len(tampered_sig) % 4))
+        != raw
+    )
+    tampered = f"{header}.{payload}.{tampered_sig}"
     assert client.get("/api/ping", headers={"Authorization": f"Bearer {tampered}"}).status_code == 401
 
 
