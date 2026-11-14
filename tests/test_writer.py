@@ -1,7 +1,8 @@
-"""写作层：句级引用覆盖告警与来源归因。
+"""写作层：句级引用覆盖、补齐与来源归因。
 
-覆盖校验**只告警、不改答案**；归因必须跟着证据性质走——店家页面不能被写成
-「有网友提到」。两件事都不联网：模型输出由假客户端给定。
+覆盖校验本身**只告警**；补齐只发生在非流式，且只补证据真的支撑的那一句，
+补不动时不许硬挂。归因必须跟着证据性质走——店家页面不能被写成
+「有网友提到」。三件事都不联网：模型输出由假客户端给定。
 """
 
 from __future__ import annotations
@@ -15,7 +16,9 @@ from app.agent.writer import (
     APPELLATION_UGC,
     DeepSeekWriter,
     build_synth_messages,
+    fill_citations,
     fix_source_attribution,
+    grounding_score,
     source_appellation,
     uncited_claim_sentences,
 )
@@ -196,6 +199,124 @@ def test_stream_warns_but_does_not_rewrite_answer():
     diagnostics = writer.usage["diagnostics"]
     assert diagnostics["streamed"] is True
     assert diagnostics["citation_coverage"]["uncited_count"] == 1
+
+
+# ---------------------------------------------------------------- 句级引用补齐
+
+
+# own-08 的原句：证据（自有知识库）逐条写着 JSK / OP 的定义，只是模型没在这句标编号。
+OWN_DEFINITION = (
+    "JSK 是没袖子的吊带连衣裙，上身像背心，得配内搭衬衫或打底才能穿；"
+    "OP 是带袖子的连体裙，一件直接上身。"
+)
+OWN_EVIDENCE = [
+    {
+        "n": 1,
+        "channel": "own",
+        "source_kind": "own_content",
+        "ref": "term-jskop#0",
+        "title": "知识库",
+        "text": (
+            "JSK 和 OP 有什么区别\n"
+            "JSK 是 Jumper Skirt 的缩写，指没有袖子的吊带连衣裙，上身是背心式，"
+            "需要搭配内搭衬衫或打底才能穿。\n"
+            "OP 是 One-Piece 的缩写，指带袖子的连体连衣裙，一件直接上身。"
+        ),
+        "url": "",
+    }
+]
+
+
+def test_sentence_is_filled_when_evidence_really_supports_it():
+    """own-08：编号补在句末标点前，和模型自己写的「… [1]。」同形。"""
+    writer = make_writer(content=OWN_DEFINITION)
+    text = writer.write("JSK 和 OP 有什么区别", OWN_EVIDENCE)
+
+    assert text == OWN_DEFINITION[:-1] + " [1]。"
+    coverage = writer.usage["diagnostics"]["citation_coverage"]
+    assert coverage == {
+        "checked_evidence": 1,
+        "uncited_count": 0,
+        "uncited_sentences": [],
+        "filled_count": 1,
+    }
+    assert writer.usage["diagnostics"]["citation_fills"] == [
+        {"sentence": OWN_DEFINITION, "n": 1}
+    ]
+
+
+def test_advice_sentence_is_not_given_a_topic_neighbour_citation():
+    """real-11：求助帖只是问了同一件事，不能当成「要细节图」这条建议的依据。"""
+    ask = evidence(
+        channel="real",
+        ref="real-11#0",
+        title="lo娘发言",
+        text="想问问收别人的lo裙有什么要注意的吗，需不需要让对方拍细节图呢",
+    )
+    sentence = "要细节图，而且得让对方拍实拍，不是店家图。"
+
+    text, filled, narrowed = fill_citations(sentence, ask)
+
+    assert text == sentence
+    assert filled == []
+    assert narrowed == []
+
+
+def test_number_mismatch_blocks_fill():
+    """价格/日期这类数字对不上，就算字面重合度高也不挂。"""
+    ev = evidence(
+        channel="own",
+        source_kind="own_content",
+        text="定金 188，尾款 390，两周内付清。",
+    )
+    sentence = "定金 188，尾款 390，全款 578 元。"
+
+    assert grounding_score(sentence, ev[0]["text"]) >= writer_mod.MIN_GROUNDING
+    assert fill_citations(sentence, ev)[1] == []
+
+
+def test_definition_without_any_evidence_is_narrowed_not_cited():
+    """lolibrary-03：定义句只有标题级的档案，挂 [2] 等于替档案编定义。"""
+    ev = evidence(
+        channel="lolibrary",
+        source_kind="third_party",
+        title="White Lily OP (2026)",
+        text="Innocent World｜OP",
+        url="https://lolibrary.org/items/x",
+    )
+    sentence = "OP 就是 one-piece 的缩写，指连身裙；整件式，不用另配上衣。"
+
+    text, filled, narrowed = fill_citations(sentence, ev)
+
+    assert text == "按一般说法，" + sentence
+    assert filled == []
+    assert narrowed == [sentence]
+
+
+def test_stream_does_not_fill_citations():
+    """流式的字已经交付，补编号等于读者回头看时句子变了。"""
+    writer = make_writer(chunks=[OWN_DEFINITION])
+
+    text = "".join(writer.stream("JSK 和 OP 有什么区别", OWN_EVIDENCE))
+
+    assert text == OWN_DEFINITION
+    assert writer.usage["diagnostics"]["citation_coverage"]["filled_count"] == 0
+
+
+def test_store_meta_sentence_is_neither_cited_nor_rewritten():
+    """real-02：说明来源性质的那句没有可挂的证据，归因照旧只改称谓。"""
+    writer = make_writer(
+        content="有网友提到，用普通洗涤剂手洗两次浮色就掉完了[1]。"
+        "这是店家的说法，不是质检机构的结论。"
+    )
+
+    text = writer.write("这条掉色吗", [{**STORE}])
+
+    assert text == (
+        "店家提到，用普通洗涤剂手洗两次浮色就掉完了[1]。"
+        "这是店家的说法，不是质检机构的结论。"
+    )
+    assert writer.usage["diagnostics"]["citation_fills"] == []
 
 
 # ---------------------------------------------------------------- 来源归因

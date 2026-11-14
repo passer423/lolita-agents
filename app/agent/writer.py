@@ -215,8 +215,9 @@ def _evidence_block(evidence: list[dict]) -> str:
 # --------------------------------------------------------------------- 句级引用覆盖
 #
 # 硬错（编号越界 / 零引用）已有两道闸，实测 26 处引用零命中；真正漏掉的是
-# 「一整句事实没有编号」。这里只产出告警，**不改答案**——流式下替换等于
-# 话说一半被打脸，非流式也没有必要为了告警牺牲可读性。
+# 「一整句事实没有编号」。这里先给出「哪些句子没编号」的判定口径（告警与
+# 下文补齐共用），**流式只用它告警、不改答案**——流式下替换等于话说一半被
+# 打脸；非流式在补得动的时候补编号，见「句级引用补齐」一节。
 #
 # 口径按实测定：按 ``。！？`` 切句（不切分号——写作器习惯把 [n] 挂在分号链
 # 末尾），≥15 字且句内没有 [n] 才算；元陈述、免责/降权、反问收尾一律豁免。
@@ -255,6 +256,14 @@ def _exempt_sentence(sentence: str) -> bool:
     return any(marker in sentence for marker in ("你想", "想了解", "哪方面"))
 
 
+def _is_uncited_claim(sentence: str) -> bool:
+    """≥15 字、句内没有 ``[n]``、也不属于豁免类型。"""
+    if not sentence or _CITATION_RE.search(sentence):
+        return False
+    visible = _CITATION_RE.sub("", sentence).strip()
+    return len(visible) >= MIN_CLAIM_CHARS and not _exempt_sentence(sentence)
+
+
 def uncited_claim_sentences(answer: str, evidence: list[dict]) -> list[str]:
     """≥15 字、句内没有 ``[n]``、也不属于豁免类型的句子。
 
@@ -262,18 +271,148 @@ def uncited_claim_sentences(answer: str, evidence: list[dict]) -> list[str]:
     """
     if not answer or not evidence:
         return []
-    flagged: list[str] = []
-    for match in _SENTENCE_RE.finditer(answer):
-        sentence = match.group().strip()
-        if not sentence or _CITATION_RE.search(sentence):
+    return [
+        match.group().strip()
+        for match in _SENTENCE_RE.finditer(answer)
+        if _is_uncited_claim(match.group())
+    ]
+
+
+# --------------------------------------------------------------------- 句级引用补齐
+#
+# 告警只回答「这句没有编号」，不回答「这句到底有没有证据」。实测四份 forensics
+# 快照（75 条真实回答、215 个可判定句）里的 34 条无引用长句：单条证据的内容
+# 二元组覆盖率 ≥0.45 的 15 条，逐条人工核对全部成立；剩下 19 条里 9 条是免责/
+# 降权、4 条是建议、1 条是无证据的定义句，其余是低于阈值的真漏。
+#
+# 所以这里只做两件事，且**只走非流式**：
+# 1. 补：覆盖率过阈值就把那一句的编号补在句末标点前；
+# 2. 收窄：没证据、又确实是定义式断言，句首加「按一般说法，」。
+#    免责句和建议句不动——它们本来就不是事实断言，加引用是硬挂。
+#
+# 阈值 0.45 是实测定的：0.41 那档会把「求助帖」当成「要细节图」这条建议的
+# 依据（real-11），挂错比漏补贵得多。宁可留空。
+
+MIN_GROUNDING = 0.45
+
+# 比对前先去掉标点、数字和虚词：留着它们，长句里"是…的…"这种骨架会把
+# 覆盖率稀释到 0.2 左右，真正共享的内容词反而看不出来。
+_MATCH_NOISE_RE = re.compile(r"[\s0-9\[\]（）()，。！？、；：…·「」“”\"'\-]")
+_FUNCTION_CHARS = frozenset(
+    "的是了在和与就都也而把被对从这那其之为以于等呢吧啊不没很更最又还只个给让"
+)
+_DIGITS_RE = re.compile(r"\d")
+
+# 只在句**首**就下定义时才加限定词：定义夹在从句中间（「…的 OP [2]，而 OP 是
+# one-piece 的缩写」）时，前缀会插进逗号后面，把句子写坏。
+#
+# 另外要求「几乎没有任何字面重合」（<0.2）才收窄：real-03 的「不能湿洗就是别
+# 下水」实际由证据支撑，只是措辞太短没够 0.45，给它加「按一般说法」等于凭空
+# 贬低一句正确的话。
+_NARROW_PREFIX = "按一般说法，"
+_NARROW_MAX_GROUNDING = 0.2
+_DEFINITION_MARKERS = ("就是", "是指", "指的是", "的缩写")
+_NARROW_HEAD_CHARS = 12
+
+
+def _content_bigrams(text: str) -> set[str]:
+    clean = _MATCH_NOISE_RE.sub("", _CITATION_RE.sub("", text or ""))
+    clean = "".join(ch for ch in clean if ch not in _FUNCTION_CHARS)
+    return {clean[index : index + 2] for index in range(len(clean) - 1)}
+
+
+def grounding_score(sentence: str, text: str) -> float:
+    """句子里的内容二元组有多少比例能在证据正文里找到（0～1）。"""
+    sent = _content_bigrams(sentence)
+    if not sent:
+        return 0.0
+    return len(sent & _content_bigrams(text)) / len(sent)
+
+
+def supporting_evidence(sentence: str, evidence: list[dict]) -> int | None:
+    """这句能被哪条证据支撑；没有过阈值的一律返回 ``None``。
+
+    数字要额外对齐：句子写了「578」而证据里没有这个数，就算字面重合度再高
+    也不算支撑——价格和日期是最容易被"就近挂一个"挂错的地方。
+    """
+    digits = set(_DIGITS_RE.findall(_CITATION_RE.sub("", sentence)))
+    best_score = 0.0
+    best_number: int | None = None
+    for item in evidence:
+        text = str(item.get("text") or "")
+        score = grounding_score(sentence, text)
+        if score < MIN_GROUNDING or score <= best_score:
             continue
+        if digits and not digits <= set(_DIGITS_RE.findall(text)):
+            continue
+        number = int(item.get("n") or 0)
+        if not number:
+            continue
+        best_score, best_number = score, number
+    return best_number
+
+
+def best_grounding(sentence: str, evidence: list[dict]) -> float:
+    """这句和证据的最高字面重合度（不论是否过阈值）。"""
+    return max(
+        (grounding_score(sentence, str(item.get("text") or "")) for item in evidence),
+        default=0.0,
+    )
+
+
+def _insert_citation(sentence: str, number: int) -> str:
+    """编号放在句末标点之前，和模型自己写出的「… [1]。」保持同一形状。"""
+    body = sentence.rstrip()
+    tail = sentence[len(body) :]
+    if body and body[-1] in "。！？!?":
+        return f"{body[:-1].rstrip()} [{number}]{body[-1]}{tail}"
+    return f"{body} [{number}]{tail}"
+
+
+def _narrow(sentence: str, grounding: float) -> str | None:
+    """无证据支撑、但句首就是定义的断言：加限定词；其余返回 ``None``。"""
+    visible = _CITATION_RE.sub("", sentence)
+    head = visible[: _NARROW_HEAD_CHARS + 4]
+    if grounding >= _NARROW_MAX_GROUNDING:
+        return None
+    if _DIGITS_RE.search(visible):
+        return None
+    if not any(marker in head for marker in _DEFINITION_MARKERS):
+        return None
+    lead = sentence[: len(sentence) - len(sentence.lstrip())]
+    return f"{lead}{_NARROW_PREFIX}{sentence.lstrip()}"
+
+
+def fill_citations(
+    answer: str, evidence: list[dict]
+) -> tuple[str, list[dict], list[str]]:
+    """给无引用长句补编号或收窄措辞；返回 ``(新文本, 补引用记录, 被收窄的句子)``。
+
+    只处理 :func:`uncited_claim_sentences` 会告警的那类句子：句子已经有编号、
+    太短、或是免责/元陈述时一律不碰。补上去的编号只可能来自本轮证据，
+    且必须是内容真的支撑这句的那一条。
+    """
+    if not answer or not evidence:
+        return answer, [], []
+    filled: list[dict] = []
+    narrowed: list[str] = []
+
+    def _replace(match: re.Match) -> str:
+        sentence = match.group()
+        if not _is_uncited_claim(sentence):
+            return sentence
         visible = _CITATION_RE.sub("", sentence).strip()
-        if len(visible) < MIN_CLAIM_CHARS:
-            continue
-        if _exempt_sentence(sentence):
-            continue
-        flagged.append(sentence)
-    return flagged
+        number = supporting_evidence(sentence, evidence)
+        if number is not None:
+            filled.append({"sentence": visible[:80], "n": number})
+            return _insert_citation(sentence, number)
+        narrowed_sentence = _narrow(sentence, best_grounding(sentence, evidence))
+        if narrowed_sentence is None:
+            return sentence
+        narrowed.append(visible[:80])
+        return narrowed_sentence
+
+    return _SENTENCE_RE.sub(_replace, answer), filled, narrowed
 
 
 # --------------------------------------------------------------------- 归因后处理
@@ -364,6 +503,8 @@ def _diagnostics_block(
     fixes: list[dict],
     *,
     streamed: bool,
+    filled: list[dict] | None = None,
+    narrowed: list[str] | None = None,
 ) -> dict:
     flagged = uncited_claim_sentences(answer, evidence)
     return {
@@ -372,7 +513,11 @@ def _diagnostics_block(
             "checked_evidence": len(evidence),
             "uncited_count": len(flagged),
             "uncited_sentences": [sentence[:80] for sentence in flagged],
+            # 本轮补上去几条。覆盖率告警是补完之后的余量，两者一起看才解释得通。
+            "filled_count": len(filled or []),
         },
+        "citation_fills": filled or [],
+        "narrowed_sentences": narrowed or [],
         "source_attribution_fixes": fixes,
     }
 
@@ -587,9 +732,11 @@ class DeepSeekWriter:
         self._record(getattr(response, "usage", None), picked)
         text = (response.choices[0].message.content or "").strip()
         text, fixes = fix_source_attribution(text, evidence)
+        # 只有非流式能补引用：流式的字已经交付给用户，回头改等于打脸。
+        text, filled, narrowed = fill_citations(text, evidence)
         text += image_hint(question, evidence)
         self.usage["diagnostics"] = _diagnostics_block(
-            text, evidence, fixes, streamed=False
+            text, evidence, fixes, streamed=False, filled=filled, narrowed=narrowed
         )
         return text
 
