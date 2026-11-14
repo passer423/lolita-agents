@@ -13,7 +13,7 @@ Lolita 垂直领域的问答 agent：**多路召回 → 生成回答 → 关注�
 | `own` | 自有知识库 `content/kb` | 每次并行 | 入索引 |
 | `real` | 上游真实语料索引 | 每次并行 | 入索引 |
 | `lolibrary` | Lolibrary 档案 `data/lolibrary/catalog.jsonl` | 每次并行 | 入缓存（可重建） |
-| `xhs` | 小红书（Playwright，可选） | planner 按需追加 | 否（临时证据） |
+| `xhs` | 小红书（Playwright 或 Spider_XHS，可选） | planner 按需追加 | 否（临时证据） |
 | `weibo` | 微博实时（网页搜索限定微博域） | planner 按需追加 | 否（临时证据） |
 | `web` | 网页搜索（博查 / 智谱，可选） | planner 按需追加 | 否（临时证据） |
 
@@ -90,15 +90,17 @@ lolita-agents/
 │   ├── config.py          应用配置（DATA_DIR / 召回与补查开关）
 │   ├── bridge.py          ★ 与上游管线的桥：search_kb（own）/ search_real（real）双索引
 │   ├── db.py              SQLite：follows / follow_events / conversations / meta
-│   ├── main.py            FastAPI 入口（chat / follows 路由 + 静态挂载）
+│   ├── main.py            FastAPI 入口（chat / follows / kb 路由 + 静态挂载）
 │   ├── agent/             ★ LangGraph 编排 + 召回 + 规划 + 写作
 │   │   ├── graph.py         StateGraph：核心通道扇出 → route → 补查扇出 → answer → verify
 │   │   ├── channels.py      六通道统一入口 recall(channel, question, ctx)
+│   │   ├── dress.py         裙子档案识别（品牌/译名/字段抽取）
 │   │   ├── planner.py       单次规划：判断补查通道 + 提取检索词（JSON-in-text）
 │   │   ├── writer.py        生成回答 + 引用编号
 │   │   └── trace.py         轨迹落盘
-│   ├── services/          web_search / xhs_search / xhs_spider / imagefetch / follow_watch
-│   ├── routers/           chat（问答）/ follows（关注项）
+│   ├── services/          web_search / xhs_search / xhs_spider / imagefetch /
+│   │                      follow_watch / lolibrary_online
+│   ├── routers/           chat（问答）/ follows（关注项）/ kb（索引状态与重载）
 │   └── static/            index.html + chat.js（单页聊天，零依赖）
 ├── content/kb/            ★ 自有知识库（纯文本 md，进 git）
 ├── data/                  ← 不进 git，运行时数据（kbindex / lolibrary / app.db / traces）
@@ -106,6 +108,8 @@ lolita-agents/
 │   ├── ingest_kb.py       md → posts.jsonl（喂给上游）
 │   ├── build_kb_index.py  调上游 build_index
 │   ├── import_lolibrary.py Lolibrary 档案 → catalog.jsonl
+│   ├── probe_search.py    排查「这条为什么没召回」（直连实时通道，不读索引）
+│   ├── smoke.py           端到端冒烟（需服务已启动）
 │   └── xhs_search.py      小红书浏览器自动化（--login / --query）
 ├── docs/adr/              架构决策记录
 └── tests/                 pytest（agent / 接口）
@@ -138,6 +142,16 @@ START ──fanout──▶ own ─┐
 | `upstream_ugc` | 上游采集的微博发言 | **只能写「有网友提到」，不得当规范** |
 
 排序也是三级规则（本次补查的通道 → 来源效力 → 通道顺序），不是跨通道相关性打分——BM25 / 向量相似度 / 搜索排序是三套量纲，没法合成一个分。
+
+合并层（`graph._normalize`）同时做三件事：
+
+- **去重**：同一 URL（忽略锚点与末尾斜杠）或同一 `ref` 只留一条；两者都没有的条目不合并——没有稳定标识时强行合并会误删不同档案。
+- **保留更强版本**：同一条被多个通道抓到时，留下 `source_kind` 效力更高的那版（自有内容 > 第三方档案 > 实时 > 网友发言）。
+- **限量**：合并后最多 `EVIDENCE_MAX_ITEMS` 条（默认 12，`<=0` 不限制）。补查通道**整体豁免**——它们是用户这个问题才触发的，允许略超上限，不能被核心通道的长列表挤掉。
+
+### real 通道为什么只认向量路
+
+`real` 只保留 `retriever` 含 `vector` 的命中（纯 BM25 命中 = 字面重合，不构成「语料里有答案」），`TOP_K` 默认 1。这条保守策略做过一次 20 条代表性问题（16 条 real 金标 + 4 条同类问题）的对比：严格（k=1 + 向量路）在 16 条金标上 **0 条空召回**；放宽到「k=3 + 含 BM25」只在空召回时补上关键词重合的噪声——问「AP 茶会限定二手现在什么价」捞到「来茶会舞一曲」的视频描述，问「国牌大码现货有哪些推荐」捞到「急收大码」的出物帖，都不是答案。结论：**保留严格策略**，不为空召回放宽；真实语料是他人发言，宁可漏也不把道听途说当事实。
 
 ## 关注项：页面内检查（形态甲）
 
