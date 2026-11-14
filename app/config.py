@@ -63,6 +63,26 @@ class AppSettings(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_model: str = "deepseek-chat"
 
+    # ---------- 模型分级路由 ----------
+    # 按问题复杂度选写作模型：auto（默认，规则优先）/ cheap（强制便宜档）/
+    # strong（强制强档）。后两种是后面做 A/B 对比的开关——同一批问题可以分别
+    # 用两种策略跑，账本里会记下 mode。
+    model_routing_mode: str = "auto"
+    # 便宜档 / 强档的具体模型名。留空时回落 LLM_MODEL（只用一家模型也能跑）。
+    llm_model_cheap: str = ""
+    llm_model_strong: str = ""
+    # 规则判不出来时，是否允许用**便宜档**做一次极小的判断（max_tokens 很小）。
+    # 失败/超时一律按便宜档兜底，不影响回答。
+    model_routing_llm: bool = True
+
+    # ---------- 成本核算 ----------
+    # 每 1K token 的单价，形如：
+    #   {"deepseek-chat": {"prompt_per_1k": 0.002, "completion_per_1k": 0.008}}
+    # 价格随供应商/时段变化，所以放配置而不写死在代码里。没配价格的模型会被
+    # 标成 unpriced，金额只累计能算出来的部分，不会伪造成 0。
+    llm_price_table: dict[str, dict[str, float]] = {}
+    llm_price_currency: str = "CNY"
+
     # 检索只取**最相关的一条**。这里是**单通道**的默认值；多路召回在结果层合并，
     # 每通道各取 top_k，最后统一编号给 writer。
     top_k: int = 1

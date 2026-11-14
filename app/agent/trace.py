@@ -17,7 +17,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from app.config import AppSettings
@@ -87,3 +87,110 @@ def tail(limit: int = 20, app: AppSettings | None = None) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return records
+
+
+# --------------------------------------------------------------------- 成本汇总
+
+
+def _trace_files(path: Path, app: AppSettings) -> list[Path]:
+    """当前文件 + 还在保留的归档。轮转只是换文件，账不能跟着丢。"""
+    files: list[Path] = []
+    for index in range(max(int(app.trace_keep_files or 0), 0) + 1):
+        candidate = path if index == 0 else path.with_name(f"{path.name}.{index}")
+        if candidate.exists():
+            files.append(candidate)
+    return files
+
+
+def _empty_bucket() -> dict:
+    return {
+        "calls": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost": 0.0,
+        "priced": True,
+    }
+
+
+def _accumulate(bucket: dict, item: dict) -> None:
+    for key in ("calls", "prompt_tokens", "completion_tokens"):
+        bucket[key] += int(item.get(key, 0) or 0)
+    amount = item.get("cost")
+    if amount is None:
+        bucket["priced"] = False
+    else:
+        bucket["cost"] += float(amount)
+
+
+def _finalize(bucket: dict) -> dict:
+    bucket["cost"] = round(bucket["cost"], 6) if bucket["priced"] else None
+    return bucket
+
+
+def cost_summary(days: int = 30, app: AppSettings | None = None) -> dict:
+    """按「日期 × 模型」汇总轨迹里的成本账；``days <= 0`` 表示不按时间过滤。
+
+    数据源是每次 run 写进 ``chat_runs.jsonl`` 的 ``cost`` 块（已按模型拆好），
+    所以这里只做分组求和，不重新算价——价格改了也不会把历史账改掉。
+    没配价格的模型在明细里 ``cost`` 是 None，这里同样保持 None，不伪装成 0。
+    """
+    app = app or default_settings
+    path = trace_path(app)
+    cutoff = None
+    if days > 0:
+        cutoff = (datetime.now() - timedelta(days=days - 1)).date()
+
+    rows: dict[tuple[str, str], dict] = {}
+    by_model: dict[str, dict] = {}
+    by_mode: dict[str, dict] = {}
+    totals = _empty_bucket()
+
+    for file in _trace_files(path, app):
+        try:
+            lines = file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            block = record.get("cost")
+            if not isinstance(block, dict):
+                continue
+
+            stamp = str(record.get("ts") or "")[:10]
+            if cutoff is not None:
+                try:
+                    if date.fromisoformat(stamp) < cutoff:
+                        continue
+                except ValueError:
+                    continue
+
+            models = block.get("by_model")
+            if not isinstance(models, dict):
+                continue
+            mode = str(block.get("mode") or "unknown")
+            for model, item in models.items():
+                if not isinstance(item, dict):
+                    continue
+                row = rows.setdefault(
+                    (stamp, model), {**_empty_bucket(), "date": stamp, "model": model}
+                )
+                _accumulate(row, item)
+                _accumulate(by_model.setdefault(model, _empty_bucket()), item)
+                _accumulate(by_mode.setdefault(mode, _empty_bucket()), item)
+                _accumulate(totals, item)
+
+    return {
+        "days": days,
+        "currency": app.llm_price_currency,
+        "rows": [
+            _finalize(row) for _, row in sorted(rows.items(), key=lambda kv: kv[0])
+        ],
+        "by_model": {model: _finalize(bucket) for model, bucket in by_model.items()},
+        "by_mode": {mode: _finalize(bucket) for mode, bucket in by_mode.items()},
+        "totals": _finalize(totals),
+    }

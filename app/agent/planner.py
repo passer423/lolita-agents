@@ -221,18 +221,36 @@ class DeepSeekPlanner:
             timeout=PLANNER_TIMEOUT,
         )
         self._model = app.llm_model.strip()
-        self.usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        self.usage = {
+            "calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            # 每次调用的明细：成本账本按它拆到模型（价格可能因模型而异）。
+            "calls_detail": [],
+        }
 
     @property
     def model(self) -> str:
         return self._model
 
     def _record_usage(self, response) -> None:
-        self.usage["calls"] += 1
+        prompt_tokens = 0
+        completion_tokens = 0
         usage = getattr(response, "usage", None)
         if usage is not None:
-            self.usage["prompt_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
-            self.usage["completion_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
+            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        self.usage["calls"] += 1
+        self.usage["prompt_tokens"] += prompt_tokens
+        self.usage["completion_tokens"] += completion_tokens
+        self.usage["calls_detail"].append(
+            {
+                "role": "planner",
+                "model": self._model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }
+        )
 
     def extract_query(self, question: str, history: list[dict] | None = None) -> str:
         messages: list[dict] = [

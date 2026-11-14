@@ -182,27 +182,52 @@ class DeepSeekWriter:
             timeout=WRITER_TIMEOUT,
         )
         self._model = app.llm_model.strip()
-        self.usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        self.usage = {
+            "calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            # 每次调用的明细：分级路由可能让同一实例先后用不同模型，账本按它拆。
+            "calls_detail": [],
+        }
 
-    def _record(self, usage) -> None:
-        self.usage["calls"] += 1
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def _record(self, usage, model: str | None = None) -> None:
+        prompt_tokens = 0
+        completion_tokens = 0
         if usage is not None:
-            self.usage["prompt_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
-            self.usage["completion_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
+            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        self.usage["calls"] += 1
+        self.usage["prompt_tokens"] += prompt_tokens
+        self.usage["completion_tokens"] += completion_tokens
+        self.usage["calls_detail"].append(
+            {
+                "role": "writer",
+                "model": model or self._model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            }
+        )
 
     def write(
         self,
         question: str,
         evidence: list[dict],
         history: list[dict] | None = None,
+        *,
+        model: str | None = None,
     ) -> str:
+        picked = model or self._model
         response = self._client.chat.completions.create(
-            model=self._model,
+            model=picked,
             messages=build_synth_messages(question, evidence, history),
             temperature=0.2,
             max_tokens=WRITER_MAX_TOKENS,
         )
-        self._record(getattr(response, "usage", None))
+        self._record(getattr(response, "usage", None), picked)
         return (response.choices[0].message.content or "").strip()
 
     def stream(
@@ -210,10 +235,13 @@ class DeepSeekWriter:
         question: str,
         evidence: list[dict],
         history: list[dict] | None = None,
+        *,
+        model: str | None = None,
     ) -> Iterator[str]:
         """逐段产出。**调用方负责拼接**——这里不缓存整段，否则就不是流式了。"""
+        picked = model or self._model
         stream = self._client.chat.completions.create(
-            model=self._model,
+            model=picked,
             messages=build_synth_messages(question, evidence, history),
             temperature=0.2,
             max_tokens=WRITER_MAX_TOKENS,
@@ -223,7 +251,7 @@ class DeepSeekWriter:
         for chunk in stream:
             usage = getattr(chunk, "usage", None)
             if usage is not None:
-                self._record(usage)
+                self._record(usage, picked)
             choices = getattr(chunk, "choices", None) or []
             if not choices:
                 continue

@@ -70,7 +70,7 @@ from typing import Annotated, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
-from app.agent import channels, dress, trace
+from app.agent import channels, cost, dress, routing, trace
 from app.agent.channels import ALL_CHANNELS, ChannelUnavailable, RecallContext
 from app.agent.planner import PlannerOutputError, plan_channels, plan_intents
 from app.agent.writer import sanitize_history
@@ -550,12 +550,16 @@ def build_graph(
     *,
     stream: bool = False,
     progress: _Progress | None = None,
+    route: routing.RouteDecision | None = None,
 ):
     """按 planner / writer / ctx 构造编译好的图。
 
     ``stream=True`` 时 answer / verify 空转，答案交给调用方流式写作。
     ``progress`` 用来接收**通道一返回就记账**的局部结果，供整体超时接管。
+    ``route`` 是模型分级路由的结果：只用来给 writer 指定模型，不影响召回。
     """
+
+    writer_model = route.model if route is not None else None
 
     def _channel_node(name: str):
         def recall_one(state: AgentState) -> dict:
@@ -779,6 +783,7 @@ def build_graph(
                 state["question"],
                 _numbered(evidence),
                 state.get("history"),
+                model=writer_model,
             )
         except Exception as exc:  # noqa: BLE001 - 写作失败不该让整轮白跑
             logger.warning("写作失败，退回原文清单：%s", exc)
@@ -904,6 +909,20 @@ def _merge_usage(planner, writer) -> dict:
     return usage
 
 
+def _cost_block(
+    planner, writer, settings, route: routing.RouteDecision | None
+) -> dict:
+    """这次 run 的成本账：按模型 + 路由策略（mode/tier）标注。"""
+    return cost.usage_cost(
+        planner,
+        writer,
+        settings,
+        extra_calls=route.calls if route is not None else (),
+        mode=route.mode if route is not None else routing.MODE_AUTO,
+        tier=route.tier if route is not None else "",
+    )
+
+
 def _finish(
     question: str,
     state: AgentState,
@@ -913,6 +932,7 @@ def _finish(
     writer,
     history: list[dict] | None,
     duration_ms: int,
+    route: routing.RouteDecision | None = None,
 ) -> dict:
     """把图的结果收尾成完整响应（编号、轨迹）。"""
     evidence = _normalize(
@@ -920,6 +940,7 @@ def _finish(
         state.get("supplementary"),
         limit=ctx.settings.evidence_max_items,
     )
+    cost_block = _cost_block(planner, writer, ctx.settings, route)
     payload = {
         "question": question,
         "answer": state.get("answer", ""),
@@ -930,6 +951,8 @@ def _finish(
         "follow_suggestion": _follow_suggestion(question, state, evidence, ctx),
         "dress": state.get("dress_profile") or None,
         "usage": _merge_usage(planner, writer),
+        "route": route.as_dict() if route is not None else None,
+        "cost": cost_block,
         "duration_ms": duration_ms,
     }
     trace.append(
@@ -941,6 +964,8 @@ def _finish(
             "steps": payload["steps"],
             "evidence": len(evidence),
             "usage": payload["usage"],
+            "route": payload["route"],
+            "cost": cost_block,
             "duration_ms": duration_ms,
             "history_turns": len(history or []),
         },
@@ -969,8 +994,10 @@ def run(
     started = time.perf_counter()
     budget = _deadline_of(ctx)
     deadline_at = time.monotonic() + budget if budget > 0 else None
+    # 路由在召回之前定：规则判不出来时可能有一次极小判断，它也吃整体预算。
+    route = routing.decide(question, ctx.settings)
     progress = _Progress()
-    graph = build_graph(planner, writer, ctx, stream=False, progress=progress)
+    graph = build_graph(planner, writer, ctx, stream=False, progress=progress, route=route)
     state, timed_out = _invoke_with_deadline(
         graph,
         {
@@ -992,7 +1019,7 @@ def run(
     duration_ms = int((time.perf_counter() - started) * 1000)
     return _finish(
         question, state, ctx=ctx, planner=planner, writer=writer,
-        history=history, duration_ms=duration_ms,
+        history=history, duration_ms=duration_ms, route=route,
     )
 
 
@@ -1024,8 +1051,10 @@ def stream(
     started = time.perf_counter()
     budget = _deadline_of(ctx)
     deadline_at = time.monotonic() + budget if budget > 0 else None
+    # 与 run() 同一套路由；轻量判断也吃整体预算。
+    route = routing.decide(question, ctx.settings)
     progress = _Progress(events=True)
-    graph = build_graph(planner, writer, ctx, stream=True, progress=progress)
+    graph = build_graph(planner, writer, ctx, stream=True, progress=progress, route=route)
 
     result: dict = {}
     failure: dict = {}
@@ -1115,6 +1144,7 @@ def stream(
                     question,
                     numbered,
                     sanitize_history(history),
+                    model=route.model,
                 ),
                 deadline_at if deadline_at is not None else float("inf"),
                 stop=stop,
@@ -1161,6 +1191,7 @@ def stream(
         )
 
     duration_ms = int((time.perf_counter() - started) * 1000)
+    cost_block = _cost_block(planner, writer, ctx.settings, route)
     payload = {
         "question": question,
         "answer": text,
@@ -1173,6 +1204,8 @@ def stream(
         "follow_suggestion": _follow_suggestion(question, state, evidence, ctx),
         "dress": state.get("dress_profile") or None,
         "usage": _merge_usage(planner, writer),
+        "route": route.as_dict(),
+        "cost": cost_block,
         "duration_ms": duration_ms,
     }
     trace.append(
@@ -1184,6 +1217,8 @@ def stream(
             "steps": payload["steps"],
             "evidence": len(evidence),
             "usage": payload["usage"],
+            "route": payload["route"],
+            "cost": cost_block,
             "duration_ms": duration_ms,
             "streamed": True,
             "history_turns": len(history or []),
