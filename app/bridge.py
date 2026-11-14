@@ -67,6 +67,25 @@ def _install_upstream(root: Path) -> None:
         sys.path.insert(0, text)
 
 
+def upstream_status(app: AppSettings | None = None) -> dict:
+    """上游仓库路径自检：只查文件，不 import、不建索引。
+
+    启动日志与 ``/api/kb/status`` 共用。路径失效是很常见的事（换了机器、
+    临时目录被清理），但报错长得像代码故障；这里把「配置指错了」单独说清楚。
+    """
+    app = app or default_settings
+    root = Path(app.lolita_rag_root)
+    exists = (root / "src" / "config.py").exists()
+    return {
+        "root": str(root),
+        "exists": exists,
+        "error": "" if exists else (
+            f"找不到上游知识管线：{root}（期望存在 src/config.py）。"
+            "请在 .env 里把 LOLITA_RAG_ROOT 改成固定的 lolita-rag 仓库路径。"
+        ),
+    }
+
+
 def upstream_settings(app: AppSettings | None = None, *, source: str = "own"):
     """构造一份只属于本应用的上游 Settings。
 
@@ -83,19 +102,19 @@ def upstream_settings(app: AppSettings | None = None, *, source: str = "own"):
     from src.config import Settings  # noqa: PLC0415 - 必须先装 sys.path
 
     app.ensure_dirs()
-    common = dict(
+    common = {
         # 关键：不读上游 .env，避免把 WEIBO_COOKIE 带进对外服务的进程
-        _env_file=None,
-        llm_api_key=app.llm_api_key.strip(),
-        llm_base_url=app.llm_base_url.strip(),
-        llm_model=app.llm_model.strip(),
-        top_k=app.top_k,
+        "_env_file": None,
+        "llm_api_key": app.llm_api_key.strip(),
+        "llm_base_url": app.llm_base_url.strip(),
+        "llm_model": app.llm_model.strip(),
+        "top_k": app.top_k,
         # 工具层不进上游的真实查询日志（见模块 docstring 第二条）
-        query_log_enabled=False,
+        "query_log_enabled": False,
         # 锁定 embedding 行为：只用本地缓存，绝不因为联网下载把请求卡住几十秒
-        embedding_backend="auto",
-        embedding_allow_download=False,
-    )
+        "embedding_backend": "auto",
+        "embedding_allow_download": False,
+    }
     if source == "real":
         return Settings(**common)
     return Settings(data_dir=app.kb_index_dir, **common)
@@ -147,21 +166,44 @@ def _ensure_loaded(app: AppSettings | None = None, *, source: str = "own"):
         return _state.bundles[source]
 
 
-def reload_bundle(app: AppSettings | None = None):
-    """知识库重建后调用：丢掉旧索引，下次请求重新装载。"""
+def reload_bundle(app: AppSettings | None = None) -> dict:
+    """知识库重建后调用：丢掉旧索引并立刻重载 ``own``。
+
+    索引没建好时**不抛错**：这个接口是建索引脚本的收尾通知（见
+    ``scripts/build_kb_index.py --notify``），重建失败时调用方需要看到
+    ``ready=false`` 与原因，而不是一个只有状态码的 500。
+
+    返回两个来源的状态；``real`` 只清缓存、等下次查询再装载——它不由本仓
+    的建索引脚本重建，没必要在这里多读一遍 14k 片段。
+    """
     with _state.lock:
         _state.bundles.clear()
         _state.settings.clear()
-    return _ensure_loaded(app)
+        _state.error = ""
+    try:
+        _ensure_loaded(app, source="own")
+    except UpstreamUnavailable as exc:
+        logger.info("重载自有索引失败：%s", exc)
+    return {
+        "sources": {
+            "own": index_status(app, source="own"),
+            "real": index_status(app, source="real"),
+        },
+    }
 
 
 # --------------------------------------------------------------------- 查询
 
 
-def index_status(app: AppSettings | None = None) -> dict:
-    """给前端看的索引状态。索引没建也不抛错——前端要能显示「请先建索引」。"""
+def index_status(app: AppSettings | None = None, *, source: str = "own") -> dict:
+    """给前端看的索引状态。索引没建也不抛错——前端要能显示「请先建索引」。
+
+    ``source`` 与召回通道同名（``own`` / ``real``）：两者是两份独立索引，
+    状态必须分开报，否则「自有知识库建好了」会掩盖「上游真实语料没装」。
+    """
     app = app or default_settings
     info: dict[str, Any] = {
+        "source": source,
         "ready": False,
         "chunks": 0,
         "posts": 0,
@@ -173,7 +215,7 @@ def index_status(app: AppSettings | None = None) -> dict:
     try:
         # 顺序不能反：upstream_settings() 负责把上游装进 sys.path，
         # 先 import src.* 会在「第一次请求」上直接 ModuleNotFoundError（实测踩过）。
-        settings_ = upstream_settings(app, source="own")
+        settings_ = upstream_settings(app, source=source)
 
         from src.pipeline.runtime import read_manifest
 

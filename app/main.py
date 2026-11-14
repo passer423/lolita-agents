@@ -10,13 +10,16 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import __version__, db
+from app import __version__, bridge, db
+from app import auth as access_control
+from app.agent import channels
 from app.config import settings
-from app.routers import chat
+from app.routers import chat, follows, jobs, kb
+from app.services import job_runner
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,11 +34,33 @@ settings.ensure_dirs()
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(application: FastAPI):
     db.init_db(settings.db_path)
     logger.info("数据目录：%s", settings.data_dir)
     logger.info("自有知识库索引：%s", settings.kb_index_dir)
-    yield
+
+    # 启动自检：上游路径失效是最常见的「看起来像代码坏了」，先把话说清楚。
+    upstream = bridge.upstream_status(settings)
+    if upstream["exists"]:
+        logger.info("上游知识管线：%s", upstream["root"])
+    else:
+        logger.warning("%s", upstream["error"])
+    for source in ("own", "real"):
+        info = bridge.index_status(settings, source=source)
+        if info["ready"]:
+            logger.info("索引 %s 就绪：%s 个片段（%s）", source, info["chunks"], info["built_at"])
+        else:
+            logger.warning("索引 %s 未就绪：%s", source, info["error"] or "还没有建立")
+
+    # 后台任务队列：建表、恢复上次未收尾的任务、按需起单线程。
+    # 停机时只置停止标志并终止子进程；来不及收尾的任务留给下次启动标 interrupted。
+    runner = job_runner.get_runner(settings)
+    runner.start()
+    application.state.job_runner = runner
+    try:
+        yield
+    finally:
+        runner.stop()
 
 
 class UTF8JSONResponse(JSONResponse):
@@ -53,15 +78,80 @@ class UTF8JSONResponse(JSONResponse):
 app = FastAPI(
     title="lolita-agents",
     version=__version__,
-    description="Lolita 领域问答助手：多路召回 → 生成回答 → 记忆偏好 → 关注项通知",
+    description="Lolita 领域问答助手：多路召回 → 生成回答 → 关注项通知",
     lifespan=lifespan,
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
     default_response_class=UTF8JSONResponse,
 )
 
+# 可选访问控制：默认 AUTH_MODE=off，行为与以前完全一致；配置错误会在构造期
+# 直接抛错，而不是静默放行或静默拒绝。
+app.add_middleware(access_control.AccessControl, settings=settings)
+
 # 1) API 先注册
 app.include_router(chat.router)
+app.include_router(follows.router)
+app.include_router(kb.router)
+app.include_router(jobs.router)
+app.include_router(access_control.router)
+
+
+@app.get("/api/health", tags=["health"])
+def health() -> dict:
+    """给探针和排查用的汇总：版本 + 两份索引 + 每个召回通道的就绪状态。
+
+    这里**不重新判断**就绪：索引直接取 ``bridge.index_status``，通道直接取
+    ``channels.channel_status``。另写一套判断只会和聊天页显示的状态打架，
+    排查时反而不知道该信哪一个。
+    """
+    return {
+        "version": __version__,
+        "indexes": {
+            "own": bridge.index_status(settings, source="own"),
+            "real": bridge.index_status(settings, source="real"),
+        },
+        "channels": channels.channel_status(settings),
+    }
+
+
+def _asset_version() -> str:
+    """前端资源版本号：chat.js / style.css / sw.js 一改就换 URL。
+
+    同端口曾经跑过 lo-life，它的 Service Worker 对 /chat.js、/style.css 是
+    cache-first；只靠 HTTP 缓存头绕不过去，换 URL 才是最稳的失效方式。
+    sw.js 也参与版本：清理工的 URL 变了，旧 worker 的缓存就拦不住新脚本。
+    """
+    stamps = [
+        path.stat().st_mtime
+        for path in (
+            STATIC_DIR / "chat.js",
+            STATIC_DIR / "style.css",
+            STATIC_DIR / "sw.js",
+        )
+        if path.exists()
+    ]
+    return str(int(max(stamps))) if stamps else __version__
+
+
+@app.get("/", include_in_schema=False)
+def index() -> HTMLResponse:
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    version = _asset_version()
+    html = html.replace('src="/chat.js"', f'src="/chat.js?v={version}"')
+    html = html.replace('href="/style.css"', f'href="/style.css?v={version}"')
+    html = html.replace("/sw.js?v=__ASSET_VERSION__", f"/sw.js?v={version}")
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+@app.middleware("http")
+async def no_store_ui(request: Request, call_next):
+    """前端外壳不缓存：本地服务改完就应该立刻生效，别让人靠 Ctrl+F5。"""
+    response = await call_next(request)
+    if request.url.path in ("/chat.js", "/style.css", "/sw.js"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 
 # 2) 静态资源最后挂。
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="app")
