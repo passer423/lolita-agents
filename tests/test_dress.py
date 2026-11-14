@@ -206,6 +206,42 @@ def test_care_question_does_not_trigger(workdir):
     assert dress.resolve_dress("四时花怎么洗", RecallContext(settings=app)) is None
 
 
+@pytest.mark.parametrize("question", [
+    "柄图是什么意思",
+    "裙撑长度怎么选",
+    "第一次去茶会要注意什么",
+    "怎么判断山正",
+    "痛lo是什么意思",
+    "痛 lo 是什么意思",
+    "腰围95 胸围105 收现货大码lo裙",
+])
+def test_concept_question_does_not_trigger_dress_lookup(workdir, question):
+    """概念/洗护/尺码题没有裙子指代，不该被送去认裙子（更不该因此反问）。"""
+    app = make_app(workdir)
+    assert dress.resolve_dress(question, RecallContext(settings=app)) is None
+
+
+def test_identity_question_goes_to_model(workdir):
+    """「夜想曲是哪个系列的」：本地不认识，但仍值得让模型认一次，认不出再反问。"""
+    app = make_app(workdir)
+    query = dress.resolve_dress("夜想曲是哪个系列的", RecallContext(settings=app))
+
+    assert query is not None
+    assert query.source == "pending_model"
+
+
+@pytest.mark.parametrize("question, expected", [
+    ("夜想曲是哪个系列的", True),
+    ("这条裙子是哪个型号", True),
+    ("这条是哪款", True),
+    ("柄图是什么意思", False),
+    ("痛lo是什么", False),
+    ("裙撑长度怎么选", False),
+])
+def test_identity_intent(question, expected):
+    assert dress.identity_intent(question) is expected
+
+
 def test_generic_dress_question_goes_to_model(workdir):
     """没有品牌/系列实体时不再直接放弃：交给模型兜底一次。"""
     app = make_app(workdir)

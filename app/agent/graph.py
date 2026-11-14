@@ -662,7 +662,6 @@ def build_graph(
         question = state["question"]
         intent = plan_channels(question)
         dress_query = dict(state.get("dress_query") or {})
-        was_pending = dress_query.get("source") == "pending_model"
         search_traces: list[dict] = []
         if dress_query and not dress_query.get("series_en"):
             # 先用「拆词 → Lolibrary / 网页反查」做确定性检索，失败再让模型猜。
@@ -678,14 +677,14 @@ def build_graph(
             hint = _extract_dress_hint(planner, question, state.get("history"))
             if hint:
                 dress_query = dress.merge_model_hint(dress_query, hint, ctx)
-        # 已经进入模型兜底、但最终没拿到可核实的系列：反问用户，
-        # 别让普通通道拿另一条裙子顶替（哪怕模型只认出了品牌）。
+        # 反问只在「问的就是这条裙子 / 这个系列叫什么」时触发：这种问题的答案
+        # 本身就是身份，认不出来就没有证据可推。其余问题（概念、术语、洗护、
+        # 尺码、交易流程）即使认不出裙子也照常召回+写作——裙子档案不准最多是
+        # 卡片不准，不该连答案都不给。
         dress_unresolved = bool(
-            not dress_query.get("series_en")
-            and (
-                dress_query.get("source") == "pending_model"
-                or (was_pending and dress_query.get("source") == "model")
-            )
+            dress_query
+            and dress.identity_intent(question)
+            and not dress_query.get("series_en")
         )
         if dress_unresolved:
             dress_query = {}

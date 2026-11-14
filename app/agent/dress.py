@@ -522,6 +522,16 @@ _STRIP_MARKERS = tuple(
     )
 )
 
+# 这些词说明用户在提问或描述自己的情况，不是在报一个系列名。命中任意一个就不当
+# 「裸名字」处理：否则「柄图是什么意思」「第一次去茶会要注意什么」「腰围95…」
+# 都会被当成未知裙子送去模型兜底，最后短路成反问。
+_NOT_NAME_MARKERS = (
+    "怎么", "如何", "为什么", "什么", "哪个", "哪些", "哪种", "哪款", "哪条",
+    "意思", "注意", "判断", "建议", "区别", "差在哪", "对比", "参与", "要求",
+    "第一次", "模特", "胸围", "腰围", "适合", "推荐", "显瘦", "要不要",
+    "是不是", "有没有", "可以", "需要", "应该", "值不值", "好不好", "上身效果",
+)
+
 
 def _strip_markers(text: str) -> str:
     for marker in _STRIP_MARKERS:
@@ -545,6 +555,8 @@ def _looks_like_bare_name(text: str) -> bool:
         return False
     lowered = stripped.lower()
     if any(marker in lowered for marker in (*FIELD_MARKERS, *CARE_MARKERS, *_DRESS_MARKERS)):
+        return False
+    if any(marker in lowered for marker in _NOT_NAME_MARKERS):
         return False
     return _name_chars(stripped) >= 3
 
@@ -796,17 +808,36 @@ def _looks_like_dress_question(text: str) -> bool:
     条件：有信息字段意图（价格/发售/配色/品牌…），且问题里还有裙子名词，
     或去掉意图词/泛化问法后仍剩一个 ≥3 字的中文片段（像系列名）。
     「预约价怎么算」会被剥空，不会白调模型；「星月夜之梦价格」会保留下来。
+    带「怎么/什么/判断/注意」等提问词的（洗护、尺码、常识题）不算裙子名。
     """
     lowered = (text or "").lower()
     if not any(marker in lowered for marker in FIELD_MARKERS):
         return False
     if any(marker in lowered for marker in CARE_MARKERS):
         return False
+    if any(marker in lowered for marker in _NOT_NAME_MARKERS):
+        return False
     if any(marker in lowered for marker in _DRESS_MARKERS):
         return True
     stripped = _strip_markers(lowered)
     cjk_left = "".join(_CJK.findall(stripped))
     return len(cjk_left) >= 3
+
+
+_IDENTITY_RE = re.compile(
+    r"是\s*(?:哪|什么)\s*(?:一)?\s*(?:个|种|款|条)?\s*"
+    r"(?:系列|型号|裙子|款|条|版|品牌|牌子)"
+    r"|叫什么(?:名字)?|怎么称呼"
+)
+
+
+def identity_intent(question: str) -> bool:
+    """问题是否在问「这是哪条裙子 / 哪个系列 / 哪个型号」。
+
+    只有这种问法的答案本身就是身份，认不出来就无从作答。概念、洗护、尺码、
+    交易流程即使认不出裙子，也能靠召回证据照常回答，不该被反问拦住。
+    """
+    return bool(_IDENTITY_RE.search((question or "").lower()))
 
 
 def resolve_dress(
@@ -872,7 +903,13 @@ def resolve_dress(
     is_specific = bool(series_en or product_number)
     has_entity = bool(final_brand or series_en or product_number or record)
     if not has_entity:
-        if _looks_like_dress_question(text) or _looks_like_bare_name(text):
+        # 问「这是哪条 / 哪个系列」时即使本地没线索也要给模型一次机会：认出系列
+        # 才有答案，认不出就该反问（见 graph.route 的 dress_unresolved）。
+        if (
+            identity_intent(text)
+            or _looks_like_dress_question(text)
+            or _looks_like_bare_name(text)
+        ):
             pending = DressQuery(
                 question=text,
                 source="pending_model",
@@ -890,7 +927,12 @@ def resolve_dress(
     if not is_specific and not field_intent:
         # 只说了品牌 + 一个像系列名的片段（「Baby 秋日私语」）：交给模型认系列；
         # 「Baby 的裙子」「AP 有什么经典款」剥完品牌和泛化词就空了，不会误触发。
-        if brand is not None and _brand_name_chars(text, brand) >= 3:
+        # 带提问词的（「AP 和 Baby 的水洗标是什么意思」）同样不算系列名。
+        if (
+            brand is not None
+            and _brand_name_chars(text, brand) >= 3
+            and not any(marker in lowered for marker in _NOT_NAME_MARKERS)
+        ):
             pending = DressQuery(
                 question=text,
                 brand=brand.name,

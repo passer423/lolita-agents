@@ -368,8 +368,8 @@ def test_pending_dress_question_uses_model_and_verifies(monkeypatch, workdir):
     assert any(item["cn"] == "星月夜之梦" for item in learned)
 
 
-def test_pending_dress_question_without_model_result_asks(monkeypatch):
-    """模型也认不出时反问用户，别让普通通道拿另一条裙子顶替。"""
+def test_identity_question_without_model_result_asks(monkeypatch):
+    """问「这是哪个系列」且模型也认不出时反问：答案本身就是身份，别无证据可推。"""
     monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
     monkeypatch.setattr(channels, "recall", fake_recall({
         "own": evidence("own"), "real": evidence("real"), "lolibrary": evidence("lolibrary"),
@@ -378,7 +378,7 @@ def test_pending_dress_question_without_model_result_asks(monkeypatch):
     planner = ScriptedPlanner([], dress_script=[{"confidence": "low"}])
 
     result = graph.run(
-        "星月夜之梦价格",
+        "夜想曲是哪个系列的",
         ctx=ctx(),
         planner=planner,
         writer=StubWriter(),
@@ -392,6 +392,52 @@ def test_pending_dress_question_without_model_result_asks(monkeypatch):
     assert "补充品牌" in result["answer"]
     assert result["stopped_reason"] == "dress_unresolved"
     assert not any(step["kind"] == "dress_profile" for step in result["steps"])
+
+
+def test_unknown_dress_price_question_answers_instead_of_asking(monkeypatch):
+    """认不出裙子但问题本身能答（询价）时照常写作，不再反问。"""
+    monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+    monkeypatch.setattr(channels, "recall", fake_recall({
+        "own": evidence("own"), "real": evidence("real"), "lolibrary": evidence("lolibrary"),
+        "xhs": evidence("xhs", url="https://xhs/1"), "web": evidence("web", url="https://web/1"),
+    }))
+    planner = ScriptedPlanner([], dress_script=[{"confidence": "low"}])
+
+    result = graph.run(
+        "星月夜之梦价格",
+        ctx=ctx(),
+        planner=planner,
+        writer=StubWriter(),
+    )
+
+    route = next(step for step in result["steps"] if step["kind"] == "route")
+    assert route.get("dress_unresolved") is not True
+    assert result["stopped_reason"] != "dress_unresolved"
+    assert result["answer"] == "[1] 装洗衣袋。"
+
+
+@pytest.mark.parametrize("question", [
+    "柄图是什么意思",
+    "lo裙怎么洗",
+    "痛lo是什么",
+    "裙撑长度怎么选",
+    "腰围95 胸围105 收现货大码lo裙",
+])
+def test_concept_questions_reach_writer(monkeypatch, question):
+    """没有品牌/系列指代的概念、洗护、尺码题必须产出答案，不能被反问短路。"""
+    monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+    monkeypatch.setattr(channels, "recall", fake_recall({
+        "own": evidence("own"), "real": evidence("real"), "lolibrary": evidence("lolibrary"),
+    }))
+    planner = ScriptedPlanner([])
+
+    result = graph.run(question, ctx=ctx(), planner=planner, writer=StubWriter())
+
+    assert result["stopped_reason"] != "dress_unresolved"
+    assert result["answer"]
+    assert result["dress"] is None
+    # 不认裙子就不该白调一次模型或触发在线反查。
+    assert planner.dress_calls == 0
 
 
 def test_glossary_search_resolves_before_model(monkeypatch, workdir):
