@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import __version__, db
 from app.config import settings
-from app.routers import chat, follows
+from app.routers import chat, follows, kb
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,6 +63,7 @@ app = FastAPI(
 # 1) API 先注册
 app.include_router(chat.router)
 app.include_router(follows.router)
+app.include_router(kb.router)
 
 
 def _asset_version() -> str:

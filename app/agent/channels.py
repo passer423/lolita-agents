@@ -477,6 +477,89 @@ def _recall_web(question: str, ctx: RecallContext, query: str = "") -> list[dict
     return _search_evidence("web", results)
 
 
+# --------------------------------------------------------------------- 状态
+
+
+_SEARCH_PROVIDERS = ("bocha", "zhipu")
+
+
+def _search_status(app: AppSettings) -> dict[str, Any]:
+    """网页搜索的就绪状态（weibo / web 共用同一套 key 与 provider）。"""
+    if not app.search_enabled:
+        return {
+            "enabled": False,
+            "ready": False,
+            "reason": "未启用（SEARCH_ENABLED=false）",
+        }
+    if not app.search_api_key.strip():
+        return {"enabled": True, "ready": False, "reason": "缺少 SEARCH_API_KEY"}
+    provider = (app.search_provider or "bocha").strip().lower() or "bocha"
+    if provider not in _SEARCH_PROVIDERS:
+        return {
+            "enabled": True,
+            "ready": False,
+            "reason": f"不支持的 SEARCH_PROVIDER：{provider}（只支持 bocha / zhipu）",
+        }
+    return {"enabled": True, "ready": True, "reason": ""}
+
+
+def _xhs_status(app: AppSettings) -> dict[str, Any]:
+    from app.services import xhs_search
+
+    ready, reason = xhs_search.readiness(app)
+    return {"enabled": app.xhs_enabled, "ready": ready, "reason": reason}
+
+
+def channel_status(app: AppSettings | None = None) -> dict[str, dict[str, Any]]:
+    """每个通道的 ``enabled / ready / reason``。
+
+    ``enabled`` 是「配置里打开了」，``ready`` 是「现在真的能召回」——两者分开
+    报，界面才能把「没开」和「开了但没登录」区分开，而不是笼统地显示不可用。
+    核心通道（own / real / lolibrary）没有开关，恒为 enabled；没就绪时给的是
+    可执行的原因（建索引 / 导档案）。
+    """
+    app = app or default_settings
+    result: dict[str, dict[str, Any]] = {}
+
+    for source in ("own", "real"):
+        info = bridge.index_status(app, source=source)
+        ready = bool(info.get("ready"))
+        result[source] = {
+            "enabled": True,
+            "ready": ready,
+            "reason": "" if ready else (
+                info.get("error") or "索引还没建立：先运行 python scripts/build_kb_index.py"
+            ),
+        }
+
+    records = load_catalog(RecallContext(settings=app))
+    result["lolibrary"] = {
+        "enabled": True,
+        "ready": bool(records),
+        "reason": "" if records else "档案为空：先运行 python scripts/import_lolibrary.py",
+    }
+
+    result["xhs"] = _xhs_status(app)
+    search = _search_status(app)
+    result["weibo"] = dict(search)
+    result["web"] = dict(search)
+    return result
+
+
+def follow_source(app: AppSettings | None = None) -> str:
+    """关注建议可用的实时来源：优先网页搜索，其次小红书；都不可用返回空。
+
+    关注项本身就是「持续查某个关键词」；来源不可用时给按钮只会让用户点了
+    也收不到更新，所以这里直接不给建议。
+    """
+    app = app or default_settings
+    if _search_status(app)["ready"]:
+        return "web"
+    if _xhs_status(app)["ready"]:
+        return "xhs"
+    return ""
+
+
 _HANDLERS = {
     "own": _recall_own,
     "real": _recall_real,

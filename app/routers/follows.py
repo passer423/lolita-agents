@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app import db
+from app.agent import channels
 from app.config import settings
 from app.services import follow_watch
 
@@ -36,14 +37,6 @@ class FollowIn(BaseModel):
     url: str = Field("", max_length=500)
 
 
-def _source_enabled(source: str) -> bool:
-    if source == "xhs":
-        return settings.xhs_enabled
-    if source in ("weibo", "web"):
-        return settings.search_enabled
-    return True
-
-
 def _snapshot() -> dict:
     follows = [
         {
@@ -55,16 +48,15 @@ def _snapshot() -> dict:
         }
         for follow in db.list_follows(settings.db_path)
     ]
+    # 与 /api/chat/status 同源：关注项能用的来源必须和召回通道的就绪判断一致，
+    # 否则会出现「聊天里说小红书不可用，关注面板却允许选」。
+    status = channels.channel_status(settings)
     return {
         "follows": follows,
         "events": db.list_follow_events(settings.db_path, limit=20),
         "unread": db.unread_follow_events(settings.db_path),
         "sources": [
-            {
-                "name": name,
-                "label": label,
-                "enabled": _source_enabled(name),
-            }
+            {"name": name, "label": label, **status[name]}
             for name, label in SOURCE_LABELS.items()
         ],
     }

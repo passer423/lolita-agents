@@ -72,7 +72,39 @@ def test_status_reports_channels_without_key(client):
     assert "LLM_API_KEY" in payload["hint"]
     assert payload["channels"]["core"] == ["own", "real", "lolibrary"]
     assert payload["channels"]["supplementary"] == ["xhs", "weibo", "web"]
-    assert payload["channels"]["enabled"]["xhs"] is False
+    status = payload["channels"]["status"]
+    assert set(status) == {"own", "real", "lolibrary", "xhs", "weibo", "web"}
+    # 「没开」和「开了但没就绪」必须能区分：测试环境里 xhs 是关的，
+    # 而 own 是「开着但临时目录没有索引」。
+    assert status["xhs"] == {
+        "enabled": False,
+        "ready": False,
+        "reason": "未启用（XHS_ENABLED=false）",
+    }
+    assert status["own"]["enabled"] is True
+    assert status["own"]["ready"] is False
+    assert "build_kb_index" in status["own"]["reason"]
+    assert status["weibo"]["enabled"] is False
+
+
+# --------------------------------------------------------------------- 知识库索引
+
+
+def test_kb_status_reports_both_indexes_even_when_missing(client):
+    response = client.get("/api/kb/status")
+    assert response.status_code == 200
+    sources = response.json()["sources"]
+    assert set(sources) == {"own", "real"}
+    assert sources["own"]["source"] == "own"
+    assert sources["own"]["ready"] is False
+
+
+def test_kb_reload_is_200_when_own_index_missing(client):
+    """建索引脚本的 --notify 打的就是这个接口；索引没建也必须 200 + ready=false。"""
+    response = client.post("/api/kb/reload")
+    assert response.status_code == 200
+    sources = response.json()["sources"]
+    assert sources["own"]["ready"] is False
 
 
 def test_chat_without_key_is_503(client):

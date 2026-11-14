@@ -50,28 +50,39 @@ def _provider(app: AppSettings) -> str:
     return value
 
 
-def _playwright_available(app: AppSettings) -> bool:
-    """Playwright 方案：脚本存在 + playwright 可导入 + 已登录标记。"""
+def _playwright_readiness(app: AppSettings) -> tuple[bool, str]:
+    """Playwright 方案的就绪原因：脚本 / 依赖 / 登录态三者缺一不可。"""
     if not script_path().exists():
-        return False
+        return False, f"找不到搜索脚本：{script_path()}"
     if importlib.util.find_spec("playwright") is None:
-        return False
-    return (app.xhs_profile_dir / ".logged_in").exists()
+        return False, "未安装 playwright（pip install playwright 后再装浏览器）"
+    if not (app.xhs_profile_dir / ".logged_in").exists():
+        return False, "未登录（先运行 python scripts/xhs_search.py --login 扫码）"
+    return True, ""
+
+
+def readiness(app: AppSettings) -> tuple[bool, str]:
+    """是否可搜，并给出具体原因。
+
+    状态接口与 ``available()`` 共用这一份判断，避免「界面说可用、召回时说
+    未登录」这种两边各写一遍导致的漂移。
+    """
+    if not app.xhs_enabled:
+        return False, "未启用（XHS_ENABLED=false）"
+    try:
+        provider = _provider(app)
+    except XhsUnavailable as exc:
+        return False, str(exc)
+    if provider == "spider_xhs":
+        from app.services import xhs_spider
+
+        return xhs_spider.readiness(app)
+    return _playwright_readiness(app)
 
 
 def available(app: AppSettings) -> bool:
     """只有“启用 + 对应 provider 就绪”才认为能搜。"""
-    if not app.xhs_enabled:
-        return False
-    try:
-        provider = _provider(app)
-    except XhsUnavailable:
-        return False
-    if provider == "spider_xhs":
-        from app.services import xhs_spider
-
-        return xhs_spider.available(app)
-    return _playwright_available(app)
+    return readiness(app)[0]
 
 
 def _cache_path(app: AppSettings, query: str) -> Path:

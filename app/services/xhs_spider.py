@@ -52,18 +52,28 @@ def _ensure_node_on_path() -> None:
             return
 
 
+def readiness(app: AppSettings) -> tuple[bool, str]:
+    """Spider_XHS 是否就绪，并给出不可用的具体原因（给状态接口用）。
+
+    只判本 provider 的依赖；``xhs_enabled`` 由 ``xhs_search.readiness`` 统一判。
+    """
+    if not str(app.xhs_cookie).strip():
+        return False, "缺少 XHS_COOKIE（Spider_XHS 需要登录态）"
+    if not (_spider_root(app) / "apis").is_dir():
+        return False, f"找不到 Spider_XHS 目录：{_spider_root(app)}（检查 XHS_SPIDER_ROOT）"
+    _ensure_node_on_path()
+    if shutil.which("node") is None:
+        return False, "找不到 Node.js（Spider_XHS 的签名需要它）"
+    return True, ""
+
+
 def available(app: AppSettings) -> bool:
     """Spider_XHS 是否就绪（``xhs_enabled`` 由 xhs_search.available 统一判）。
 
     Node 是硬依赖：签名在 Spider_XHS 里靠 Node 跑 JS，缺了必然失败，
     这里先判掉，让状态接口如实显示「不可用」而不是等到召回时才报错。
     """
-    if not str(app.xhs_cookie).strip():
-        return False
-    if not (_spider_root(app) / "apis").is_dir():
-        return False
-    _ensure_node_on_path()
-    return shutil.which("node") is not None
+    return readiness(app)[0]
 
 
 def _load_api(app: AppSettings):

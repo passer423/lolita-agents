@@ -786,9 +786,11 @@ def _follow_suggestion(
     subject = _follow_subject(state.get("query") or question, question)
     if not subject:
         return None
-    source = "web"
-    if not ctx.settings.search_enabled and ctx.settings.xhs_enabled:
-        source = "xhs"
+    # 来源必须是**现在就绪**的实时通道：默认硬写 web 时，即使搜索没启用也会
+    # 弹「持续关注」，用户点了也永远收不到更新。
+    source = channels.follow_source(ctx.settings)
+    if not source:
+        return None
     return {
         "subject": subject,
         "source": source,

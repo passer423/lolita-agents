@@ -51,6 +51,18 @@ def test_follows_crud(client):
     assert client.delete(f"/api/follows/{follow['id']}").status_code == 404
 
 
+def test_follows_sources_report_readiness(client):
+    """关注面板的来源状态必须和召回通道同源：区分「没开」与「开了没就绪」。"""
+    sources = {
+        item["name"]: item for item in client.get("/api/follows").json()["sources"]
+    }
+    assert set(sources) == {"own", "real", "lolibrary", "xhs", "weibo", "web"}
+    assert sources["web"]["enabled"] is False
+    assert sources["web"]["ready"] is False
+    assert "SEARCH_ENABLED" in sources["web"]["reason"]
+    assert sources["own"]["enabled"] is True
+
+
 def test_check_baseline_then_update_then_read(client, monkeypatch):
     state = {"items": [_evidence("https://a/1", "旧款")]}
     monkeypatch.setattr(channels, "recall", lambda *_a, **_k: state["items"])

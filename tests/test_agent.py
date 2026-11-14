@@ -769,8 +769,11 @@ def _suggestion(question, text, query=""):
     )
 
 
-def test_follow_suggestion_only_for_unreleased_queries():
+def test_follow_suggestion_only_for_unreleased_queries(monkeypatch):
     """只有「预约 / 未发售」类问题才提议持续关注；普通问题不提。"""
+    # 建议里的来源必须是就绪通道；测试默认把搜索关掉了，这里显式打开。
+    monkeypatch.setattr(settings, "search_enabled", True)
+    monkeypatch.setattr(settings, "search_api_key", "test-key")
     suggested = _suggestion(
         "Baby 缎带与齿轮 预约价多少",
         "页面显示 9 月发售，现在可预约",
@@ -787,12 +790,19 @@ def test_follow_suggestion_only_for_unreleased_queries():
     assert _suggestion("蕾丝怎么洗", "预约中") is None
 
 
+def test_follow_suggestion_skipped_when_no_channel_ready():
+    """实时通道都不可用时不给建议：点了也永远收不到更新。"""
+    assert _suggestion("Baby 缎带与齿轮 预约价多少", "9 月发售，现在可预约") is None
+
+
 def test_follow_suggestion_requires_evidence():
     assert graph._follow_suggestion("预约价多少", {"query": "四时花"}, [], ctx()) is None
 
 
 def test_run_returns_follow_suggestion(monkeypatch):
     monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+    monkeypatch.setattr(settings, "search_enabled", True)
+    monkeypatch.setattr(settings, "search_api_key", "test-key")
     monkeypatch.setattr(
         channels, "recall",
         fake_recall({

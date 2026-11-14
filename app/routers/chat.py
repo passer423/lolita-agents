@@ -76,11 +76,9 @@ def chat_status() -> dict:
         "channels": {
             "core": list(channels.CORE_CHANNELS),
             "supplementary": list(channels.SUPPLEMENTARY_CHANNELS),
-            "enabled": {
-                "xhs": settings.xhs_enabled,
-                "weibo": settings.search_enabled,
-                "web": settings.search_enabled,
-            },
+            # 每通道分开报 enabled（配置开了）与 ready（现在真能召回），
+            # 否则「没填 key」「没登录」都会被压成同一句「不可用」。
+            "status": channels.channel_status(settings),
         },
         "stream": True,
     }
