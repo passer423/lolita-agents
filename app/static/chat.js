@@ -248,21 +248,24 @@
     }
 
     if (message.evidence && message.evidence.length) {
-      const evidence = document.createElement('div');
+      // 默认收起：回答是主体，参考资料要看再展开；点 [n] 会自动展开并定位。
+      const evidence = document.createElement('details');
       evidence.className = 'evidence';
-      evidence.innerHTML = '<div class="ev-head">参考来源</div>' + message.evidence.map((item) =>
-        '<div class="ev" data-n="' + item.n + '"><span class="ev-n">[' + item.n + ']</span>' +
-        '<span class="ev-title">' + esc(CHANNEL_LABELS[item.channel] || item.channel) + ' · ' +
-        esc(item.title) + '</span>' +
-        (item.url ? '<div class="ev-link">' + esc(item.url) + '</div>' : '') +
-        '<div class="ev-text">' + esc(item.text) + '</div></div>').join('');
+      evidence.innerHTML = '<summary>参考来源（' + message.evidence.length + '）</summary>' +
+        message.evidence.map((item) =>
+          '<div class="ev" data-n="' + item.n + '"><span class="ev-n">[' + item.n + ']</span>' +
+          '<span class="ev-title">' + esc(CHANNEL_LABELS[item.channel] || item.channel) + ' · ' +
+          esc(item.title) + '</span>' +
+          (item.url ? '<div class="ev-link">' + esc(item.url) + '</div>' : '') +
+          '<div class="ev-text">' + esc(item.text) + '</div></div>').join('');
       wrap.appendChild(evidence);
 
-      // 点回答里的 [n] 跳到对应来源
+      // 点回答里的 [n] 跳到对应来源（先展开，否则定位不到）
       wrap.querySelectorAll('.cite[data-n]').forEach((node) => {
         node.addEventListener('click', () => {
           const target = wrap.querySelector('.ev[data-n="' + node.dataset.n + '"]');
           if (!target) return;
+          evidence.open = true;
           target.scrollIntoView({ behavior: 'smooth', block: 'center' });
           target.classList.add('flash');
           setTimeout(() => target.classList.remove('flash'), 1200);

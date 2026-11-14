@@ -479,7 +479,12 @@ ul.plain li { margin-bottom: 2px; }
 .step-sum { display: block; color: var(--muted); opacity: .85; }
 
 .evidence { display: flex; flex-direction: column; gap: 6px; }
-.ev-head { font-size: 11px; color: var(--muted); letter-spacing: .04em; margin-bottom: 1px; }
+.evidence summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: .04em;
+}
 .ev { font-size: 11.5px; color: var(--muted); line-height: 1.55; scroll-margin-top: 24px; }
 .ev-n { color: var(--accent); font-weight: 600; margin-right: 4px; }
 .ev-title { font-weight: 600; }
