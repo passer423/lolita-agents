@@ -16,6 +16,7 @@ import logging
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 from app.config import AppSettings
@@ -122,8 +123,8 @@ def _fill_detail(api, item: dict) -> None:
     item["content"] = content or item["content"]
 
 
-def fetch_notes(query: str, app: AppSettings, limit: int) -> list[dict]:
-    """调 Spider_XHS 搜索，返回 notes 结构；不可用时抛 XhsUnavailable。"""
+def _fetch_notes(query: str, app: AppSettings, limit: int) -> list[dict]:
+    """真正调 Spider_XHS：一次搜索 + 前几条详情。"""
     XHS_Apis, XHSPcAuth = _load_api(app)
     try:
         auth = XHSPcAuth.from_cookie(str(app.xhs_cookie).strip())
@@ -146,3 +147,40 @@ def fetch_notes(query: str, app: AppSettings, limit: int) -> list[dict]:
             _fill_detail(api, item)
         results.append(item)
     return results
+
+
+def fetch_notes(
+    query: str,
+    app: AppSettings,
+    limit: int,
+    *,
+    timeout: float | None = None,
+) -> list[dict]:
+    """调 Spider_XHS 搜索，返回 notes 结构；不可用或超时抛 XhsUnavailable。
+
+    Spider_XHS 的 requests 用的是它自己的 ``REQUEST_TIMEOUT``，不认本应用的
+    ``XHS_TIMEOUT``；而一次召回是「搜索 + 最多 3 次详情」，串起来最坏能到
+    一分钟。所以在这一层兜总预算：超时丢结果，和 Playwright 分支行为一致。
+    """
+    seconds = float(timeout or 0)
+    if seconds <= 0:
+        return _fetch_notes(query, app, limit)
+
+    box: dict[str, object] = {}
+
+    def worker() -> None:
+        try:
+            box["value"] = _fetch_notes(query, app, limit)
+        except Exception as exc:  # noqa: BLE001 - 原样带回主线程
+            box["error"] = exc
+
+    thread = threading.Thread(target=worker, name="xhs-spider", daemon=True)
+    thread.start()
+    thread.join(seconds)
+    if thread.is_alive():
+        raise XhsUnavailable(f"小红书搜索超时（{seconds:g}s）")
+    error = box.get("error")
+    if isinstance(error, Exception):
+        raise error
+    value = box.get("value")
+    return value if isinstance(value, list) else []

@@ -75,6 +75,9 @@ class AppSettings(BaseSettings):
     # ---------- 召回通道：小红书 ----------
     xhs_enabled: bool = False
     xhs_timeout: float = 45.0
+    # 单次小红书召回最多取几条；硬上限 10 在 xhs_search 里。关注扫描与实时
+    # 交易类问题需要的覆盖面不同，所以做成配置而不是在通道里写死。
+    xhs_max_results: int = 3
     # 采集 provider：playwright（浏览器自动化，默认）| spider_xhs（逆向签名，免浏览器）。
     xhs_provider: str = "playwright"
     # Spider_XHS 外部仓库路径（平级目录，不进本仓 git）。

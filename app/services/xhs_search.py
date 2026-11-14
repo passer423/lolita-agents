@@ -85,8 +85,14 @@ def available(app: AppSettings) -> bool:
     return readiness(app)[0]
 
 
-def _cache_path(app: AppSettings, query: str) -> Path:
-    digest = hashlib.sha1(query.encode("utf-8")).hexdigest()[:16]
+def _cache_path(app: AppSettings, query: str, *, provider: str, limit: int) -> Path:
+    """缓存键要带 provider 与 limit。
+
+    只按 query 哈希时，换 provider 会继续返回旧 provider 抓的结果，调大条数
+    也永远只见旧的那几条——看起来像「抓不到新笔记」，其实是缓存命中。
+    """
+    raw = f"{provider}|{limit}|{query}"
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
     return app.xhs_cache_dir / f"{digest}.json"
 
 
@@ -210,18 +216,17 @@ def search(
     if not available(app):
         raise XhsUnavailable("小红书未启用或未登录")
 
-    cache = _cache_path(app, query)
+    limit = max(1, min(10, max_results))
+    timeout_seconds = float(timeout or app.xhs_timeout)
+    cache = _cache_path(app, query, provider=provider, limit=limit)
     cached = _read_cache(cache)
     if cached is not None:
         return _notes_to_results(cached)
 
-    limit = max(1, min(10, max_results))
-    timeout_seconds = float(timeout or app.xhs_timeout)
-
     if provider == "spider_xhs":
         from app.services import xhs_spider
 
-        notes = xhs_spider.fetch_notes(query, app, limit)
+        notes = xhs_spider.fetch_notes(query, app, limit, timeout=timeout_seconds)
     else:
         notes = _playwright_fetch_notes(query, app, limit, timeout_seconds)
 

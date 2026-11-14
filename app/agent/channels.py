@@ -347,7 +347,11 @@ def _search_evidence(channel: str, results: list) -> list[dict]:
 def _recall_xhs(question: str, ctx: RecallContext, query: str = "") -> list[dict]:
     from app.services import xhs_search
 
-    results = xhs_search.search(query or question, ctx.settings, max_results=3)
+    results = xhs_search.search(
+        query or question,
+        ctx.settings,
+        max_results=ctx.settings.xhs_max_results,
+    )
     return _search_evidence("xhs", results)
 
 
