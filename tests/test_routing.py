@@ -10,7 +10,7 @@ from app.agent import channels, graph, routing
 from app.agent.channels import RecallContext
 from app.config import settings
 
-# 规则判不出来：无补查、无综合词、长度超过阈值。
+# 规则判不出来：无补查、无洗护、无具体条目、长度超过阈值。
 AMBIGUOUS = "我印象里好像见过一条很特别的裙子但是完全想不起来它叫什么名字了"
 
 
@@ -92,31 +92,53 @@ def one_evidence(name, question, ctx, *, query=""):
 
 
 @pytest.mark.parametrize(
-    "question, expected_rule",
+    "question, expected_rule, expected_tier",
     [
-        ("这条裙子多少钱", "multi_channel"),          # 价格 → xhs + web
-        ("有实拍测评吗", "multi_channel"),            # 社交 → xhs + weibo
-        ("最近有什么新款", "single_channel"),          # 上新 → 只走 web
-        ("蕾丝怎么洗", "simple_qa"),
+        ("这条裙子多少钱", "channel_recall", routing.TIER_CHEAP),   # 价格 → xhs + web
+        ("有实拍测评吗", "channel_recall", routing.TIER_CHEAP),     # 社交 → xhs + weibo
+        ("最近有什么新款", "channel_recall", routing.TIER_CHEAP),   # 上新 → 只走 web
+        ("蕾丝怎么洗", "care_safety", routing.TIER_STRONG),         # 洗护安全
     ],
 )
-def test_rules_pick_tier_with_reason(question, expected_rule):
+def test_rules_pick_tier_with_reason(question, expected_rule, expected_tier):
     tier, features, rule, reason = routing.classify_question(question)
     assert rule == expected_rule
+    assert tier == expected_tier
     assert reason
     assert any(item.startswith("channels=") for item in features)
-    if expected_rule == "multi_channel":
-        assert tier == routing.TIER_STRONG
-    elif expected_rule in ("single_channel", "simple_qa"):
-        assert tier == routing.TIER_CHEAP
 
 
-def test_synthesis_words_alone_push_to_strong():
-    """没有补查、也不长，但「哪个好」需要跨证据推理，仍走强档。"""
-    tier, features, rule, _ = routing.classify_question("这两条裙子哪个好")
+def test_synthesis_words_alone_stay_cheap():
+    """「哪个好/搭配」不再单独推强档：实测这些题的证据已经够便宜档写完整。"""
+    for question in ("这两条裙子哪个好", "SK 和 JSK 怎么搭配", "JSK 和 OP 有什么区别"):
+        tier, _, rule, _ = routing.classify_question(question)
+        assert tier == routing.TIER_CHEAP, question
+        assert rule == "simple_qa", question
+
+
+def test_multi_channel_alone_stays_cheap():
+    """多路补查不再推强档：real-16 的实测里便宜档反而更准。"""
+    tier, features, rule, _ = routing.classify_question("这条裙子多少钱")
+    assert tier == routing.TIER_CHEAP
+    assert rule == "channel_recall"
+    assert "xhs" in "".join(features)
+
+
+def test_care_question_goes_strong():
+    tier, features, rule, _ = routing.classify_question("水洗标说不能湿洗，那要怎么处理")
     assert tier == routing.TIER_STRONG
-    assert rule == "synthesis"
-    assert any(item.startswith("synthesis=") for item in features)
+    assert rule == "care_safety"
+    assert any(item.startswith("care=") for item in features)
+
+
+def test_specific_named_item_goes_strong():
+    """档案里常常只有品牌+品类：这类题强档更愿意承认没查到。"""
+    tier, features, rule, _ = routing.classify_question(
+        "Baby 的 White Rabbit Bunny Ear Bonnet 是什么"
+    )
+    assert tier == routing.TIER_STRONG
+    assert rule == "sparse_named_item"
+    assert "named_item" in features
 
 
 def test_ambiguous_returns_none():
@@ -141,7 +163,7 @@ def test_forced_mode_skips_rules_and_judge(monkeypatch, mode, model):
 
 def test_unknown_mode_falls_back_to_auto(monkeypatch):
     configure(monkeypatch, model_routing_mode="whatever")
-    decision = routing.decide("蕾丝怎么洗", settings)
+    decision = routing.decide("柄图是什么意思", settings)
     assert decision.mode == "auto"
     assert decision.rule == "simple_qa"
 

@@ -70,10 +70,12 @@ class AppSettings(BaseSettings):
     llm_model: str = "deepseek-chat"
 
     # ---------- 模型分级路由 ----------
-    # 按问题复杂度选写作模型：auto（默认，规则优先）/ cheap（强制便宜档）/
-    # strong（强制强档）。后两种是后面做 A/B 对比的开关——同一批问题可以分别
-    # 用两种策略跑，账本里会记下 mode。
-    model_routing_mode: str = "auto"
+    # 按问题类型选写作模型：cheap（默认，全部走便宜档）/ auto（规则判据，
+    # 仅洗护/安全与稀薄档案题走强档；可选实验开关）/ strong（强制强档）。
+    # 14 题实测（2026-11）：auto 成本 1.91x cheap，句子引用率 73.1% vs 82.6%，
+    # 未达到「质量可测提升 + 成本增幅 ≤1.3x」的默认开启标准；auto 因此保留为
+    # 显式开关，不默认启用。数据见 eval/forensics/routing-cost/。
+    model_routing_mode: str = "cheap"
     # 便宜档 / 强档的具体模型名。留空时回落 LLM_MODEL（只用一家模型也能跑）。
     llm_model_cheap: str = ""
     llm_model_strong: str = ""
