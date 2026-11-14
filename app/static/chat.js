@@ -587,32 +587,9 @@
 
     try {
       const data = await getJSON('/api/follows/check', { method: 'POST' });
-      if (data.busy) {
-        if (statusNode) statusNode.textContent = '已有一轮检查在进行，稍后自动刷新。';
-        return;
-      }
-      localStorage.setItem(FOLLOW_CHECK_KEY, todayKey());
-      followState = {
-        ...followState,
-        events: data.events,
-        unread: data.unread,
-        lastResults: data.results || [],
-      };
-      renderFollows();
-
-      const results = data.results || [];
-      const updated = results.filter((item) => item.status === 'updated').length;
-      const unavailable = results.filter((item) => item.status === 'unavailable').length;
-      const failed = results.filter((item) => item.status === 'error').length;
-      const parts = [];
-      if (updated) parts.push(updated + ' 条有更新');
-      if (unavailable) parts.push(unavailable + ' 条通道不可用');
-      if (failed) parts.push(failed + ' 条检查失败');
-      if (!parts.length) parts.push('没有变化');
-      if (statusNode) {
-        statusNode.textContent = '检查完成（' + formatTime(data.checked_at) + '）：' + parts.join('，');
-      }
-      if (auto && updated) toast('有关注项更新了');
+      const result = data.job_id ? await followJob(data.job_id, statusNode) : data;
+      applyScanResult(result);
+      if (auto && result.updated) toast('有关注项更新了');
     } catch (error) {
       if (statusNode) statusNode.textContent = '检查失败：' + error.message;
     } finally {
@@ -621,12 +598,104 @@
     }
   }
 
+  // 后台任务：入队后轮询到终态。页面切到后台时放慢节奏，不做「假进度」——
+  // 文案里的数字全部来自服务端的真实计数（done/total），没有就只写状态。
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function followJobText(job) {
+    if (job.status === 'queued') return '排队中…';
+    const progress = job.progress || {};
+    if (progress.total) {
+      return '正在检查 ' + (progress.done || 0) + '/' + progress.total +
+        (progress.current ? '：' + progress.current : '');
+    }
+    const phases = { starting: '准备中…', building: '正在重建索引…', reloading: '正在重载索引…' };
+    return phases[progress.phase] || '正在检查…';
+  }
+
+  async function followJob(jobId, statusNode) {
+    const deadline = Date.now() + 5 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const job = await getJSON('/api/jobs/' + jobId);
+      if (statusNode) statusNode.textContent = followJobText(job);
+      if (job.status === 'succeeded') return job.result || {};
+      if (job.status === 'failed') throw new Error(job.error || '后台任务失败');
+      if (job.status === 'interrupted') throw new Error(job.error || '后台任务被中断');
+      await sleep(document.visibilityState === 'visible' ? 800 : 3000);
+    }
+    throw new Error('等待后台任务超时，稍后刷新页面可查看结果');
+  }
+
+  function applyScanResult(data) {
+    const statusNode = document.getElementById('follow-status');
+    if (data.busy) {
+      if (statusNode) statusNode.textContent = '已有一轮检查在进行，稍后自动刷新。';
+      return;
+    }
+    localStorage.setItem(FOLLOW_CHECK_KEY, todayKey());
+    followState = {
+      ...followState,
+      events: data.events,
+      unread: data.unread,
+      lastResults: data.results || [],
+    };
+    renderFollows();
+
+    const results = data.results || [];
+    const updated = results.filter((item) => item.status === 'updated').length;
+    const unavailable = results.filter((item) => item.status === 'unavailable').length;
+    const failed = results.filter((item) => item.status === 'error').length;
+    const parts = [];
+    if (updated) parts.push(updated + ' 条有更新');
+    if (unavailable) parts.push(unavailable + ' 条通道不可用');
+    if (failed) parts.push(failed + ' 条检查失败');
+    if (!parts.length) parts.push('没有变化');
+    if (statusNode) {
+      if (data.interrupted) parts.push('服务中断，剩余项未检查');
+      statusNode.textContent = '检查完成（' + formatTime(data.checked_at) + '）：' + parts.join('，');
+    }
+    data.updated = updated;
+    return updated;
+  }
+
+  async function resumeScan() {
+    // 刷新页面不该把正在跑的后台扫描「弄丢」：先看队列里有没有活跃任务。
+    if (followBusy || !(followState.follows || []).length) return false;
+    let active = null;
+    try {
+      const feed = await getJSON('/api/jobs?kind=follows.scan&limit=5');
+      active = (feed.jobs || []).find(
+        (job) => job.status === 'queued' || job.status === 'running'
+      );
+    } catch (_) {
+      return false;
+    }
+    if (!active) return false;
+
+    followBusy = true;
+    const statusNode = document.getElementById('follow-status');
+    const button = document.getElementById('follow-check');
+    if (button) button.disabled = true;
+    try {
+      applyScanResult(await followJob(active.job_id, statusNode));
+    } catch (error) {
+      if (statusNode) statusNode.textContent = '检查失败：' + error.message;
+    } finally {
+      followBusy = false;
+      if (button) button.disabled = false;
+    }
+    return true;
+  }
+
   async function loadFollows() {
     try {
       followState = await getJSON('/api/follows');
       renderFollows();
+      const resumed = await resumeScan();
       const checkedOn = localStorage.getItem(FOLLOW_CHECK_KEY);
-      if ((followState.follows || []).length && checkedOn !== todayKey()) {
+      if (!resumed && (followState.follows || []).length && checkedOn !== todayKey()) {
         checkFollows(true);
       }
     } catch (error) {

@@ -68,13 +68,13 @@ def test_check_baseline_then_update_then_read(client, monkeypatch):
     monkeypatch.setattr(channels, "recall", lambda *_a, **_k: state["items"])
     client.post("/api/follows", json={"subject": "AP 新款", "source": "web"})
 
-    first = client.post("/api/follows/check").json()
+    first = client.post("/api/follows/check?wait=1").json()
     assert first["results"][0]["status"] == "baseline"
     assert first["events"] == []
     assert first["unread"] == 0
 
     state["items"] = [_evidence("https://a/1", "旧款"), _evidence("https://a/2", "新款")]
-    second = client.post("/api/follows/check").json()
+    second = client.post("/api/follows/check?wait=1").json()
     assert second["results"][0]["status"] == "updated"
     assert "新增 1 条" in second["results"][0]["detail"]
     assert second["unread"] == 1
@@ -92,13 +92,13 @@ def test_channel_unavailable_is_not_no_update(client, monkeypatch):
     """通道不可用不能写成「没有更新」，也不能覆盖基线。"""
     monkeypatch.setattr(channels, "recall", lambda *_a, **_k: [_evidence("https://a/1", "旧款")])
     client.post("/api/follows", json={"subject": "AP 新款", "source": "web"})
-    assert client.post("/api/follows/check").json()["results"][0]["status"] == "baseline"
+    assert client.post("/api/follows/check?wait=1").json()["results"][0]["status"] == "baseline"
 
     def boom(*_args, **_kwargs):
         raise ChannelUnavailable("搜索未配置：缺 SEARCH_API_KEY")
 
     monkeypatch.setattr(channels, "recall", boom)
-    unavailable = client.post("/api/follows/check").json()
+    unavailable = client.post("/api/follows/check?wait=1").json()
     assert unavailable["results"][0]["status"] == "unavailable"
     assert "SEARCH_API_KEY" in unavailable["results"][0]["detail"]
     assert unavailable["events"] == []
@@ -108,7 +108,7 @@ def test_channel_unavailable_is_not_no_update(client, monkeypatch):
         channels, "recall",
         lambda *_a, **_k: [_evidence("https://a/1", "旧款"), _evidence("https://a/2", "新款")],
     )
-    recovered = client.post("/api/follows/check").json()
+    recovered = client.post("/api/follows/check?wait=1").json()
     assert recovered["results"][0]["status"] == "updated"
 
 
@@ -131,7 +131,7 @@ def test_check_timeout_does_not_touch_baseline(client, monkeypatch):
         "/api/follows", json={"subject": "AP 新款", "source": "web"}
     ).json()["follows"][0]
 
-    body = client.post("/api/follows/check").json()
+    body = client.post("/api/follows/check?wait=1").json()
 
     assert body["results"][0]["status"] == "timeout"
     assert body["partial"] is True
@@ -156,7 +156,7 @@ def test_check_total_deadline_skips_remaining_items(client, monkeypatch):
     client.post("/api/follows", json={"subject": "AP 新款", "source": "web"})
     client.post("/api/follows", json={"subject": "Baby 新款", "source": "web"})
 
-    body = client.post("/api/follows/check").json()
+    body = client.post("/api/follows/check?wait=1").json()
 
     statuses = [item["status"] for item in body["results"]]
     assert statuses == ["timeout", "skipped"]
@@ -169,9 +169,9 @@ def test_delete_follow_removes_its_events(client, monkeypatch):
     follow = client.post(
         "/api/follows", json={"subject": "Baby 新款", "source": "web"}
     ).json()["follows"][0]
-    client.post("/api/follows/check")
+    client.post("/api/follows/check?wait=1")
     monkeypatch.setattr(channels, "recall", lambda *_a, **_k: [_evidence("https://a/2", "新款")])
-    client.post("/api/follows/check")
+    client.post("/api/follows/check?wait=1")
     assert client.get("/api/follows").json()["unread"] == 1
 
     assert client.delete(f"/api/follows/{follow['id']}").json()["events"] == []

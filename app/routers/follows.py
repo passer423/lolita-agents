@@ -9,13 +9,15 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app import db
+from app import db, jobs
 from app.agent import channels
 from app.config import settings
-from app.services import follow_watch
+from app.routers.jobs import public as job_public
+from app.services import follow_watch, job_runner
 
 router = APIRouter(prefix="/api/follows", tags=["follows"])
 
@@ -87,9 +89,42 @@ def remove_follow(follow_id: int) -> dict:
 
 
 @router.post("/check")
-def check_follows() -> dict:
-    """扫描全部关注项。已有扫描在跑就返回 busy，不排队、不重复写事件。"""
-    return follow_watch.check_all(settings)
+def check_follows(
+    wait: bool = Query(
+        False,
+        description="true 时同步执行并返回旧格式（脚本兼容）；默认入队后立刻返回 202",
+    ),
+):
+    """扫描全部关注项。
+
+    默认入队：立刻返回 202 + ``job_id``，用 ``GET /api/jobs/{id}`` 轮询结果。
+    同一时刻只允许一个活跃扫描（幂等键 ``follows.scan``），重复提交返回同一个
+    任务（200 + ``deduplicated=true``），不会重复写事件。
+
+    ``?wait=1`` 或 ``QUEUE_MODE=inline`` 时走同步老路径，返回完整结果。
+    """
+    if wait or not job_runner.queue_enabled(settings):
+        return follow_watch.check_all(settings)
+
+    runner = job_runner.current()
+    if runner is None or not runner.alive:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "后台队列未运行：请重启服务，或设 QUEUE_MODE=inline，"
+                "也可以临时用 POST /api/follows/check?wait=1"
+            ),
+        )
+    try:
+        job, created = runner.enqueue(
+            "follows.scan",
+            idempotency_key="follows.scan",
+            max_attempts=2,
+        )
+    except jobs.QueueUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    payload = {**job_public(job), "deduplicated": not created}
+    return JSONResponse(payload, status_code=202 if created else 200)
 
 
 @router.post("/events/read")

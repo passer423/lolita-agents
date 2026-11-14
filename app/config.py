@@ -127,6 +127,19 @@ class AppSettings(BaseSettings):
     follow_item_timeout: float = 60.0
     follow_check_deadline: float = 120.0
 
+    # ---------- 后台任务队列 ----------
+    # 关注扫描、索引重建这类长任务入队执行，接口立刻返回 202 + job_id。
+    # QUEUE_MODE=inline 退回同步执行（测试 / worker 起不来时的应急）；任务状态
+    # 一律可在 GET /api/jobs 查看。
+    queue_enabled: bool = True
+    queue_mode: str = "async"
+
+    # HTTP 触发索引重建默认关闭：上游写盘不是**整体**原子（单个文件是临时文件 +
+    # os.replace，但 Chroma 增量持久化、manifest 最后直接 write_text），中断可能
+    # 留下半成品索引。确认原子性后再打开；日常用 scripts/build_kb_index.py。
+    kb_rebuild_api: bool = False
+    kb_rebuild_timeout: float = 1800.0
+
     # ---------- 裙子档案 ----------
     # 日牌本地档案缺少发售年/原价/配色时，是否在线查 Lolibrary 补详情。
     # 离线部署或测试可以关掉；关掉后只返回本地档案已有的字段。

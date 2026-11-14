@@ -30,6 +30,7 @@ import logging
 import queue
 import threading
 import time
+from collections.abc import Callable
 
 from app import db
 from app.agent import channels
@@ -50,6 +51,14 @@ class RecallTimeout(RuntimeError):
 
     超时既不是「没有更新」，也不是「通道不可用」：底下的请求可能还在跑，
     但结果已经不能用了（再等下去会把整轮扫描拖死）。调用方只报状态，不写基线。
+    """
+
+
+class ScanBusy(RuntimeError):
+    """已有一轮扫描在跑。
+
+    队列模式下一个 worker 串行执行，正常情况下不会撞上；``?wait=1`` 的同步
+    调用可能和后台任务撞在一起，此时照旧返回 ``busy``，不排队、不重复写事件。
     """
 
 
@@ -217,22 +226,31 @@ def _check_one(
     return {**result, "status": "updated", "detail": summary, "event_id": event["id"]}
 
 
-def check_all(app: AppSettings) -> dict:
-    """扫描所有关注项。已有扫描在跑就直接返回 busy，不排队。
+def _status_counts(results: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in results:
+        status = str(item.get("status") or "")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
 
-    整轮有总预算（``FOLLOW_CHECK_DEADLINE``）：预算用完后的关注项标记
-    ``skipped``，不会无限期占着扫描锁。单项超时（``FOLLOW_ITEM_TIMEOUT``）
-    同样不写事件、不动基线。
+
+def scan(
+    app: AppSettings,
+    *,
+    progress: Callable[[dict], None] | None = None,
+    stop: threading.Event | None = None,
+) -> dict:
+    """扫描所有关注项。队列的 ``follows.scan`` 任务直接调这里。
+
+    ``progress`` 每查完一项收到一次快照：``total / done / current / statuses``。
+    这些数都是**已经发生的事实**，没有预估、没有百分比——剩余项要多久取决于
+    通道超时，队列不编。
+
+    ``stop`` 置位后在下一项之前收尾：剩下的项标 ``skipped``，基线不动，结果里
+    ``interrupted=true``。调用方（job_runner）会把任务标成 ``interrupted``。
     """
     if not _check_lock.acquire(blocking=False):
-        return {
-            "busy": True,
-            "checked_at": db.now(),
-            "results": [],
-            "partial": False,
-            "events": db.list_follow_events(app.db_path, limit=20),
-            "unread": db.unread_follow_events(app.db_path),
-        }
+        raise ScanBusy("已有一轮关注项扫描在进行")
     try:
         follows = db.list_follows(app.db_path)
         deadline = (
@@ -241,23 +259,48 @@ def check_all(app: AppSettings) -> dict:
             else None
         )
         results: list[dict] = []
-        for follow in follows:
-            remaining = None if deadline is None else deadline - time.monotonic()
-            if remaining is not None and remaining <= 0:
+        interrupted = False
+        total = len(follows)
+        for index, follow in enumerate(follows, 1):
+            if stop is not None and stop.is_set():
+                interrupted = True
                 results.append(
                     {
                         "follow_id": follow["id"],
                         "subject": follow["subject"],
                         "source": follow["source"],
                         "status": "skipped",
-                        "detail": "本轮扫描总预算已用完，未检查；基线未变",
+                        "detail": "服务停机中断，未检查；基线未变",
                     }
                 )
-                continue
-            timeout = app.follow_item_timeout if app.follow_item_timeout > 0 else None
-            if remaining is not None:
-                timeout = remaining if timeout is None else min(timeout, remaining)
-            results.append(_check_one(follow, app, timeout=timeout))
+            else:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    results.append(
+                        {
+                            "follow_id": follow["id"],
+                            "subject": follow["subject"],
+                            "source": follow["source"],
+                            "status": "skipped",
+                            "detail": "本轮扫描总预算已用完，未检查；基线未变",
+                        }
+                    )
+                else:
+                    timeout = (
+                        app.follow_item_timeout if app.follow_item_timeout > 0 else None
+                    )
+                    if remaining is not None:
+                        timeout = remaining if timeout is None else min(timeout, remaining)
+                    results.append(_check_one(follow, app, timeout=timeout))
+            if progress is not None:
+                progress(
+                    {
+                        "total": total,
+                        "done": index,
+                        "current": follow["subject"],
+                        "statuses": _status_counts(results),
+                    }
+                )
         return {
             "busy": False,
             "checked_at": db.now(),
@@ -265,8 +308,29 @@ def check_all(app: AppSettings) -> dict:
             "partial": any(
                 item["status"] in ("timeout", "skipped") for item in results
             ),
+            "interrupted": interrupted,
             "events": db.list_follow_events(app.db_path, limit=20),
             "unread": db.unread_follow_events(app.db_path),
         }
     finally:
         _check_lock.release()
+
+
+def check_all(app: AppSettings) -> dict:
+    """同步入口（``?wait=1`` 与 ``QUEUE_MODE=inline`` 用）。
+
+    已有扫描在跑就直接返回 busy，不排队——这里保持旧接口的形状，前端/脚本
+    不需要知道队列的存在。
+    """
+    try:
+        return scan(app)
+    except ScanBusy:
+        return {
+            "busy": True,
+            "checked_at": db.now(),
+            "results": [],
+            "partial": False,
+            "events": db.list_follow_events(app.db_path, limit=20),
+            "unread": db.unread_follow_events(app.db_path),
+        }
+

@@ -17,7 +17,8 @@ from fastapi.staticfiles import StaticFiles
 from app import __version__, bridge, db
 from app.agent import channels
 from app.config import settings
-from app.routers import chat, follows, kb
+from app.routers import chat, follows, jobs, kb
+from app.services import job_runner
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,7 +33,7 @@ settings.ensure_dirs()
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(application: FastAPI):
     db.init_db(settings.db_path)
     logger.info("数据目录：%s", settings.data_dir)
     logger.info("自有知识库索引：%s", settings.kb_index_dir)
@@ -49,7 +50,16 @@ async def lifespan(_: FastAPI):
             logger.info("索引 %s 就绪：%s 个片段（%s）", source, info["chunks"], info["built_at"])
         else:
             logger.warning("索引 %s 未就绪：%s", source, info["error"] or "还没有建立")
-    yield
+
+    # 后台任务队列：建表、恢复上次未收尾的任务、按需起单线程。
+    # 停机时只置停止标志并终止子进程；来不及收尾的任务留给下次启动标 interrupted。
+    runner = job_runner.get_runner(settings)
+    runner.start()
+    application.state.job_runner = runner
+    try:
+        yield
+    finally:
+        runner.stop()
 
 
 class UTF8JSONResponse(JSONResponse):
@@ -78,6 +88,7 @@ app = FastAPI(
 app.include_router(chat.router)
 app.include_router(follows.router)
 app.include_router(kb.router)
+app.include_router(jobs.router)
 
 
 @app.get("/api/health", tags=["health"])

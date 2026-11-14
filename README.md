@@ -186,6 +186,53 @@ python -m pytest tests/ -q
 
 `tests/conftest.py` 把 `DATA_DIR` 指到 `tests/.data` 并关闭 LLM / 搜索 / 小红书，**绝不碰真实 `data/`**。
 
+## 后台任务队列
+
+关注扫描与索引重建是分钟级操作，过去会把 HTTP 请求一直挂着。现在它们进
+**SQLite 任务表**（`data/app.db` 的 `jobs`），由一个后台线程串行执行：
+
+- 不引入 Redis：单用户本地服务已经有 `app.db`（WAL），任务状态没理由放第二个
+  常驻服务里；RQ 的 worker 依赖 fork，Windows 上跑不起来。
+- **单线程串行**：xhs 会起浏览器子进程、建索引吃 CPU/内存，并发只会互相拖慢。
+- 对话（`/api/chat`、`/api/chat/stream`）**保持同步**：SSE 已有逐通道进度与
+  “停止”，实时证据也只对本次回答有效，入队只会让首字更慢。
+
+接口：
+
+| 接口 | 行为 |
+|---|---|
+| `POST /api/follows/check` | 默认 `202 {job_id, poll_url}`；重复提交返回同一个任务（`200` + `deduplicated:true`） |
+| `POST /api/follows/check?wait=1` | 同步执行，返回旧格式（脚本兼容） |
+| `GET /api/jobs/{id}` | 状态、`attempts`、`progress`、`result`、`error` |
+| `GET /api/jobs?kind=&status=&limit=` | 任务列表（含 `worker_alive`） |
+| `POST /api/jobs/{id}/retry` | 手动重跑（克隆成新任务） |
+| `DELETE /api/jobs/{id}` | 取消排队中的任务 |
+| `POST /api/kb/rebuild` | 后台重建索引；**默认关闭**（`KB_REBUILD_API=false`） |
+
+幂等与重试：
+
+- 同一 `idempotency_key` 只允许一个 `queued/running` 任务（SQLite 部分唯一索引
+  兜底，并发提交也只会产生一个）。
+- `follows.scan` 最多 2 次：仅当失败属于临时故障、且**尚未写入任何一项结果**
+  时按 30s → 90s 退避重试；已落库的结果不重跑，避免重复写事件。
+- `kb.rebuild` 不自动重试：失败多为确定性原因（上游路径、磁盘、模型文件）。
+- 服务重启时 `running` 一律标 `interrupted`（“服务重启中断”），**不自动重跑**；
+  需要时用 `POST /api/jobs/{id}/retry`。停机时正在跑的任务也按这个规则收尾。
+
+进度只报真实值：关注扫描报 `done/total/current`（每查完一项更新），索引重建
+拿不到内部进度，只报 `phase`（starting / building / reloading），没有百分比。
+
+`QUEUE_MODE=inline`（或 `QUEUE_ENABLED=false`）时全部退回同步执行；worker 线程
+没起来时接口返回 `503`，不会静默改走同步。单个任务被取消、失败、中断都能在
+`GET /api/jobs` 里看到原因。
+
+索引重建的 HTTP 触发默认关闭：查过上游 `build_index` 的写盘逻辑，**不是整体
+原子**——单个文件（chunks / pickle / embedding 缓存）是「临时文件 + os.replace」，
+但 Chroma 是增量持久化、manifest 最后写且直接 `write_text`，中途被杀会留下
+半成品索引。日常仍用 `python scripts/build_kb_index.py` 或
+`docker compose run --rm app python scripts/build_kb_index.py`；确认原子性后再把
+`KB_REBUILD_API` 打开。
+
 ## 容器化部署（Docker）
 
 镜像只装运行依赖与应用代码；`data/`、`.env`、上游 lolita-rag 全部以挂载方式接进来，不烤进镜像。
