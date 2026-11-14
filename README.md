@@ -185,3 +185,39 @@ python -m pytest tests/ -q
 ```
 
 `tests/conftest.py` 把 `DATA_DIR` 指到 `tests/.data` 并关闭 LLM / 搜索 / 小红书，**绝不碰真实 `data/`**。
+
+## 容器化部署（Docker）
+
+镜像只装运行依赖与应用代码；`data/`、`.env`、上游 lolita-rag 全部以挂载方式接进来，不烤进镜像。
+
+前置：Docker + Compose v2（BuildKit）、与默认布局一致的 `../lolita-rag` checkout，以及填好 `LLM_API_KEY` 的 `.env`。
+
+```bash
+mkdir -p data                      # 首次：给容器内非 root 用户一个可写的数据目录
+docker compose up -d --build
+docker compose ps                  # STATUS 一栏应显示 healthy
+curl http://127.0.0.1:8787/api/health
+```
+
+- **数据目录**：宿主机 `./data` → 容器 `/data`（`DATA_DIR`）。`kbindex`、`app.db`、lolibrary 档案、轨迹都在这里，容器重建不丢。还没有 `own` 索引时先建一次：
+  ```bash
+  docker compose run --rm app python scripts/build_kb_index.py
+  ```
+- **配置**：`.env` 只读挂载到 `/app/.env`；容器内 `LOLITA_RAG_ROOT` 固定为 `/opt/lolita-rag`，对应宿主机 `${LOLITA_RAG_ROOT:-../lolita-rag}`。上游目录只读挂载，镜像里没有它的代码与索引。
+- **上游依赖**：构建时通过 BuildKit 命名上下文 `rag` 读取上游的 `requirements.txt`（只读清单，不拷源码）。上游不在默认位置时：
+  ```bash
+  LOLITA_RAG_CTX=/srv/lolita-rag LOLITA_RAG_ROOT=/srv/lolita-rag docker compose up -d --build
+  ```
+- **健康检查**：镜像与 Compose 都打 `GET /api/health`，返回版本、`own`/`real` 索引状态与六个通道的就绪情况。它只报状态，索引未建也返回 200，因此这是存活检查而不是就绪门槛。查看容器状态：
+  ```bash
+  docker inspect --format '{{.State.Health.Status}}' $(docker compose ps -q app)
+  ```
+- **端口**：默认只发布到 `127.0.0.1:8787`。要给手机/局域网访问，把 compose 里 ports 的 `127.0.0.1:` 去掉，并自行加访问控制。
+
+### 停止与优雅停机
+
+`docker compose stop` / `down` 发送 SIGTERM。镜像以 `uvicorn --timeout-graceful-shutdown 20` 启动：先停止接新连接，再最多等 20 秒让进行中的请求（含 SSE 问答）收尾；Compose 的 `stop_grace_period` 是 30 秒，留出余量。应用 lifespan 没有需要额外关闭的全局资源（SQLite 每次请求开关连接），所以不需要自己写信号处理。
+
+### 可选通道
+
+小红书 Playwright / Spider_XHS 的依赖没有装进镜像（与 `requirements.txt` 的可选策略一致）。需要时在镜像里另装，或保持 `XHS_ENABLED=false`；其余通道不受影响。
