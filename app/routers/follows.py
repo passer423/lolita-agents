@@ -36,7 +36,6 @@ SOURCE_LABELS = {
 class FollowIn(BaseModel):
     subject: str = Field(..., min_length=1, max_length=60)
     source: FollowSource = "web"
-    url: str = Field("", max_length=500)
 
 
 def _snapshot() -> dict:
@@ -45,7 +44,6 @@ def _snapshot() -> dict:
             "id": follow["id"],
             "subject": follow["subject"],
             "source": follow["source"],
-            "url": follow["url"],
             "updated_at": follow["updated_at"],
         }
         for follow in db.list_follows(settings.db_path)
@@ -75,7 +73,7 @@ def create_follow(payload: FollowIn) -> dict:
     if not subject:
         raise HTTPException(status_code=422, detail="关注关键词不能为空")
     try:
-        db.add_follow(settings.db_path, subject, payload.source, payload.url.strip())
+        db.add_follow(settings.db_path, subject, payload.source)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _snapshot()

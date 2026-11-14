@@ -1,7 +1,7 @@
 """用户数据层（SQLite）：关注项 / 会话记忆。
 
 多路召回 agent 是**单用户自托管**服务（默认只监听本机），所以去掉账号体系：
-* ``follows`` 存关注项（品牌/系列/来源链接 + 上次状态），供"关注项更新时通知"；
+* ``follows`` 存关注项（关键词 + 来源 + 上次状态），供"关注项更新时通知"；
 * ``conversations`` 存服务端会话记忆：客户端不传历史时由服务端补上，追问才能
   接住上一轮的上下文。保留条数由 ``CONVERSATION_RETENTION_MESSAGES`` 控制，
   ``DELETE /api/chat/history`` 可整体清空。
@@ -14,14 +14,13 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS follows (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     subject    TEXT NOT NULL,
     source     TEXT NOT NULL,
-    url        TEXT NOT NULL,
     last_state TEXT,
     updated_at TEXT NOT NULL
 );
@@ -73,9 +72,36 @@ def connect(db_path: Path):
         conn.close()
 
 
+def _migrate_follows_drop_url(conn: sqlite3.Connection) -> None:
+    """旧库的 ``follows.url`` 是 NOT NULL 且无人写入，留着会让新插入失败。
+
+    SQLite 的 ``DROP COLUMN`` 在旧版本里不可用，这里用「建新表→拷数据→换名」，
+    保留 id 与已有行；唯一索引随旧表一起消失，换名后重建。
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(follows)")}
+    if "url" not in columns:
+        return
+    conn.execute(
+        "CREATE TABLE follows_new ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "subject TEXT NOT NULL, source TEXT NOT NULL, "
+        "last_state TEXT, updated_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO follows_new (id, subject, source, last_state, updated_at) "
+        "SELECT id, subject, source, last_state, updated_at FROM follows"
+    )
+    conn.execute("DROP TABLE follows")
+    conn.execute("ALTER TABLE follows_new RENAME TO follows")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS follows_unique ON follows(subject, source)"
+    )
+
+
 def init_db(db_path: Path) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate_follows_drop_url(conn)
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -85,13 +111,13 @@ def init_db(db_path: Path) -> None:
 # --------------------------------------------------------------------- 关注项
 
 
-def add_follow(db_path: Path, subject: str, source: str, url: str) -> dict:
+def add_follow(db_path: Path, subject: str, source: str) -> dict:
     with connect(db_path) as conn:
         try:
             cursor = conn.execute(
-                "INSERT INTO follows (subject, source, url, last_state, updated_at) "
-                "VALUES (?, ?, ?, '', ?)",
-                (subject, source, url, now()),
+                "INSERT INTO follows (subject, source, last_state, updated_at) "
+                "VALUES (?, ?, '', ?)",
+                (subject, source, now()),
             )
         except sqlite3.IntegrityError as exc:
             # 同一个「关键词 + 来源」重复关注没有意义：会让扫描和通知都翻倍。
