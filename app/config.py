@@ -51,7 +51,7 @@ class AppSettings(BaseSettings):
     bind_port: int = 8787
 
     # 数据目录。做成**字段**而不是硬编码属性，是为了测试能把数据指到临时目录，
-    # 也允许把运行时数据（索引、xhs 会话、偏好库）放到另一块盘。
+    # 也允许把运行时数据（索引、xhs 会话、用户数据库）放到另一块盘。
     data_dir: Path = APP_ROOT / "data"
 
     # 内容目录（自有知识库 content/kb，进 git）。做成字段同样是为了测试隔离。
@@ -66,6 +66,11 @@ class AppSettings(BaseSettings):
     # 检索只取**最相关的一条**。这里是**单通道**的默认值；多路召回在结果层合并，
     # 每通道各取 top_k，最后统一编号给 writer。
     top_k: int = 1
+
+    # 单次问答的**整体**预算（秒）。各通道和模型客户端都有自己的超时，但没有总预算时
+    # 最坏会串成两分钟（核心召回 + 30s 规划 + 65s 小红书 + 20s 搜索 + 60s 写作）。
+    # 超时返回已查到的证据并注明「部分通道超时」，不报 500。<=0 表示不限制。
+    agent_deadline: float = 60.0
 
     # ---------- 召回通道：小红书 ----------
     xhs_enabled: bool = False
@@ -86,6 +91,11 @@ class AppSettings(BaseSettings):
     search_max_results: int = 5
     search_timeout: float = 20.0
 
+    # ---------- 裙子档案 ----------
+    # 日牌本地档案缺少发售年/原价/配色时，是否在线查 Lolibrary 补详情。
+    # 离线部署或测试可以关掉；关掉后只返回本地档案已有的字段。
+    lolibrary_online_enabled: bool = True
+
     # ---------- 派生路径 ----------
     @property
     def kb_dir(self) -> Path:
@@ -94,12 +104,12 @@ class AppSettings(BaseSettings):
 
     @property
     def kb_index_dir(self) -> Path:
-        """自有知识库索引的家（`own` 通道）。与用户数据分开：删索引不会碰偏好。"""
+        """自有知识库索引的家（`own` 通道）。与用户数据分开：删索引不会碰关注项。"""
         return self.data_dir / "kbindex"
 
     @property
     def db_path(self) -> Path:
-        """偏好 / 关注项 / 会话记忆的 SQLite 库。唯一不可再生的东西。"""
+        """关注项 / 会话记忆的 SQLite 库。唯一不可再生的东西。"""
         return self.data_dir / "app.db"
 
     @property
@@ -111,6 +121,26 @@ class AppSettings(BaseSettings):
     def lolibrary_catalog_path(self) -> Path:
         """档案索引（JSONL，一行一个条目），`lolibrary` 通道读它。"""
         return self.lolibrary_dir / "catalog.jsonl"
+
+    @property
+    def brands_path(self) -> Path:
+        """品牌/地区注册表（`content/brands.json`，进 git）。"""
+        return self.content_dir / "brands.json"
+
+    @property
+    def dress_aliases_path(self) -> Path:
+        """系列级中文译名表（`content/dress/aliases.json`，进 git）。"""
+        return self.content_dir / "dress" / "aliases.json"
+
+    @property
+    def dress_glossary_path(self) -> Path:
+        """中文意象词 → 英文词（`content/dress/glossary.json`，进 git）。"""
+        return self.content_dir / "dress" / "glossary.json"
+
+    @property
+    def learned_aliases_path(self) -> Path:
+        """模型识别并经 Lolibrary 校验后学到的译名（运行时缓存，不进 git）。"""
+        return self.data_dir / "dress" / "learned_aliases.json"
 
     @property
     def xhs_profile_dir(self) -> Path:
@@ -128,7 +158,13 @@ class AppSettings(BaseSettings):
 
     def ensure_dirs(self) -> None:
         """只建运行时目录。content/ 不自动创建——那样会把「路径写错了」变成空目录。"""
-        for path in (self.data_dir, self.kb_index_dir, self.lolibrary_dir, self.xhs_cache_dir):
+        for path in (
+            self.data_dir,
+            self.kb_index_dir,
+            self.lolibrary_dir,
+            self.learned_aliases_path.parent,
+            self.xhs_cache_dir,
+        ):
             path.mkdir(parents=True, exist_ok=True)
 
 

@@ -21,4 +21,4 @@
 - `loop.py` 的手写循环由图定义替代；`MAX_STEPS` / `MAX_EMPTY` / 引用越界 / 「没证据不许作答」四条护栏**逐条迁移**，用 `recursion_limit` + 状态计数器实现，不能丢。
 - 轨迹（`trace.py`）改从 LangGraph 的状态/事件流取，不再从手写生成器取；评测的「轨迹级判定」读 `state_history`。
 - 新增依赖：`langgraph` + `langchain-core`（+ `langchain-openai` 作模型节点）。
-- checkpoint 能力为「关注项 / 偏好」的会话级状态持久化留了口子，但 v1 只用在单轮问答，不引入多轮中断恢复。
+- checkpoint 能力为「关注项」的会话级状态持久化留了口子，但 v1 只用在单轮问答，不引入多轮中断恢复。
