@@ -110,6 +110,7 @@ lolita-agents/
 │   ├── import_lolibrary.py Lolibrary 档案 → catalog.jsonl
 │   ├── probe_search.py    排查「这条为什么没召回」（直连实时通道，不读索引）
 │   ├── smoke.py           端到端冒烟（需服务已启动）
+│   ├── smoke_encoding.py  请求体编码冒烟（自己起 uvicorn，验乱码体 422 + UTF-8 能召回）
 │   └── xhs_search.py      小红书浏览器自动化（--login / --query）
 ├── docs/adr/              架构决策记录
 └── tests/                 pytest（agent / 接口）
@@ -206,6 +207,17 @@ python -m pytest tests/ -q
 ```
 
 `tests/conftest.py` 把 `DATA_DIR` 指到 `tests/.data` 并关闭 LLM / 搜索 / 小红书，**绝不碰真实 `data/`**。
+
+### 评测口径
+
+`python -m eval.run` 是**进程内**调用 `graph.run`，直接传 Python 字符串，不经过
+HTTP 序列化。真实 uvicorn 下用正确的 UTF-8 请求，召回与答案与进程内一致
+（同一份索引实测 own 1 条 + real 1 条，答案带引用）——所以 recall@1 / cite@1
+这组数字对「服务进程内的检索与回答」成立，**唯一不覆盖的是 HTTP 传输层的
+请求体编码**：非 UTF-8 客户端（如 PowerShell 5 的 `Invoke-WebRequest` 直接传
+字符串体）会把中文替换成 `?`，服务端无从还原。这种形态现在由 `ChatIn` 的
+校验直接返回 422 并说明原因，不再伪装成「知识库没有内容」。
+`scripts/smoke_encoding.py` 用真实 uvicorn 复核这条链路（不进 CI，理由见脚本注释）。
 
 ## 后台任务队列
 

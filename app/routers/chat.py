@@ -17,12 +17,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app import db
 from app.agent import channels, graph, trace
@@ -54,6 +55,30 @@ class ChatIn(BaseModel):
     # 不加载旧上下文（清空请用 DELETE /api/chat/history）。
     # **编号只在单轮内有效**：落库与回填时都会剥掉 [n]（见 sanitize_history）。
     history: list[ChatTurn] | None = Field(default=None, max_length=16)
+
+    @field_validator("message")
+    @classmethod
+    def _reject_mojibake(cls, value: str) -> str:
+        """只剩一串问号的消息：几乎一定是请求体的中文在发送前就丢了。
+
+        真事：PowerShell 5 的 ``Invoke-WebRequest`` 用 Content-Type 的默认
+        charset（ISO-8859-1）编码字符串体，``裙撑长度怎么选`` 发出去变成
+        ``???????``。服务端收到的就是七个问号，召回当然是空——但接口回的是
+        「没有检索到能回答这个问题的内容」，把编码问题伪装成知识库问题，
+        排查方向全被带偏。
+
+        阈值故意收窄：只有「连续 3 个以上半角问号、且没有别的字符」才拦。
+        单个 ``?``、两个 ``?``、纯标点、纯 emoji、全角 ``？？？`` 都照常放行
+        ——那些是正常输入，替换后的形态是连续半角问号且长度与原文一致。
+        """
+        if re.fullmatch(r"\?{3,}", value.strip()):
+            raise ValueError(
+                "消息里只有问号，没有可检索的文字。请求体疑似不是 UTF-8 编码："
+                "中文在发送前被替换成了 ?，服务端无法还原。"
+                "请用 UTF-8 发送 JSON（curl 加 --data-binary @body.json；"
+                "PowerShell 先把字符串转成 UTF-8 字节再传给 -Body；浏览器不受影响）。"
+            )
+        return value
 
 
 def _make_planner(app=settings):

@@ -15,6 +15,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from app.agent import channels
 from app.routers import chat as chat_router
 
@@ -188,6 +190,40 @@ def test_stream_without_key_is_503(client):
 
 def test_chat_rejects_empty_message(client):
     assert client.post("/api/chat", json={"message": ""}).status_code == 422
+
+
+def test_chat_rejects_message_replaced_by_question_marks(client):
+    """真实事故的形态：非 UTF-8 客户端把「裙撑长度怎么选」发成「???????」。
+
+    服务端拿不到任何可检索的字，继续召回只会回「没有检索到内容」，把编码问题
+    说成知识库问题。这种形态要在入口挡掉，并指出真正的原因。
+    """
+    for message in ("???????", "???", "  ????  "):
+        response = client.post("/api/chat", json={"message": message})
+        assert response.status_code == 422, message
+        assert "UTF-8" in response.text
+
+
+def test_stream_rejects_message_replaced_by_question_marks(client):
+    response = client.post("/api/chat/stream", json={"message": "?????????"})
+    assert response.status_code == 422
+    assert "UTF-8" in response.text
+
+
+@pytest.mark.parametrize("message", ["?", "??", "？？？", "。。。", "🥺", "？?"])
+def test_short_or_punctuation_only_message_is_not_treated_as_mojibake(client, message):
+    """边界：正常但极短的输入照常放行，422 只留给「连续半角问号且没别的字符」。
+
+    这些请求会因为没有 LLM_API_KEY 走到 503——重点是没有被判成编码错误。
+    """
+    response = client.post("/api/chat", json={"message": message})
+    assert response.status_code == 503
+
+
+def test_question_marks_inside_a_real_question_still_pass(client):
+    """只有问号、没有文字才拦；正常中文问题里的问号不受影响。"""
+    response = client.post("/api/chat", json={"message": "裙撑长度怎么选???"})
+    assert response.status_code == 503
 
 
 def test_chat_rejects_bad_history_role(client):
