@@ -80,9 +80,12 @@ class RecallContext:
     settings: AppSettings = field(default_factory=lambda: default_settings)
 
 
-def _clip(text: str) -> str:
+def _clip(text: str, limit: int | None = None) -> str:
     text = (text or "").strip()
-    return text if len(text) <= EVIDENCE_TEXT_LIMIT else text[:EVIDENCE_TEXT_LIMIT] + "…"
+    cap = EVIDENCE_TEXT_LIMIT if limit is None else max(0, int(limit))
+    if cap <= 0:
+        return text
+    return text if len(text) <= cap else text[:cap] + "…"
 
 
 # --------------------------------------------------------------------- 问题意图
@@ -133,10 +136,36 @@ def question_intent(question: str) -> str:
     return ""
 
 
+# 洗护/安全类：答案常埋在长帖后半段，且答错会伤衣服——两种情况都需要更完整的
+# 正文，而不是 300 字的开头。
+CARE_MARKERS = (
+    "怎么洗", "能不能洗", "能洗吗", "水洗标", "水洗", "湿洗", "干洗", "洗涤",
+    "洗护", "掉色", "浮色", "染色", "串色", "缩水", "褪色", "保养", "存放",
+    "熨烫", "起球", "发黄",
+)
+
+# 定义/对比/搭配题的结论通常在后半段（own-08 的「同系列的 OP…」）。放宽这两类，
+# 其余问题保持默认窗口，避免整体 prompt 变贵。
+_CONFIG_WORDS = ("区别", "搭配", "怎么配", "怎么选")
+
+
+def evidence_text_limit(question: str, settings: AppSettings) -> int:
+    """按问题类型选单条证据的正文窗口。"""
+    text = question or ""
+    long_window = (
+        question_intent(text) == INTENT_DEFINITION
+        or any(marker in text for marker in CARE_MARKERS)
+        or any(marker in text for marker in _CONFIG_WORDS)
+    )
+    if long_window:
+        return int(settings.evidence_text_limit_long)
+    return int(settings.evidence_text_limit)
+
+
 # --------------------------------------------------------------------- own / real
 
 
-def _kb_evidence(channel: str, hits: list[dict]) -> list[dict]:
+def _kb_evidence(channel: str, hits: list[dict], limit: int | None = None) -> list[dict]:
     # score / retriever 原样带出去：上游 hits_to_dicts 已经算好了，丢掉它就只能
     # 靠重跑检索才能回答「这条为什么进来」——排查噪声证据时那是唯一的线索。
     return [
@@ -145,7 +174,7 @@ def _kb_evidence(channel: str, hits: list[dict]) -> list[dict]:
             "source_kind": CHANNEL_SOURCE_KIND[channel],
             "ref": hit.get("chunk_id") or "",
             "title": hit.get("author") or ("自有知识库" if channel == "own" else "过往网友讨论"),
-            "text": _clip(hit.get("text") or ""),
+            "text": _clip(hit.get("text") or "", limit),
             "url": hit.get("url") or "",
             "score": hit.get("score"),
             "retriever": hit.get("retriever") or "",
@@ -193,12 +222,16 @@ def _search_with_boundary_retry(
     return search(variant, ctx.settings, top_k=ctx.settings.top_k)
 
 
-def _recall_own(question: str, ctx: RecallContext, query: str = "") -> list[dict]:
+def _recall_own(
+    question: str, ctx: RecallContext, query: str = "", limit: int | None = None
+) -> list[dict]:
     hits = _search_with_boundary_retry(bridge.search_kb, query or question, ctx)
-    return _kb_evidence("own", hits)
+    return _kb_evidence("own", hits, limit)
 
 
-def _recall_real(question: str, ctx: RecallContext, query: str = "") -> list[dict]:
+def _recall_real(
+    question: str, ctx: RecallContext, query: str = "", limit: int | None = None
+) -> list[dict]:
     hits = _search_with_boundary_retry(bridge.search_real, query or question, ctx)
     # 只保留「向量路也认可」的命中（retriever 为 vector / bm25+vector）。
     #
@@ -210,7 +243,7 @@ def _recall_real(question: str, ctx: RecallContext, query: str = "") -> list[dic
     # 真答案留的口子）；这里更严一档：真实语料是他人发言，一旦进证据就可能被
     # writer 当成事实陈述，宁可漏也不能把道听途说当答案。
     semantic = [hit for hit in hits if "vector" in (hit.get("retriever") or "")]
-    return _kb_evidence("real", semantic)
+    return _kb_evidence("real", semantic, limit)
 
 
 # --------------------------------------------------------------------- lolibrary
@@ -364,7 +397,9 @@ def load_catalog(ctx: RecallContext) -> list[dict]:
     return records
 
 
-def _recall_lolibrary(question: str, ctx: RecallContext, query: str = "") -> list[dict]:
+def _recall_lolibrary(
+    question: str, ctx: RecallContext, query: str = "", limit: int | None = None
+) -> list[dict]:
     brand_targets, text = _brand_targets(query or question)
     # 别名已经展开成品牌全称，不能再当文本词打分（"ap" 会命中 "Cape"）。
     terms = [t for t in _query_terms(text) if t not in BRAND_ALIASES]
@@ -425,7 +460,7 @@ def _recall_lolibrary(question: str, ctx: RecallContext, query: str = "") -> lis
             "source_kind": CHANNEL_SOURCE_KIND["lolibrary"],
             "ref": record.get("slug") or "",
             "title": str(record.get("title") or record.get("slug") or ""),
-            "text": _clip(_lolibrary_summary(record)),
+            "text": _clip(_lolibrary_summary(record), limit),
             "url": str(record.get("url") or ""),
         }
         for _score, record in scored[:LOLIBRARY_TOP_K]
@@ -435,21 +470,23 @@ def _recall_lolibrary(question: str, ctx: RecallContext, query: str = "") -> lis
 # --------------------------------------------------------------------- xhs / weibo / web
 
 
-def _search_evidence(channel: str, results: list) -> list[dict]:
+def _search_evidence(channel: str, results: list, limit: int | None = None) -> list[dict]:
     return [
         {
             "channel": channel,
             "source_kind": CHANNEL_SOURCE_KIND[channel],
             "ref": r.url,
             "title": r.title,
-            "text": _clip(r.content or r.snippet),
+            "text": _clip(r.content or r.snippet, limit),
             "url": r.url,
         }
         for r in results
     ]
 
 
-def _recall_xhs(question: str, ctx: RecallContext, query: str = "") -> list[dict]:
+def _recall_xhs(
+    question: str, ctx: RecallContext, query: str = "", limit: int | None = None
+) -> list[dict]:
     from app.services import xhs_search
 
     results = xhs_search.search(
@@ -457,7 +494,7 @@ def _recall_xhs(question: str, ctx: RecallContext, query: str = "") -> list[dict
         ctx.settings,
         max_results=ctx.settings.xhs_max_results,
     )
-    return _search_evidence("xhs", results)
+    return _search_evidence("xhs", results, limit)
 
 
 def _host(url: str) -> str:
@@ -526,7 +563,9 @@ def _weibo_relevant(result, text: str) -> bool:
     return True
 
 
-def _recall_weibo(question: str, ctx: RecallContext, query: str = "") -> list[dict]:
+def _recall_weibo(
+    question: str, ctx: RecallContext, query: str = "", limit: int | None = None
+) -> list[dict]:
     from app.services import web_search
 
     # 这是「经搜索引擎找微博页面」，不是微博站内搜索。query 构造直接决定命中率，
@@ -574,16 +613,18 @@ def _recall_weibo(question: str, ctx: RecallContext, query: str = "") -> list[di
         if fallback_error:
             detail += f"；关键词兜底失败（{fallback_error}）"
         raise ChannelUnavailable(f"微博通道未取到页面：{detail}")
-    return _search_evidence("weibo", found[:WEIBO_MAX_EVIDENCE])
+    return _search_evidence("weibo", found[:WEIBO_MAX_EVIDENCE], limit)
 
 
-def _recall_web(question: str, ctx: RecallContext, query: str = "") -> list[dict]:
+def _recall_web(
+    question: str, ctx: RecallContext, query: str = "", limit: int | None = None
+) -> list[dict]:
     from app.services import web_search
 
     results = web_search.search(
         query or question, ctx.settings, max_results=ctx.settings.search_max_results
     )
-    return _search_evidence("web", results)
+    return _search_evidence("web", results, limit)
 
 
 # --------------------------------------------------------------------- 状态
@@ -693,8 +734,9 @@ def recall(channel: str, question: str, ctx: RecallContext | None = None, *, que
     handler = _HANDLERS.get(channel)
     if handler is None:
         raise ChannelUnavailable(f"未知通道：{channel}")
+    limit = evidence_text_limit(question, ctx.settings)
     try:
-        items = handler(question, ctx, query=query)
+        items = handler(question, ctx, query=query, limit=limit)
     except ChannelUnavailable:
         raise
     except Exception as exc:  # noqa: BLE001 - 单通道意外异常局部化，不拖垮整个召回

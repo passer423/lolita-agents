@@ -1500,6 +1500,36 @@ def test_xhs_recall_uses_configured_limit(monkeypatch):
     assert seen["limit"] == 7
 
 
+# --------------------------------------------------------------------- 证据窗口
+
+
+def test_evidence_window_widens_for_definition_and_care():
+    """定义/洗护/搭配题的结论常在后半段，窗口放宽；普通问价保持默认。"""
+    assert (
+        channels.evidence_text_limit("柄图是什么意思", settings)
+        == settings.evidence_text_limit_long
+    )
+    assert (
+        channels.evidence_text_limit("水洗标说不能湿洗，那要怎么处理", settings)
+        == settings.evidence_text_limit_long
+    )
+    assert (
+        channels.evidence_text_limit("SK 和 JSK 怎么搭配", settings)
+        == settings.evidence_text_limit_long
+    )
+    assert (
+        channels.evidence_text_limit("这条裙子多少钱", settings)
+        == settings.evidence_text_limit
+    )
+
+
+def test_clip_honours_explicit_limit():
+    long_text = "字" * 800
+    assert channels._clip(long_text, 600) == "字" * 600 + "…"
+    assert channels._clip("短句", 600) == "短句"
+    assert channels._clip(long_text, 0) == long_text
+
+
 # --------------------------------------------------------------------- 证据分源与排序
 
 

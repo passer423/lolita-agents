@@ -99,6 +99,13 @@ class AppSettings(BaseSettings):
     # <=0 表示不限制。
     evidence_max_items: int = 12
 
+    # 单条证据送进 writer 的正文长度。默认 300 字足够概括大部分帖子；但定义类
+    # （「A 和 B 有什么区别」）与洗护/安全类问题的答案往往就藏在长文的后半段，
+    # 300 字会在关键结论前截断（own-08 的「同系列的 OP…」）。这两类放宽到
+    # ``evidence_text_limit_long``，其余保持默认，避免整体 prompt 变贵。
+    evidence_text_limit: int = 300
+    evidence_text_limit_long: int = 700
+
     # 单次问答的**整体**预算（秒）。各通道和模型客户端都有自己的超时，但没有总预算时
     # 最坏会串成两分钟（核心召回 + 30s 规划 + 65s 小红书 + 20s 搜索 + 60s 写作）。
     # 超时返回已查到的证据并注明「部分通道超时」，不报 500。<=0 表示不限制。
