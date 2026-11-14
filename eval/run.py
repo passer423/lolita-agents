@@ -31,8 +31,13 @@ baseline 的 MRR / hit@10 / 引用准确率，直接列出变好与变差的条�
 * **引用准确率**：离线口径下按前 `--cite-k` 条证据生成引用（与未配模型时
   `graph._forced_answer` 的逐条列证据行为一致），被引用证据命中金标的比例。
   这是检索层能否把可支撑答案的证据送进引用位的直接度量；不是 LLM 自评。
-* 相关性判定：优先看 `expected_refs`（chunk_id / lolibrary slug）；没有固定
-  ref 的实时通道用 `support_terms` 是否出现在证据文本里。
+  默认 `--cite-k 1`：只问「第一条被引用的证据是否真的支撑答案」。同时保留旧
+  口径（固定前 3 条、ref 精确匹配）与「前 3 条 + ref 家族」两列，便于把口径
+  差异与检索效果分开看。
+* 相关性判定：优先看 `expected_refs`（chunk_id / lolibrary slug）。同一文档的
+  不同切片（`xxx#0` / `xxx#1`）与同一系列的不同条目（slug 至少共享 3 段前缀）
+  视为同一 ref 家族；没有固定 ref 的实时通道用 `support_terms` 是否出现在证据
+  文本里。
 
 ## 边界
 
@@ -62,7 +67,9 @@ from app.config import settings as default_settings  # noqa: E402
 
 METRIC_KS = (1, 3, 5, 10)
 EVIDENCE_TEXT_LIMIT = 300
-CITATION_K = 3
+# 旧口径固定看前 3 条；保留它是为了在报告里和新口径并列对照，不再作为默认。
+LEGACY_CITATION_K = 3
+DEFAULT_CITE_K = 1
 DEFAULT_OUT = ROOT / "eval" / "reports"
 
 CONFIGS: dict[str, dict[str, Any]] = {
@@ -90,6 +97,8 @@ RESULT_FIELDS = [
     *[f"hit@{k}" for k in METRIC_KS],
     "mrr",
     "citation_accuracy",
+    "citation_accuracy@3",
+    "citation_accuracy@3_family",
     "answer_supported",
     "cited_count",
     "expected_refs",
@@ -105,6 +114,8 @@ SUMMARY_FIELDS = [
     *[f"recall@{k}" for k in METRIC_KS],
     "mrr",
     "citation_accuracy",
+    "citation_accuracy@3",
+    "citation_accuracy@3_family",
     "answer_supported_rate",
 ]
 
@@ -237,27 +248,76 @@ def merge_evidence(
     return [*merged, *supplementary]
 
 
-def is_relevant(item: dict, evidence: dict) -> bool:
+def _ref_doc(ref: str) -> str:
+    """ref 的「文档」部分：chunk id 去掉 ``#n``，lolibrary slug 原样返回。"""
+    return str(ref or "").split("#", 1)[0]
+
+
+def _ref_tokens(ref: str) -> list[str]:
+    return [token for token in _ref_doc(ref).split("-") if token]
+
+
+def same_ref_family(expected: str, candidate: str) -> bool:
+    """同一文档的不同切片，或同一系列的不同条目。
+
+    两种形态分别处理：
+
+    * chunk ref ``4580969816785987#0`` / ``#1``：``#`` 前是文档 id，相等即同一份
+      资料，属于同一个 ref 家族；
+    * lolibrary slug ``iw-white-lily-op-2026`` / ``iw-white-lily-op-world-edition``：
+      没有 ``#`` 分段，用 slug 前缀判断系列——至少共享 3 段（``iw-white-lily-op``）
+      才算同系列。只共享品牌段（``ap-``）不算，否则会把同品牌不同款误判成命中。
+    """
+    expected_doc, candidate_doc = _ref_doc(expected), _ref_doc(candidate)
+    if not expected_doc or not candidate_doc:
+        return False
+    if expected_doc == candidate_doc:
+        return True
+    expected_tokens, candidate_tokens = _ref_tokens(expected_doc), _ref_tokens(candidate_doc)
+    common = 0
+    for expected_token, candidate_token in zip(expected_tokens, candidate_tokens, strict=False):
+        if expected_token != candidate_token:
+            break
+        common += 1
+    return common >= 3
+
+
+def is_relevant(item: dict, evidence: dict, *, family: bool = False) -> bool:
+    """证据是否命中金标；``family=True`` 时同文档切片 / 同系列条目也算命中。"""
     refs = set(item["expected_refs"])
     if refs:
-        return str(evidence.get("ref") or "") in refs
+        ref = str(evidence.get("ref") or "")
+        if ref in refs:
+            return True
+        return family and any(same_ref_family(expected, ref) for expected in refs)
     haystack = f"{evidence.get('title', '')} {evidence.get('text', '')}".lower()
     return any(term.lower() in haystack for term in item["support_terms"])
 
 
-def score_listing(item: dict, ranked: list[dict]) -> dict[str, Any]:
+def score_listing(item: dict, ranked: list[dict], cite_k: int = DEFAULT_CITE_K) -> dict[str, Any]:
     first_rank: int | None = None
     for rank, evidence in enumerate(ranked, start=1):
         if is_relevant(item, evidence):
             first_rank = rank
             break
-    cited = ranked[:CITATION_K]
-    supported = sum(1 for evidence in cited if is_relevant(item, evidence))
+    # 新口径：只引用前 cite_k 条，同文档/同系列算命中。
+    cited = ranked[:cite_k]
+    supported = sum(1 for evidence in cited if is_relevant(item, evidence, family=True))
+    # 旧口径的对照列：固定前 3 条，ref 必须精确相等。
+    legacy_cited = ranked[:LEGACY_CITATION_K]
+    legacy_supported = sum(1 for evidence in legacy_cited if is_relevant(item, evidence))
+    family_supported = sum(
+        1 for evidence in legacy_cited if is_relevant(item, evidence, family=True)
+    )
     return {
         "rank": first_rank,
         **{f"hit@{k}": int(first_rank is not None and first_rank <= k) for k in METRIC_KS},
         "mrr": (1.0 / first_rank) if first_rank else 0.0,
         "citation_accuracy": (supported / len(cited)) if cited else 0.0,
+        "citation_accuracy@3": (legacy_supported / len(legacy_cited)) if legacy_cited else 0.0,
+        "citation_accuracy@3_family": (
+            family_supported / len(legacy_cited) if legacy_cited else 0.0
+        ),
         "answer_supported": int(supported > 0),
         "cited_count": len(cited),
         "top_refs": " | ".join(str(e.get("ref") or "") for e in ranked[:10]),
@@ -265,7 +325,11 @@ def score_listing(item: dict, ranked: list[dict]) -> dict[str, Any]:
 
 
 def run_config(
-    items: list[dict], config_name: str, config: dict[str, Any], retriever: Retriever
+    items: list[dict],
+    config_name: str,
+    config: dict[str, Any],
+    retriever: Retriever,
+    cite_k: int = DEFAULT_CITE_K,
 ) -> list[dict]:
     rows: list[dict] = []
     for item in items:
@@ -300,7 +364,7 @@ def run_config(
         if channel_error:
             channel_row = _skipped_row(config_name, item, "channel", channel_error)
         else:
-            channel_row = _scored_row(config_name, item, "channel", channel_listing)
+            channel_row = _scored_row(config_name, item, "channel", channel_listing, cite_k)
         rows.append(channel_row)
 
         # merged 视图：核心通道全挂才算跳过；单通道失败仍可评估其余证据。
@@ -308,11 +372,13 @@ def run_config(
             merged_error = "所有核心通道都不可用：" + "；".join(sorted(errors.values()))
             rows.append(_skipped_row(config_name, item, "merged", merged_error))
         else:
-            rows.append(_scored_row(config_name, item, "merged", merged))
+            rows.append(_scored_row(config_name, item, "merged", merged, cite_k))
     return rows
 
 
-def _scored_row(config_name: str, item: dict, view: str, ranked: list[dict]) -> dict:
+def _scored_row(
+    config_name: str, item: dict, view: str, ranked: list[dict], cite_k: int = DEFAULT_CITE_K
+) -> dict:
     return {
         "config": config_name,
         "item_id": item["id"],
@@ -321,7 +387,7 @@ def _scored_row(config_name: str, item: dict, view: str, ranked: list[dict]) -> 
         "status": "ok",
         "reason": "",
         "query": item["query"],
-        **score_listing(item, ranked),
+        **score_listing(item, ranked, cite_k),
         "expected_refs": " | ".join(item["expected_refs"]),
     }
 
@@ -339,6 +405,8 @@ def _skipped_row(config_name: str, item: dict, view: str, reason: str) -> dict:
         **{f"hit@{k}": "" for k in METRIC_KS},
         "mrr": "",
         "citation_accuracy": "",
+        "citation_accuracy@3": "",
+        "citation_accuracy@3_family": "",
         "answer_supported": "",
         "cited_count": "",
         "expected_refs": " | ".join(item["expected_refs"]),
@@ -375,6 +443,10 @@ def summarize(rows: list[dict], configs: list[str]) -> list[dict]:
                     },
                     "mrr": _mean(evaluated, "mrr"),
                     "citation_accuracy": _mean(evaluated, "citation_accuracy"),
+                    "citation_accuracy@3": _mean(evaluated, "citation_accuracy@3"),
+                    "citation_accuracy@3_family": _mean(
+                        evaluated, "citation_accuracy@3_family"
+                    ),
                     "answer_supported_rate": _mean(evaluated, "answer_supported"),
                 }
             )
@@ -449,8 +521,17 @@ def load_previous(path_arg: str, out_root: Path, current_dir: Path) -> Path | No
     return candidates[0] if candidates else None
 
 
+def _is_legacy_report(previous: dict) -> bool:
+    """口径变更前的报告：只有 citation_accuracy，没有 citation_accuracy@3。"""
+    rows = previous.get("results") or []
+    return bool(rows) and "citation_accuracy@3" not in rows[0]
+
+
 def cross_run_diff(previous: dict, current_results: list[dict]) -> list[dict]:
     old_rows = previous.get("results") or []
+    # 口径变更前的报告只有 citation_accuracy，那个值就是旧口径（前 3 条、精确匹配）；
+    # 新报告另存 citation_accuracy@3。两边先对齐到同一口径，避免把口径差异当成效果变化。
+    previous_legacy = _is_legacy_report(previous)
     old = {
         (row["item_id"], row["view"]): row
         for row in old_rows
@@ -466,9 +547,8 @@ def cross_run_diff(previous: dict, current_results: list[dict]) -> list[dict]:
         before, after = old[key], new[key]
         delta_mrr = _as_float(after["mrr"]) - _as_float(before["mrr"])
         delta_hit = _as_float(after["hit@10"]) - _as_float(before["hit@10"])
-        delta_cite = _as_float(after["citation_accuracy"]) - _as_float(
-            before["citation_accuracy"]
-        )
+        after_cite = after["citation_accuracy@3" if previous_legacy else "citation_accuracy"]
+        delta_cite = _as_float(after_cite) - _as_float(before["citation_accuracy"])
         if before["status"] != after["status"]:
             direction = "status_changed"
         else:
@@ -523,6 +603,12 @@ def main(argv: list[str] | None = None) -> int:
         default=",".join(CONFIGS),
         help="要跑的配置，逗号分隔；可选：" + ", ".join(CONFIGS),
     )
+    parser.add_argument(
+        "--cite-k",
+        type=int,
+        default=DEFAULT_CITE_K,
+        help=f"引用准确率只看前 k 条证据（默认 {DEFAULT_CITE_K}）",
+    )
     parser.add_argument("--online", action="store_true", help="同时跑 xhs / weibo / web（联网）")
     parser.add_argument(
         "--compare",
@@ -537,6 +623,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"未知配置：{', '.join(unknown)}；可选：{', '.join(CONFIGS)}")
     if "baseline" not in configs:
         configs.insert(0, "baseline")
+    if args.cite_k < 1:
+        raise SystemExit("--cite-k 必须 >= 1")
 
     golden_path = Path(args.golden)
     items = load_golden(golden_path)
@@ -550,7 +638,7 @@ def main(argv: list[str] | None = None) -> int:
     all_rows: list[dict] = []
     for config in configs:
         print(f"跑配置 {config} ...")
-        all_rows.extend(run_config(items, config, CONFIGS[config], retriever))
+        all_rows.extend(run_config(items, config, CONFIGS[config], retriever, args.cite_k))
 
     summary = summarize(all_rows, configs)
     deltas = config_deltas(all_rows, configs)
@@ -579,7 +667,8 @@ def main(argv: list[str] | None = None) -> int:
         "golden_path": str(golden_path),
         "golden_items": len(items),
         "online": args.online,
-        "citation_k": CITATION_K,
+        "citation_k": args.cite_k,
+        "citation_k_legacy": LEGACY_CITATION_K,
         "configs": {name: CONFIGS[name] for name in configs},
         "summary": summary,
         "results": all_rows,
@@ -602,6 +691,8 @@ def main(argv: list[str] | None = None) -> int:
         previous_path=previous_path,
         online=args.online,
         generated_at=generated_at,
+        cite_k=args.cite_k,
+        previous_legacy=_is_legacy_report(previous),
     )
     (out_dir / "report.md").write_text(report, encoding="utf-8")
 
@@ -611,7 +702,8 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"{row['config']:<18} n={row['n']:<3} skip={row['skipped']:<3} "
                 f"recall@1={row['recall@1']:.3f} recall@10={row['recall@10']:.3f} "
-                f"MRR={row['mrr']:.3f} cite={row['citation_accuracy']:.3f}"
+                f"MRR={row['mrr']:.3f} cite@{args.cite_k}={row['citation_accuracy']:.3f} "
+                f"(旧口径 cite@3={row['citation_accuracy@3']:.3f})"
             )
     print(f"\n报告目录：{out_dir}")
     return 0
@@ -629,6 +721,8 @@ def _render_report(
     previous_path: Path | None,
     online: bool,
     generated_at: str,
+    cite_k: int = DEFAULT_CITE_K,
+    previous_legacy: bool = False,
 ) -> str:
     lines = [
         "# RAG 检索评测报告",
@@ -637,12 +731,13 @@ def _render_report(
         f"- 金标集：`{golden_path}`（{len(items)} 条）",
         f"- 配置：{', '.join(configs)}",
         f"- 实时通道：{'开启（--online）' if online else '关闭（离线核心通道）'}",
-        f"- 引用口径：取前 {CITATION_K} 条证据自动生成引用，命中金标才算被支撑",
+        f"- 引用口径：新口径取前 {cite_k} 条证据、同文档/同系列 ref 家族算命中；"
+        f"旧口径（前 {LEGACY_CITATION_K} 条、ref 精确匹配）保留为对照列",
         "",
         "## 汇总（merged 视图）",
         "",
-        "| 配置 | n | skipped | recall@1 | recall@3 | recall@5 | recall@10 | MRR | 引用准确率 | 答案有支撑 |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        f"| 配置 | n | skipped | recall@1 | recall@3 | recall@5 | recall@10 | MRR | 引用@{cite_k} | 引用@3（旧口径） | 答案有支撑 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in summary:
         if row["view"] != "merged" or row["channel"] != "*":
@@ -651,15 +746,16 @@ def _render_report(
             f"| {row['config']} | {row['n']} | {row['skipped']} | "
             f"{fmt(row['recall@1'])} | {fmt(row['recall@3'])} | {fmt(row['recall@5'])} | "
             f"{fmt(row['recall@10'])} | {fmt(row['mrr'])} | "
-            f"{fmt(row['citation_accuracy'])} | {fmt(row['answer_supported_rate'])} |"
+            f"{fmt(row['citation_accuracy'])} | {fmt(row['citation_accuracy@3'])} | "
+            f"{fmt(row['answer_supported_rate'])} |"
         )
 
     lines += [
         "",
         "## baseline 分通道（channel 视图）",
         "",
-        "| 通道 | n | skipped | recall@1 | recall@3 | recall@5 | recall@10 | MRR | 引用准确率 |",
-        "|---|---|---|---|---|---|---|---|---|",
+        f"| 通道 | n | skipped | recall@1 | recall@3 | recall@5 | recall@10 | MRR | 引用@{cite_k} | 引用@3（旧口径） |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in summary:
         if row["config"] != "baseline" or row["view"] != "channel" or row["channel"] == "*":
@@ -667,8 +763,11 @@ def _render_report(
         lines.append(
             f"| {row['channel']} | {row['n']} | {row['skipped']} | "
             f"{fmt(row['recall@1'])} | {fmt(row['recall@3'])} | {fmt(row['recall@5'])} | "
-            f"{fmt(row['recall@10'])} | {fmt(row['mrr'])} | {fmt(row['citation_accuracy'])} |"
+            f"{fmt(row['recall@10'])} | {fmt(row['mrr'])} | "
+            f"{fmt(row['citation_accuracy'])} | {fmt(row['citation_accuracy@3'])} |"
         )
+
+    lines += _citation_caliber_section(rows, summary, cite_k)
 
     lines += ["", "## 配置对比：哪些条目变好 / 变差（相对 baseline）", ""]
     for config in configs:
@@ -716,6 +815,11 @@ def _render_report(
         lines.append("未指定 `--compare`（或找不到可对比的历史报告），本次不生成跨运行 diff。")
     else:
         lines.append(f"对比基线：`{previous_path}`（仅 baseline 配置）")
+        if previous_legacy:
+            lines.append(
+                "对比基线生成于引用口径变更前：引用列已按旧口径（cite@3、精确匹配）"
+                "逐条对齐，避免把口径差异当成检索变化。"
+            )
         lines.append("")
         improved = [row for row in diffs if row["direction"] == "improved"]
         regressed = [row for row in diffs if row["direction"] == "regressed"]
@@ -785,6 +889,86 @@ def _render_report(
         "",
     ]
     return "\n".join(lines)
+
+
+def _citation_caliber_section(rows: list[dict], summary: list[dict], cite_k: int) -> list[str]:
+    """把旧口径、只换家族匹配、新默认口径三种数字并排，并拆开差异来源。"""
+    lines = [
+        "",
+        "## 引用口径变化（baseline）",
+        "",
+        "三种口径的区别只在「引用窗口」和「ref 是否允许家族匹配」两处：",
+        "",
+        f"- **旧口径 `cite@{LEGACY_CITATION_K}`**：固定取前 {LEGACY_CITATION_K} 条证据，"
+        "ref 必须与金标完全相等。上一版报告用的是这一口径。",
+        f"- **`cite@{LEGACY_CITATION_K}+家族`**：窗口不变，但同一文档的其它切片"
+        "（`xxx#1`）与同系列条目（slug 至少共享 3 段前缀）算命中。",
+        f"- **新口径 `cite@{cite_k}`**：窗口收到前 {cite_k} 条，家族匹配保留（当前默认）。",
+        "",
+        f"| 视图 | n | 旧口径 cite@{LEGACY_CITATION_K} | "
+        f"cite@{LEGACY_CITATION_K}+家族 | 新口径 cite@{cite_k} | 旧→新 |",
+        "|---|---|---|---|---|---|",
+    ]
+    base = {
+        (row["view"], row["channel"]): row
+        for row in summary
+        if row["config"] == "baseline"
+    }
+    for view, channel in (("merged", "*"), ("channel", "*")):
+        row = base.get((view, channel))
+        if not row or not row["n"]:
+            continue
+        label = "merged" if view == "merged" else "channel（全部通道）"
+        lines.append(
+            f"| {label} | {row['n']} | {fmt(row['citation_accuracy@3'])} | "
+            f"{fmt(row['citation_accuracy@3_family'])} | {fmt(row['citation_accuracy'])} | "
+            f"{row['citation_accuracy'] - row['citation_accuracy@3']:+.3f} |"
+        )
+
+    merged_row = base.get(("merged", "*"))
+    if merged_row and merged_row["n"]:
+        window_gain = merged_row["citation_accuracy"] - merged_row["citation_accuracy@3_family"]
+        family_gain = (
+            merged_row["citation_accuracy@3_family"] - merged_row["citation_accuracy@3"]
+        )
+        lines += [
+            "",
+            "差异来源（merged）：",
+            "",
+            f"- **引用窗口 {LEGACY_CITATION_K} → {cite_k}**："
+            f"{merged_row['citation_accuracy@3_family']:.3f} → "
+            f"{merged_row['citation_accuracy']:.3f}（{window_gain:+.3f}）。"
+            f"旧口径下引用 3 条证据，只有 1 条命中金标时仍记 1/3；"
+            f"新口径只问「第 1 条被引用的证据是否成立」。",
+            f"- **ref 家族匹配**：{merged_row['citation_accuracy@3']:.3f} → "
+            f"{merged_row['citation_accuracy@3_family']:.3f}（{family_gain:+.3f}）。"
+            "同一文档的相邻切片、同系列档案从此不再算成引用错误。",
+        ]
+
+    changed = [
+        row
+        for row in rows
+        if row["config"] == "baseline"
+        and row["view"] == "merged"
+        and row["status"] == "ok"
+        and _as_float(row["citation_accuracy"]) != _as_float(row["citation_accuracy@3"])
+    ]
+    if changed:
+        lines += [
+            "",
+            f"逐条变化（baseline merged，新口径与旧口径不同的条目，共 {len(changed)} 条）：",
+            "",
+            f"| 条目 | 旧 cite@{LEGACY_CITATION_K} | 新 cite@{cite_k} | "
+            "金标 ref | 前 3 条证据 ref |",
+            "|---|---|---|---|---|",
+        ]
+        for row in changed:
+            top3 = " / ".join(str(row["top_refs"]).split(" | ")[:3])
+            lines.append(
+                f"| {row['item_id']} | {fmt(row['citation_accuracy@3'])} | "
+                f"{fmt(row['citation_accuracy'])} | {row['expected_refs'] or '-'} | {top3} |"
+            )
+    return lines
 
 
 def _rank_text(row: dict) -> str:

@@ -9,7 +9,9 @@
 {"id": "own-09", "channel": "own", "query": "KC 是什么", "expected_refs": ["term-kc#0"], "support_terms": ["Katyusha", "发箍"], "note": "term-kc.md 的缩写解释"}
 {"id": "own-10", "channel": "own", "query": "怎么判断山正", "expected_refs": ["term-shanzheng#0"], "support_terms": ["山正", "吊牌", "走线"], "note": "term-shanzheng.md 的核查项"}
 {"id": "own-11", "channel": "own", "query": "SK 和 JSK 怎么搭配", "expected_refs": ["term-sk#0"], "support_terms": ["SK", "半身裙", "腰围"], "note": "term-sk.md 的搭配建议"}
-{"id": "own-12", "channel": "own", "query": "痛lo是什么意思", "expected_refs": ["term-tonglo#0"], "support_terms": ["痛 lo", "痛包", "周边"], "note": "term-tonglo.md 的定义"}
+{"id": "own-12", "channel": "own", "query": "痛lo是什么意思", "expected_refs": ["term-tonglo#0"], "support_terms": ["痛 lo", "痛包", "周边"], "note": "term-tonglo.md 的定义；无空格写法"}
+{"id": "own-12b", "channel": "own", "query": "痛 lo 是什么意思", "expected_refs": ["term-tonglo#0"], "support_terms": ["痛 lo", "痛包", "周边"], "note": "term-tonglo.md 的定义；带空格写法（与正文标题一致）"}
+{"id": "own-12c", "channel": "own", "query": "痛LO是什么意思", "expected_refs": ["term-tonglo#0"], "support_terms": ["痛 lo", "痛包", "周边"], "note": "term-tonglo.md 的定义；大写写法"}
 {"id": "real-01", "channel": "real", "query": "林檎之森 OP 再贩的蓝色绿色会掉色吗", "expected_refs": ["5015120407953851#0"], "support_terms": ["浮色", "掉色", "染色"], "note": "再贩公告：红色面料导致浮色，需取下蝴蝶结"}
 {"id": "real-02", "channel": "real", "query": "珀茵特庄园的裙子有浮色怎么处理", "expected_refs": ["4845985355010428#0", "4845985355010428#1"], "support_terms": ["浮色", "水洗", "清洗"], "note": "店家质检与水洗实验说明"}
 {"id": "real-03", "channel": "real", "query": "AP 和 Baby 的水洗标是什么意思 不能湿洗怎么办", "expected_refs": ["4580969816785987#0", "4580969816785987#1"], "support_terms": ["不能湿洗", "干洗", "水洗标"], "note": "水洗标图解与不能湿洗的后果"}
