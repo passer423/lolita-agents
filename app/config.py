@@ -106,6 +106,12 @@ class AppSettings(BaseSettings):
     # 离线部署或测试可以关掉；关掉后只返回本地档案已有的字段。
     lolibrary_online_enabled: bool = True
 
+    # ---------- 可观测性 ----------
+    # 轨迹 JSONL 按文件大小轮转，避免 data/logs/chat_runs.jsonl 随使用无限增长。
+    # 只保留最近 N 个归档；<=0 关闭轮转（排查时可以临时关掉）。
+    trace_max_bytes: int = 5 * 1024 * 1024
+    trace_keep_files: int = 3
+
     # ---------- 派生路径 ----------
     @property
     def kb_dir(self) -> Path:
