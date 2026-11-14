@@ -50,7 +50,6 @@ if str(ROOT) not in sys.path:
 from app import bridge  # noqa: E402
 from app.config import settings  # noqa: E402
 
-
 # 品牌页的第一页是 /brands/<slug>，但它的分页链接指向筛过品牌的 search；
 # /brands/<slug>?page=2 会被忽略（实测两页返回同一条）。要翻页只能走这个模板。
 BRAND_SEARCH_URL = "https://lolibrary.org/search?brands%5B0%5D={slug}&sort=added_new&page={page}"
