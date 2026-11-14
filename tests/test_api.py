@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+import sys
 import time
+from pathlib import Path
 
 from app.agent import channels
 from app.routers import chat as chat_router
@@ -66,25 +68,64 @@ def _core():
 # --------------------------------------------------------------------- 状态
 
 
-def test_status_reports_channels_without_key(client):
-    payload = client.get("/api/chat/status").json()
+def _stub_upstream(root: Path) -> Path:
+    """造一个「上游存在但索引为空」的最小 upstream。
+
+    真正空的 ``src/config.py`` 会让 ``from src.config import Settings`` 失败，
+    走进 ImportError 那条 reason，测不到「索引缺失」。这里只补到能被导入、
+    ``read_manifest`` 返回空清单为止——目的是控制分支，不是模拟整条管线。
+    """
+    (root / "src" / "pipeline").mkdir(parents=True)
+    (root / "src" / "config.py").write_text(
+        "class Settings:\n    def __init__(self, **kwargs):\n        self.__dict__.update(kwargs)\n",
+        encoding="utf-8",
+    )
+    (root / "src" / "pipeline" / "runtime.py").write_text(
+        "def read_manifest(settings):\n    return {'chunks': 0}\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_status_reports_channels_without_key(client, tmp_path, monkeypatch):
+    # sys.path 会被生产代码 insert(0)；整份快照给 monkeypatch，测试结束自动还原。
+    monkeypatch.setattr(sys, "path", list(sys.path))
+
+    def _status():
+        return client.get("/api/chat/status").json()
+
+    payload = _status()
     assert payload["enabled"] is False
     assert "LLM_API_KEY" in payload["hint"]
     assert payload["channels"]["core"] == ["own", "real", "lolibrary"]
     assert payload["channels"]["supplementary"] == ["xhs", "weibo", "web"]
     status = payload["channels"]["status"]
     assert set(status) == {"own", "real", "lolibrary", "xhs", "weibo", "web"}
-    # 「没开」和「开了但没就绪」必须能区分：测试环境里 xhs 是关的，
-    # 而 own 是「开着但临时目录没有索引」。
+    # 「没开」和「开了但没就绪」必须能区分：测试环境里 xhs 是关的。
     assert status["xhs"] == {
         "enabled": False,
         "ready": False,
         "reason": "未启用（XHS_ENABLED=false）",
     }
     assert status["own"]["enabled"] is True
+    assert status["weibo"]["enabled"] is False
+
+    # (a) 上游目录不存在：必须是「找不到上游」，不能混成「索引没建」。
+    monkeypatch.setattr(chat_router.settings, "lolita_rag_root", tmp_path / "missing-rag")
+    status = _status()["channels"]["status"]
+    assert status["own"]["ready"] is False
+    assert status["own"]["reason"].startswith("UpstreamUnavailable")
+
+    # (b) 上游在、但清单为空：必须落到索引缺失那条 reason。
+    # 先清掉真实的 src.* 缓存，否则本机装过上游时会直接复用旧模块，测不到临时目录。
+    for name in [key for key in sys.modules if key == "src" or key.startswith("src.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setattr(
+        chat_router.settings, "lolita_rag_root", _stub_upstream(tmp_path / "rag")
+    )
+    status = _status()["channels"]["status"]
     assert status["own"]["ready"] is False
     assert "build_kb_index" in status["own"]["reason"]
-    assert status["weibo"]["enabled"] is False
 
 
 # --------------------------------------------------------------------- 知识库索引
