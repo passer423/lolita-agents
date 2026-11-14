@@ -11,7 +11,6 @@ import pytest
 from app.agent import graph, trace
 from app.agent import writer as writer_mod
 from app.agent.writer import (
-    APPELLATION_ARCHIVE,
     APPELLATION_SHOP,
     APPELLATION_UGC,
     DeepSeekWriter,
@@ -156,8 +155,10 @@ def test_coverage_warning_reaches_response_usage_without_touching_answer(monkeyp
 
     diagnostics = result["usage"]["writer"]["diagnostics"]
     assert result["answer"] == answer
+    # 顶层字段给前端和排查直接用，不再要求先翻 usage。
+    assert result["citation_coverage"]["uncited_count"] == 1
     assert diagnostics["citation_coverage"]["uncited_count"] == 1
-    assert diagnostics["citation_coverage"]["uncited_sentences"] == [
+    assert result["citation_coverage"]["uncited_sentences"] == [
         "这条裙子的浮色用普通洗涤剂手洗两次基本就掉完了。"
     ]
 
@@ -204,12 +205,45 @@ def test_real_ugc_keeps_netizen_wording():
 
 
 def test_archive_is_not_called_netizen():
+    """档案是社区整理，不是品牌官方——既不能叫网友，也不能抬成官方。"""
     ev = evidence(source_kind="third_party", title="Memorial Cake JSK", url="https://lolibrary.org/items/x")
-    assert source_appellation(ev[0]) == APPELLATION_ARCHIVE
+    assert source_appellation(ev[0]) == "档案（Lolibrary）"
 
     writer = make_writer(content="有网友说这条是 2016 年的款式[1]。")
+    text = writer.write("哪年的", ev)
 
-    assert writer.write("哪年的", ev) == "官方资料说这条是 2016 年的款式[1]。"
+    assert "网友" not in text
+    assert "官方" not in text
+    assert text == "Lolibrary 上说这条是 2016 年的款式[1]。"
+
+
+def test_community_archive_without_lolibrary_is_still_archive():
+    ev = evidence(source_kind="third_party", title="某品牌年鉴摘录", url="https://example.com/a")
+    assert source_appellation(ev[0]) == "档案（社区整理）"
+
+    writer = make_writer(content="有网友提到这条是早年款[1]。")
+
+    assert writer.write("哪年的", ev) == "档案记录里提到这条是早年款[1]。"
+
+
+def test_official_is_reserved_for_brand_channels():
+    ev = evidence(source_kind="realtime", title="品牌官方公告：2026 年再贩", text="6 月 1 日开售")
+    assert source_appellation(ev[0]) == "官方"
+
+    writer = make_writer(content="有网友说 6 月 1 日开售[1]。")
+
+    assert writer.write("什么时候开售", ev) == "官方说 6 月 1 日开售[1]。"
+
+
+def test_archive_is_not_promoted_to_official_in_prompt():
+    archive = evidence(
+        source_kind="third_party", title="Memorial Cake JSK", url="https://lolibrary.org/items/x"
+    )
+    messages = build_synth_messages("q", archive)
+
+    assert "（档案（Lolibrary））" in messages[-1]["content"]
+    assert "社区整理" in messages[0]["content"]
+    assert "不是品牌官方" in messages[0]["content"]
 
 
 def test_mixed_ugc_and_store_citation_is_left_alone():

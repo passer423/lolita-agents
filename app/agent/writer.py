@@ -41,10 +41,11 @@ MAX_HISTORY_CHARS = 500
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
 # 证据效力等级 → 给模型看的标签。与 channels.CHANNEL_SOURCE_KIND 一一对应。
-# 「档案」属于官方性质的资料，不能和普通网帖混成一个称呼。
+# 注意：档案不是官方。Lolibrary 是社区整理的发售资料库，可能有错漏，用户看到
+# 「官方」会当成品牌确认过的事实，所以两者必须分开称呼。
 SOURCE_KIND_LABELS = {
     "own_content": "自有知识库",
-    "third_party": "官方/档案",
+    "third_party": "档案",
     "realtime": "网络实时内容",
     "upstream_ugc": "网友发言",
 }
@@ -67,11 +68,14 @@ _SHOP_MARKERS = (
     "旗舰店", "专营店", "官方店", "店铺", "店家", "商家", "掌柜", "客服",
     "洋服社", "工作室", "商品页", "质检报告", "淘宝", "天猫",
 )
-_OFFICIAL_MARKERS = ("官方公告", "官方说明", "官方档案", "博物馆", "协会", "年鉴", "档案")
+# 「官方」只留给品牌自有渠道。档案馆、博物馆、协会都不是品牌，不能借用这个词。
+_OFFICIAL_MARKERS = ("官方公告", "官方说明", "品牌官方", "官方账号", "官网", "品牌官网")
 
-# 称呼：非 UGC 来源绝不能用「网友」笼统指代。
+# 称呼：非 UGC 来源绝不能用「网友」笼统指代，档案也不能抬成「官方」。
 APPELLATION_OWN = "自有知识库"
-APPELLATION_ARCHIVE = "官方/档案"
+APPELLATION_OFFICIAL = "官方"
+APPELLATION_ARCHIVE = "档案（Lolibrary）"
+APPELLATION_COMMUNITY_ARCHIVE = "档案（社区整理）"
 APPELLATION_SHOP = "店家/商家"
 APPELLATION_UGC = "网友发言"
 APPELLATION_WEB = "网络内容"
@@ -92,29 +96,32 @@ def _looks_like_shop(item: dict) -> bool:
     return any(marker in haystack for marker in _SHOP_MARKERS)
 
 
-def _looks_like_archive(item: dict) -> bool:
+def _is_lolibrary(item: dict) -> bool:
     host = _host_of(str(item.get("url") or ""))
-    if host.endswith("lolibrary.org") or host.endswith(".gov") or host.endswith(".edu"):
-        return True
+    return host.endswith("lolibrary.org") or "lolibrary" in str(item.get("title") or "").lower()
+
+
+def _looks_like_official(item: dict) -> bool:
     haystack = f"{item.get('title', '')} {str(item.get('text') or '')[:80]}"
     return any(marker in haystack for marker in _OFFICIAL_MARKERS)
 
 
 def source_appellation(item: dict) -> str:
-    """证据该被怎么称呼：效力等级打底，来源域纠正「店家 / 官方 / 网友」。
+    """证据该被怎么称呼：效力等级打底，来源域纠正「店家 / 官方 / 档案 / 网友」。
 
     等级只说「能不能当规范」，这里回答「是谁说的」。顺序很重要：店家页面上
-    也常写「官方」，先判店铺再判官方，否则旗舰店会被叫成官方。
+    也常写「官方」，先判店铺再判官方，否则旗舰店会被叫成官方；档案则单独
+    标成社区整理，不和品牌官方混用。
     """
     kind = item.get("source_kind")
     if kind == "own_content":
         return APPELLATION_OWN
     if kind == "third_party":
-        return APPELLATION_ARCHIVE
+        return APPELLATION_ARCHIVE if _is_lolibrary(item) else APPELLATION_COMMUNITY_ARCHIVE
     if _looks_like_shop(item):
         return APPELLATION_SHOP
-    if _looks_like_archive(item):
-        return APPELLATION_ARCHIVE
+    if _looks_like_official(item):
+        return APPELLATION_OFFICIAL
     if kind == "upstream_ugc":
         return APPELLATION_UGC
     if kind == "realtime":
@@ -127,7 +134,9 @@ _CLUE_HEADER = (
     "以下是网友发言、店家页面或网络实时内容。称呼要跟每条开头的标签走：\n"
     "「网友发言」→ 写「有网友提到」「出物的人说」；\n"
     "「店家/商家」→ 写「店家提到」「店铺页面写着」，绝不能写成「网友」；\n"
-    "「官方/档案」→ 写「官方资料里」「档案里」。\n"
+    "「档案（Lolibrary）」→ 社区整理的发售资料库，可能有错漏，写「档案记录」"
+    "「Lolibrary 上记录」，不能写「官方」，也不能写「网友」；\n"
+    "「官方」→ 品牌自有渠道，写「官方公告」「品牌官方说明」。\n"
     "这些内容不得作为洗护方式、尺码、材质、工艺的规范结论；"
     "与【可作依据】冲突时，以后者为准。"
 )
@@ -155,11 +164,14 @@ SYNTH_SYSTEM = """你是 Lolita 领域的问答助手，像微信里一个懂 Lo
 4. 证据里没有、或者只沾一点边，就直接说「这个我这边没查到」「资料里没写」，
    可以顺带告诉用户换个什么问法；但不许硬编一个答案。
 5. 证据互相打架时，说清楚两边分别怎么讲，别替用户拍板。
-6. 证据分两类：【可作依据】是自有知识库与官方档案，可以直接陈述；
+6. 证据分两类：【可作依据】是自有知识库与档案，可以直接陈述；
    【仅作线索】是网友发言、店家页面和网络内容，不能当规范。两者冲突时以【可作依据】为准。
 7. **称呼跟着证据开头的标签走**：「网友发言」才写「有网友提到」「出物的人说」；
-   「店家/商家」写「店家提到」「店铺页面写着」；「官方/档案」写「官方资料」「档案里」。
-   禁止用「网友说」指代店家、官方或档案——把店家的话说成网友反馈，比不引用更危险。
+   「店家/商家」写「店家提到」「店铺页面写着」；「官方」只给品牌自有渠道，写「官方公告」；
+   「档案（Lolibrary）」是社区整理的发售资料库，不是品牌官方、可能有错漏，写「档案记录」
+   「Lolibrary 上记录」，并说明它是社区整理。
+8. 禁止用「网友说」指代店家、官方或档案——把店家的话说成网友反馈，比不引用更危险；
+   反过来也不能把社区档案抬成「官方」，那会让用户以为品牌确认过。
 """
 
 
@@ -294,8 +306,9 @@ def fix_source_attribution(
 ) -> tuple[str, list[dict]]:
     """把非 UGC 来源上的「网友」改成正确称谓；返回 ``(新文本, 改动记录)``。
 
-    只有整句引用的证据都属于店家 / 官方时才替换：混引时无从判断「网友」指的是
-    哪一条，改写可能把一句正确的 UGC 归因也改坏。
+    只有整句引用的证据都属于同一类非 UGC 来源时才替换：混引时无从判断「网友」
+    指的是哪一条，改写可能把一句正确的 UGC 归因也改坏。档案用「档案记录里」，
+    不用「官方」——社区整理的资料不能说得像品牌确认过。
     """
     if not answer or not evidence:
         return answer, []
@@ -309,13 +322,19 @@ def fix_source_attribution(
             continue
         cited = [int(token) for token in _CITATION_RE.findall(sentence)]
         labels = {source_appellation(numbered[n]) for n in cited if n in numbered}
-        if not labels or APPELLATION_UGC in labels or APPELLATION_OWN in labels:
+        if not labels or APPELLATION_UGC in labels:
             parts.append(sentence)
             continue
         if labels == {APPELLATION_SHOP}:
             label = "店家"
-        elif labels <= {APPELLATION_ARCHIVE, APPELLATION_SHOP} and APPELLATION_ARCHIVE in labels:
-            label = "官方资料"
+        elif labels == {APPELLATION_OFFICIAL}:
+            label = "官方"
+        elif labels == {APPELLATION_ARCHIVE}:
+            label = "Lolibrary 上"
+        elif labels == {APPELLATION_COMMUNITY_ARCHIVE}:
+            label = "档案记录里"
+        elif labels == {APPELLATION_OWN}:
+            label = "自有资料里"
         else:
             parts.append(sentence)
             continue

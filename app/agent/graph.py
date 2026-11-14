@@ -941,6 +941,21 @@ def _merge_usage(planner, writer) -> dict:
     return usage
 
 
+def _citation_coverage(writer) -> dict:
+    """句级引用覆盖告警，提到响应顶层，前端和排查直接可读。
+
+    数据由 writer 在写完时算出（``usage["diagnostics"]``）；这里只做取值和
+    形状兜底，不重复判定——判定口径只应有一处。
+    """
+    diagnostics = (getattr(writer, "usage", {}) or {}).get("diagnostics") or {}
+    coverage = diagnostics.get("citation_coverage") or {}
+    return {
+        "checked_evidence": int(coverage.get("checked_evidence", 0) or 0),
+        "uncited_count": int(coverage.get("uncited_count", 0) or 0),
+        "uncited_sentences": list(coverage.get("uncited_sentences") or []),
+    }
+
+
 def _cost_block(
     planner, writer, settings, route: routing.RouteDecision | None
 ) -> dict:
@@ -982,6 +997,7 @@ def _finish(
         "stopped_reason": state.get("stopped_reason", ""),
         "follow_suggestion": _follow_suggestion(question, state, evidence, ctx),
         "dress": state.get("dress_profile") or None,
+        "citation_coverage": _citation_coverage(writer),
         "usage": _merge_usage(planner, writer),
         "route": route.as_dict() if route is not None else None,
         "cost": cost_block,
@@ -996,6 +1012,7 @@ def _finish(
             "steps": payload["steps"],
             "evidence": len(evidence),
             "usage": payload["usage"],
+            "citation_coverage": payload["citation_coverage"],
             "route": payload["route"],
             "cost": cost_block,
             "duration_ms": duration_ms,
@@ -1235,6 +1252,7 @@ def stream(
         "invalid_citations": invalid,
         "follow_suggestion": _follow_suggestion(question, state, evidence, ctx),
         "dress": state.get("dress_profile") or None,
+        "citation_coverage": _citation_coverage(writer),
         "usage": _merge_usage(planner, writer),
         "route": route.as_dict(),
         "cost": cost_block,
@@ -1249,6 +1267,7 @@ def stream(
             "steps": payload["steps"],
             "evidence": len(evidence),
             "usage": payload["usage"],
+            "citation_coverage": payload["citation_coverage"],
             "route": payload["route"],
             "cost": cost_block,
             "duration_ms": duration_ms,
