@@ -1,31 +1,20 @@
-"""用户数据层（SQLite）：偏好 / 关注项 / 会话记忆。
+"""用户数据层（SQLite）：关注项 / 会话记忆。
 
 多路召回 agent 是**单用户自托管**服务（默认只监听本机），所以去掉账号体系：
-* ``preferences`` 按「轴」存用户偏好（风格、品牌、价位带…），供召回个性化排序；
 * ``follows`` 存关注项（品牌/系列/来源链接 + 上次状态），供"关注项更新时通知"；
 * ``conversations`` 存会话记忆，供多轮上下文与长期记忆。
-
-偏好为什么按"轴"存：``preferences(axis, values_json)`` 一行一个轴，加新轴
-（颜色、价位带…）不需要改表结构。
 """
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS preferences (
-    axis        TEXT PRIMARY KEY,
-    values_json TEXT NOT NULL DEFAULT '[]',
-    updated_at  TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS follows (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     subject    TEXT NOT NULL,
@@ -34,6 +23,18 @@ CREATE TABLE IF NOT EXISTS follows (
     last_state TEXT,
     updated_at TEXT NOT NULL
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS follows_unique ON follows(subject, source);
+
+CREATE TABLE IF NOT EXISTS follow_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    follow_id  INTEGER NOT NULL,
+    summary    TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    read       INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS follow_events_unread ON follow_events(read, id);
 
 CREATE TABLE IF NOT EXISTS conversations (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,51 +80,20 @@ def init_db(db_path: Path) -> None:
         )
 
 
-def _loads(raw: str) -> list[str]:
-    try:
-        parsed = json.loads(raw or "[]")
-    except json.JSONDecodeError:
-        return []
-    return [str(item) for item in parsed] if isinstance(parsed, list) else []
-
-
-# --------------------------------------------------------------------- 偏好
-
-
-def get_preferences(db_path: Path) -> dict[str, list[str]]:
-    """返回**所有**已设置的轴。没设过的轴不出现（调用方自己给默认）。"""
-    data: dict[str, list[str]] = {}
-    with connect(db_path) as conn:
-        for row in conn.execute("SELECT axis, values_json FROM preferences").fetchall():
-            data[row["axis"]] = _loads(row["values_json"])
-    return data
-
-
-def save_preferences(db_path: Path, axes: dict[str, list[str]]) -> dict[str, list[str]]:
-    """只替换**传进来的轴**，没传的保持不变（避免"漏传一个字段清空其它偏好"）。"""
-    with connect(db_path) as conn:
-        for axis, values in axes.items():
-            if values:
-                conn.execute(
-                    "INSERT INTO preferences (axis, values_json, updated_at) VALUES (?, ?, ?) "
-                    "ON CONFLICT(axis) DO UPDATE SET values_json = excluded.values_json, "
-                    "updated_at = excluded.updated_at",
-                    (axis, json.dumps(values, ensure_ascii=False), now()),
-                )
-            else:
-                conn.execute("DELETE FROM preferences WHERE axis = ?", (axis,))
-    return get_preferences(db_path)
-
-
 # --------------------------------------------------------------------- 关注项
 
 
 def add_follow(db_path: Path, subject: str, source: str, url: str) -> dict:
     with connect(db_path) as conn:
-        cursor = conn.execute(
-            "INSERT INTO follows (subject, source, url, last_state, updated_at) VALUES (?, ?, ?, '', ?)",
-            (subject, source, url, now()),
-        )
+        try:
+            cursor = conn.execute(
+                "INSERT INTO follows (subject, source, url, last_state, updated_at) "
+                "VALUES (?, ?, ?, '', ?)",
+                (subject, source, url, now()),
+            )
+        except sqlite3.IntegrityError as exc:
+            # 同一个「关键词 + 来源」重复关注没有意义：会让扫描和通知都翻倍。
+            raise ValueError("已经关注过这个关键词和来源") from exc
         row = conn.execute("SELECT * FROM follows WHERE id = ?", (cursor.lastrowid,)).fetchone()
     return dict(row)
 
@@ -131,6 +101,12 @@ def add_follow(db_path: Path, subject: str, source: str, url: str) -> dict:
 def list_follows(db_path: Path) -> list[dict]:
     with connect(db_path) as conn:
         return [dict(row) for row in conn.execute("SELECT * FROM follows ORDER BY id").fetchall()]
+
+
+def get_follow(db_path: Path, follow_id: int) -> dict | None:
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM follows WHERE id = ?", (follow_id,)).fetchone()
+    return dict(row) if row else None
 
 
 def update_follow_state(db_path: Path, follow_id: int, last_state: str) -> bool:
@@ -143,8 +119,52 @@ def update_follow_state(db_path: Path, follow_id: int, last_state: str) -> bool:
 
 
 def delete_follow(db_path: Path, follow_id: int) -> bool:
+    """删关注项时一并删掉它的事件，避免界面上留下「无主」更新。"""
     with connect(db_path) as conn:
+        conn.execute("DELETE FROM follow_events WHERE follow_id = ?", (follow_id,))
         return conn.execute("DELETE FROM follows WHERE id = ?", (follow_id,)).rowcount > 0
+
+
+# --------------------------------------------------------------------- 关注事件
+
+
+def add_follow_event(db_path: Path, follow_id: int, summary: str) -> dict:
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            "INSERT INTO follow_events (follow_id, summary, created_at, read) VALUES (?, ?, ?, 0)",
+            (follow_id, summary, now()),
+        )
+        row = conn.execute(
+            "SELECT * FROM follow_events WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone()
+    return dict(row)
+
+
+def list_follow_events(
+    db_path: Path, *, unread_only: bool = False, limit: int = 20
+) -> list[dict]:
+    """事件连同关注项一起返回：前端只拿事件也要知道「是哪条关注更新了」。"""
+    clause = "WHERE e.read = 0" if unread_only else ""
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT e.id, e.follow_id, e.summary, e.created_at, e.read, "
+            "f.subject, f.source "
+            "FROM follow_events e LEFT JOIN follows f ON f.id = e.follow_id "
+            f"{clause} ORDER BY e.id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [{**dict(row), "read": bool(row["read"])} for row in rows]
+
+
+def mark_follow_events_read(db_path: Path) -> int:
+    with connect(db_path) as conn:
+        return conn.execute("UPDATE follow_events SET read = 1 WHERE read = 0").rowcount
+
+
+def unread_follow_events(db_path: Path) -> int:
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM follow_events WHERE read = 0").fetchone()
+    return int(row["n"])
 
 
 # --------------------------------------------------------------------- 会话记忆
