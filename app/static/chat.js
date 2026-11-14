@@ -10,10 +10,13 @@
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-  // 回答里的 [n] 标成小上标；先转义再替换，避免把用户内容当 HTML
-  const formatText = (text) => esc(text || '')
-    .replace(/\[(\d+)\]/g, '<sup class="cite" data-n="$1">[$1]</sup>')
-    .replace(/\n/g, '<br>');
+  // 回答里的 [n] 标成小上标；先转义再替换，避免把用户内容当 HTML。
+  // 服务端回填的历史消息没有来源可跳，plain=true 时保留普通文本。
+  const formatText = (text, plain) => {
+    const html = esc(text || '');
+    return (plain ? html : html.replace(/\[(\d+)\]/g, '<sup class="cite" data-n="$1">[$1]</sup>'))
+      .replace(/\n/g, '<br>');
+  };
 
   // 召回通道名 → 人话（过程里别直接甩英文通道名）
   // real 不能叫「真实语料」：它其实是采集来的他人发言，叫"真实"会让人以为是
@@ -231,7 +234,7 @@
 
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    bubble.innerHTML = formatText(message.content);
+    bubble.innerHTML = formatText(message.content, message.restored);
     wrap.appendChild(bubble);
 
     markCitations(wrap, bubble, message);
@@ -764,6 +767,23 @@
     }
   }
 
+  // 首屏回填服务端会话记忆：只有 role/content，没有证据与召回过程，
+  // 因此按普通文本渲染，也不生成空的参考来源块。拉不到就按空对话处理。
+  async function loadHistory() {
+    try {
+      const payload = await getJSON('/api/chat/history?limit=' + MAX_HISTORY);
+      const restored = (payload.messages || []).map((message) => ({
+        role: message.role,
+        content: message.content,
+        restored: true,
+      }));
+      if (!restored.length) return;
+      state.messages = restored.concat(state.messages);
+      // 用户已经在提问就别重绘，否则会把正在流式输出的气泡冲掉
+      if (!state.busy) paintMessages(document.getElementById('chat-list'));
+    } catch (error) { /* 历史拉不到不影响提问 */ }
+  }
+
   async function render() {
     const root = view();
     let status = null;
@@ -864,8 +884,14 @@
     document.getElementById('chat-clear').addEventListener('click', () => {
       state.messages = [];
       paintMessages(ui.list);
+      // 只清内存的话，刷新后服务端记忆又会被回填
+      fetch('/api/chat/history', { method: 'DELETE' }).catch(() => {
+        toast('服务端历史没清掉，刷新后可能还会出现');
+      });
     });
 
+    // 会话记忆：首屏把服务端最近几轮补回来（纯文本气泡）
+    loadHistory();
     // 关注项（形态甲）：打开页面时载入；有历史关注项才显示面板，不提供手动新增
     loadFollows();
     // 运行轨迹：本地 JSONL，量很小，直接载入；面板默认折叠，不占首屏。

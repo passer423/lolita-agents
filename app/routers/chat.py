@@ -264,6 +264,19 @@ async def chat_stream(payload: ChatIn, request: Request):
     )
 
 
+@router.get("/history")
+def chat_history(
+    limit: int = Query(MAX_HISTORY_TURNS, ge=1, le=MAX_HISTORY_TURNS)
+) -> dict:
+    """最近几轮会话记忆，按时间正序。
+
+    只回 ``role``/``content``：历史消息没有证据与召回过程，前端按普通文本渲染，
+    ``[n]`` 不做成可点角标。上限与模型上下文共用 ``MAX_HISTORY_TURNS``，
+    避免前端看到模型看不到的历史。
+    """
+    return {"messages": db.recent_conversations(settings.db_path, limit=limit)}
+
+
 @router.delete("/history")
 def clear_history() -> dict:
     """清空服务端会话记忆（= 开新对话）。关注项与排查轨迹不受影响。"""

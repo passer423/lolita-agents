@@ -385,6 +385,67 @@ def test_clear_history_endpoint_removes_memory(client, monkeypatch):
     assert db.recent_conversations(settings.db_path) == []
 
 
+def test_history_endpoint_returns_messages_in_time_order(client):
+    from app import db
+    from app.config import settings
+
+    db.add_exchange(settings.db_path, "第一条", "答1")
+    db.add_exchange(settings.db_path, "第二条", "答2")
+
+    response = client.get("/api/chat/history")
+
+    assert response.status_code == 200
+    assert response.json() == {"messages": [
+        {"role": "user", "content": "第一条"},
+        {"role": "assistant", "content": "答1"},
+        {"role": "user", "content": "第二条"},
+        {"role": "assistant", "content": "答2"},
+    ]}
+
+
+def test_history_endpoint_honours_limit_and_rejects_overflow(client):
+    from app import db
+    from app.config import settings
+
+    db.add_exchange(settings.db_path, "第一条", "答1")
+    db.add_exchange(settings.db_path, "第二条", "答2")
+
+    assert client.get("/api/chat/history", params={"limit": 2}).json() == {"messages": [
+        {"role": "user", "content": "第二条"},
+        {"role": "assistant", "content": "答2"},
+    ]}
+    # 上限与模型上下文同口径（MAX_HISTORY_TURNS），超了直接 422
+    assert client.get("/api/chat/history", params={"limit": 9}).status_code == 422
+
+
+def test_history_endpoint_empty_database_returns_empty_list(client):
+    assert client.get("/api/chat/history").json() == {"messages": []}
+
+
+def test_history_endpoint_keeps_citation_markers_as_text(client):
+    """前端靠原样拿到 [n] 才能按普通文本渲染——锁住服务端不擅自改写。"""
+    from app import db
+    from app.config import settings
+
+    db.add_exchange(settings.db_path, "怎么洗", "[1] 装袋，[2] 冷水。")
+
+    assert client.get("/api/chat/history").json()["messages"][-1] == {
+        "role": "assistant",
+        "content": "[1] 装袋，[2] 冷水。",
+    }
+
+
+def test_clear_then_history_endpoint_is_empty(client):
+    from app import db
+    from app.config import settings
+
+    db.add_exchange(settings.db_path, "第一条", "答1")
+
+    assert client.delete("/api/chat/history").status_code == 200
+
+    assert client.get("/api/chat/history").json() == {"messages": []}
+
+
 def test_stream_persists_final_answer(client, monkeypatch):
     from app import db
     from app.config import settings
