@@ -22,6 +22,16 @@
 `latest` 取 `--out` 目录下除本次外最新的一份 `summary.json`，逐条比较
 baseline 的 MRR / hit@10 / 引用准确率，直接列出变好与变差的条目。
 
+## 快速回归（CI 门禁）
+
+只跑有代表性的核心通道子集，并给 recall@1 / 引用@1 设下限：
+
+    python -m eval.run --subset quick --configs baseline \
+        --min-recall1 0.66 --min-cite1 0.75
+
+本命令与 CI 里的门禁是同一条命令、同一套代码；阈值由 CI workflow 传入并注释
+了实测来源。低于阈值时进程退出码为 1，报告与 `gate.json` 照常落盘。
+
 ## 指标口径
 
 * **recall@k / hit@k**：排在前 k 的证据里是否命中金标。每条问题只有一个目标
@@ -83,6 +93,29 @@ CONFIGS: dict[str, dict[str, Any]] = {
     # 对比合并层排序前后：none = 按通道召回顺序直接拼接；round_robin = 轮流取。
     "merge_none": {"top_k": 3, "real_filter": "semantic", "merge": "none"},
     "merge_round_robin": {"top_k": 3, "real_filter": "semantic", "merge": "round_robin"},
+}
+
+# 快速回归子集：12 条，覆盖 own / real / lolibrary 三路核心召回。
+# 选择标准：
+# * 每路都保留「稳定命中」与「已知困难」两类，前者防退化、后者记基线；
+# * 优先选排序敏感项（同帖多切片、品牌词干扰、泛化术语压过具体帖、同系列多 version）；
+# * 实时通道需要联网，CI 不跑，因此不进子集（置空 = 全部条目）。
+SUBSETS: dict[str, tuple[str, ...]] = {
+    "quick": (
+        "own-01",  # 洗护条目：自有内容最典型
+        "own-03",  # 指南条目：同一文档有 #1 切片
+        "own-08",  # 术语对比：容易与相邻术语相混
+        "own-12b",  # 痛 lo 带空格写法（分词敏感项的正常侧）
+        "real-02",  # 同帖多切片
+        "real-03",  # 品牌词会把裙子档案顶到前面（已知 rank4）
+        "real-07",  # 再贩公告：短文本、无结构
+        "real-11",  # 泛化术语压过具体求助帖（已知 rank4）
+        "real-13",  # 身材数据型出物帖
+        "lolibrary-01",  # 品牌 + 系列唯一命中
+        "lolibrary-03",  # 同系列不同 version（ref 家族）
+        "lolibrary-08",  # 档案字段抽取
+    ),
+    "all": (),
 }
 
 RESULT_FIELDS = [
@@ -458,6 +491,69 @@ def _mean(rows: list[dict], field: str) -> float:
     return (sum(values) / len(values)) if values else 0.0
 
 
+def evaluate_gate(
+    summary: list[dict],
+    rows: list[dict],
+    *,
+    min_recall1: float | None,
+    min_cite1: float | None,
+    cite_k: int,
+) -> dict:
+    """按 baseline / merged 视图判断门禁；未传阈值时只出数字、不判红绿。"""
+    row = next(
+        (
+            item
+            for item in summary
+            if item["config"] == "baseline"
+            and item["view"] == "merged"
+            and item["channel"] == "*"
+        ),
+        None,
+    )
+    thresholds = {"recall@1": min_recall1, f"cite@{cite_k}": min_cite1}
+    result: dict[str, Any] = {
+        "enabled": any(value is not None for value in thresholds.values()),
+        "passed": True,
+        "n": row["n"] if row else 0,
+        "skipped": row["skipped"] if row else 0,
+        "measured": {},
+        "thresholds": {key: value for key, value in thresholds.items() if value is not None},
+        "checks": [],
+        "failures": [],
+    }
+    if not row or not row["n"]:
+        # 全通道不可用时不能算「通过」：没有数字本身就是回归信号（环境或索引坏了）。
+        result["passed"] = False
+        result["error"] = "没有可评估的条目（核心通道全部不可用）"
+        return result
+
+    measured = {"recall@1": row["recall@1"], f"cite@{cite_k}": row["citation_accuracy"]}
+    result["measured"] = measured
+    for metric, threshold in thresholds.items():
+        if threshold is None:
+            continue
+        value = measured[metric]
+        passed = value + 1e-9 >= threshold
+        result["checks"].append(
+            {"metric": metric, "value": value, "threshold": threshold, "passed": passed}
+        )
+        result["passed"] = result["passed"] and passed
+
+    result["failures"] = [
+        {
+            "item_id": item["item_id"],
+            "rank": item["rank"],
+            f"cite@{cite_k}": item["citation_accuracy"],
+        }
+        for item in rows
+        if item["config"] == "baseline"
+        and item["view"] == "merged"
+        and item["status"] == "ok"
+        and (_as_float(item["rank"]) != 1 or _as_float(item["citation_accuracy"]) < 1)
+    ]
+    return result
+
+
 def config_deltas(rows: list[dict], configs: list[str]) -> list[dict]:
     base = {(row["item_id"], row["view"]): row for row in rows if row["config"] == "baseline"}
     deltas: list[dict] = []
@@ -609,6 +705,24 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_CITE_K,
         help=f"引用准确率只看前 k 条证据（默认 {DEFAULT_CITE_K}）",
     )
+    parser.add_argument(
+        "--subset",
+        default="all",
+        choices=sorted(SUBSETS),
+        help="只跑指定子集（quick = 12 条核心通道快速回归）",
+    )
+    parser.add_argument(
+        "--min-recall1",
+        type=float,
+        default=None,
+        help="baseline / merged 的 recall@1 下限；低于则退出码 1",
+    )
+    parser.add_argument(
+        "--min-cite1",
+        type=float,
+        default=None,
+        help="baseline / merged 的引用准确率下限；低于则退出码 1",
+    )
     parser.add_argument("--online", action="store_true", help="同时跑 xhs / weibo / web（联网）")
     parser.add_argument(
         "--compare",
@@ -628,6 +742,12 @@ def main(argv: list[str] | None = None) -> int:
 
     golden_path = Path(args.golden)
     items = load_golden(golden_path)
+    if SUBSETS[args.subset]:
+        by_id = {item["id"]: item for item in items}
+        missing = [item_id for item_id in SUBSETS[args.subset] if item_id not in by_id]
+        if missing:
+            raise SystemExit(f"子集 {args.subset} 里的条目不存在：{', '.join(missing)}")
+        items = [by_id[item_id] for item_id in SUBSETS[args.subset]]
     retriever = Retriever(online=args.online)
 
     generated_at = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -642,6 +762,13 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = summarize(all_rows, configs)
     deltas = config_deltas(all_rows, configs)
+    gate = evaluate_gate(
+        summary,
+        all_rows,
+        min_recall1=args.min_recall1,
+        min_cite1=args.min_cite1,
+        cite_k=args.cite_k,
+    )
 
     previous_path = load_previous(args.compare, out_root, out_dir)
     previous = (
@@ -666,6 +793,7 @@ def main(argv: list[str] | None = None) -> int:
         "generated_at": generated_at,
         "golden_path": str(golden_path),
         "golden_items": len(items),
+        "subset": args.subset,
         "online": args.online,
         "citation_k": args.cite_k,
         "citation_k_legacy": LEGACY_CITATION_K,
@@ -673,11 +801,15 @@ def main(argv: list[str] | None = None) -> int:
         "summary": summary,
         "results": all_rows,
         "config_deltas": deltas,
+        "gate": gate,
         "previous_report": str(previous_path) if previous_path else "",
         "cross_run_diff": diffs,
     }
     (out_dir / "summary.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (out_dir / "gate.json").write_text(
+        json.dumps(gate, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
     report = _render_report(
@@ -693,6 +825,8 @@ def main(argv: list[str] | None = None) -> int:
         generated_at=generated_at,
         cite_k=args.cite_k,
         previous_legacy=_is_legacy_report(previous),
+        subset=args.subset,
+        gate=gate,
     )
     (out_dir / "report.md").write_text(report, encoding="utf-8")
 
@@ -706,7 +840,27 @@ def main(argv: list[str] | None = None) -> int:
                 f"(旧口径 cite@3={row['citation_accuracy@3']:.3f})"
             )
     print(f"\n报告目录：{out_dir}")
-    return 0
+    if gate["enabled"] or gate.get("error"):
+        if gate["passed"]:
+            detail = "，".join(
+                f"{check['metric']}={check['value']:.3f}≥{check['threshold']:.3f}"
+                for check in gate["checks"]
+            )
+            print(f"门禁通过：{detail}（n={gate['n']}）")
+        else:
+            print(f"门禁未通过：{gate.get('error') or ''}".rstrip())
+            for check in gate["checks"]:
+                flag = "PASS" if check["passed"] else "FAIL"
+                print(
+                    f"  [{flag}] {check['metric']}={check['value']:.3f} "
+                    f"< 阈值 {check['threshold']:.3f}"
+                )
+            if gate["failures"]:
+                ids = "、".join(
+                    f"{item['item_id']}(rank={item['rank']})" for item in gate["failures"]
+                )
+                print(f"  未达标条目：{ids}")
+    return 0 if gate["passed"] else 1
 
 
 def _render_report(
@@ -723,12 +877,15 @@ def _render_report(
     generated_at: str,
     cite_k: int = DEFAULT_CITE_K,
     previous_legacy: bool = False,
+    subset: str = "all",
+    gate: dict | None = None,
 ) -> str:
     lines = [
         "# RAG 检索评测报告",
         "",
         f"- 生成时间：{generated_at}",
         f"- 金标集：`{golden_path}`（{len(items)} 条）",
+        f"- 子集：{_subset_label(subset, items)}",
         f"- 配置：{', '.join(configs)}",
         f"- 实时通道：{'开启（--online）' if online else '关闭（离线核心通道）'}",
         f"- 引用口径：新口径取前 {cite_k} 条证据、同文档/同系列 ref 家族算命中；"
@@ -768,6 +925,7 @@ def _render_report(
         )
 
     lines += _citation_caliber_section(rows, summary, cite_k)
+    lines += _gate_section(gate, cite_k)
 
     lines += ["", "## 配置对比：哪些条目变好 / 变差（相对 baseline）", ""]
     for config in configs:
@@ -967,6 +1125,51 @@ def _citation_caliber_section(rows: list[dict], summary: list[dict], cite_k: int
             lines.append(
                 f"| {row['item_id']} | {fmt(row['citation_accuracy@3'])} | "
                 f"{fmt(row['citation_accuracy'])} | {row['expected_refs'] or '-'} | {top3} |"
+            )
+    return lines
+
+
+def _subset_label(subset: str, items: list[dict]) -> str:
+    counts: dict[str, int] = defaultdict(int)
+    for item in items:
+        counts[item["channel"]] += 1
+    per_channel = " / ".join(f"{name} {count}" for name, count in sorted(counts.items()))
+    name = "全部" if subset == "all" else subset
+    return f"{name}（{len(items)} 条：{per_channel}）"
+
+
+def _gate_section(gate: dict | None, cite_k: int) -> list[str]:
+    if not gate:
+        return []
+    lines = ["", "## 回归门禁（baseline / merged）", ""]
+    if gate.get("error"):
+        lines.append(f"**无法判定**：{gate['error']}。")
+        return lines
+    if not gate.get("enabled"):
+        lines.append("未启用：本次命令没有传 `--min-recall1` / `--min-cite1`。")
+        return lines
+
+    lines += ["| 指标 | 实测 | 阈值 | 结果 |", "|---|---|---|---|"]
+    for check in gate["checks"]:
+        lines.append(
+            f"| {check['metric']} | {fmt(check['value'])} | {fmt(check['threshold'])} | "
+            f"{'PASS' if check['passed'] else 'FAIL'} |"
+        )
+    lines.append("")
+    lines.append(f"门禁总体：**{'PASS' if gate['passed'] else 'FAIL'}**（n={gate['n']}）")
+
+    if gate["failures"]:
+        cite_key = f"cite@{cite_k}"
+        lines += [
+            "",
+            "未达标条目（merged 排名不是第 1，或引用未全部命中）：",
+            "",
+            "| 条目 | rank | 引用 |",
+            "|---|---|---|",
+        ]
+        for item in gate["failures"]:
+            lines.append(
+                f"| {item['item_id']} | {fmt(item['rank'])} | {fmt(item[cite_key])} |"
             )
     return lines
 
