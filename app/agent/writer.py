@@ -21,6 +21,7 @@ planner 的 final 动作如果**自己带了答案**，就直接用（测试里�
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterator
 
 from app.config import AppSettings
@@ -33,6 +34,10 @@ WRITER_TIMEOUT = 60.0
 # 多轮：最多带几轮历史、每条多长。上下文是有限资源，历史无限增长就是给自己制造噪声。
 MAX_HISTORY_TURNS = 8
 MAX_HISTORY_CHARS = 500
+
+# 引用编号只在**本轮**内有效。历史里的 ``[n]`` 指向上一轮的证据，
+# 带进本轮会让模型照着旧编号引用，指向完全不同的来源。
+_CITATION_RE = re.compile(r"\[(\d+)\]")
 
 # 证据效力等级 → 给模型看的标签。与 channels.CHANNEL_SOURCE_KIND 一一对应。
 SOURCE_KIND_LABELS = {
@@ -68,7 +73,8 @@ SYNTH_SYSTEM = """你是 Lolita 领域的问答助手，像微信里一个懂 Lo
 1. 只讲【证据】里的事。证据没写的，不补常识、不推测、不「顺便提醒」；
    尤其不要拿日期或经验推断状态（「应该还没开卖」「大概有货」「估计会掉色」）。
 2. 关键事实（价格、尺码、日期、能不能洗、有没有货等）后面标来源编号，如 [1][2]；
-   编号对应【证据】里的序号。
+   编号对应【证据】里的序号。**只能引用本轮【证据】里的编号**：历史对话不参与
+   编号，其中的编号已失效并移除，不要沿用或猜测。
 3. 价格、尺码、日期照证据原文说，别换算、别合并不同币种、别约等于。
 4. 证据里没有、或者只沾一点边，就直接说「这个我这边没查到」「资料里没写」，
    可以顺带告诉用户换个什么问法；但不许硬编一个答案。
@@ -124,7 +130,7 @@ def build_synth_messages(
 ) -> list[dict]:
     evidence_text = _evidence_block(evidence)
     messages: list[dict] = [{"role": "system", "content": SYNTH_SYSTEM}]
-    for turn in (history or [])[-MAX_HISTORY_TURNS:]:
+    for turn in sanitize_history(history):
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append(
         {
@@ -139,6 +145,11 @@ def sanitize_history(raw) -> list[dict]:
     """只留最近若干轮，截断过长内容，丢掉角色不对的项。
 
     客户端传什么都可能——历史是**不可信输入**，而且直接进上下文（成本与安全都在这里）。
+
+    assistant 文本里的 ``[n]`` 会在这里剥掉：编号只在单轮内有效，上一轮的 ``[1]``
+    和本轮的 ``[1]`` 很可能是两条完全不同的证据。留着它等于给模型一个指向错误
+    来源的把手，比没有编号更糟。这里选择**剥离**而不是改写：任何"来源见上一轮"
+    的占位在本轮都无意义，模型只需照本轮【证据】重新标注。
     """
     if not raw:
         return []
@@ -150,6 +161,11 @@ def sanitize_history(raw) -> list[dict]:
         content = str(turn.get("content") or "").strip()
         if role not in ("user", "assistant") or not content:
             continue
+        if role == "assistant":
+            content = _CITATION_RE.sub("", content)
+            content = re.sub(r"[ \t]{2,}", " ", content).strip()
+            if not content:
+                continue
         cleaned.append({"role": role, "content": content[:MAX_HISTORY_CHARS]})
     return cleaned[-MAX_HISTORY_TURNS:]
 

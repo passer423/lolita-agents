@@ -1438,6 +1438,66 @@ def test_history_is_sanitized():
     assert len(cleaned[0]["content"]) == 500
 
 
+def test_history_strips_previous_citation_numbers():
+    """编号只在单轮内有效：上一轮的 [n] 必须剥掉，不能留给本轮复用。"""
+    from app.agent.writer import sanitize_history
+
+    cleaned = sanitize_history([
+        {"role": "user", "content": "上一轮"},
+        {"role": "assistant", "content": "装洗衣袋[1]，别烘干[2][3]。"},
+        {"role": "assistant", "content": "[4]"},
+    ])
+
+    assert [turn["content"] for turn in cleaned] == ["上一轮", "装洗衣袋，别烘干。"]
+    assert all("[" not in turn["content"] for turn in cleaned)
+
+
+def test_old_citations_do_not_reach_planner_or_writer(monkeypatch):
+    """planner 与 writer 拿到的历史都已净化，本轮编号只对应当前证据。"""
+    monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+    core_only(monkeypatch)
+    seen = {}
+
+    class RecorderPlanner:
+        usage = {}
+
+        def extract_query(self, question, history=None):
+            seen["planner"] = history
+            return question
+
+    class RecorderWriter(StubWriter):
+        def write(self, question, evidence, history=None, **_kwargs):
+            seen["writer"] = history
+            return "[1] 装洗衣袋。"
+
+    history = [
+        {"role": "user", "content": "上一轮问的是哪条"},
+        {"role": "assistant", "content": "参考[9]和[10]说的。"},
+    ]
+    graph.run(
+        "那它多少钱", ctx=ctx(), planner=RecorderPlanner(),
+        writer=RecorderWriter(), history=history,
+    )
+
+    assert seen["planner"] and seen["writer"]
+    for who in ("planner", "writer"):
+        text = "".join(turn["content"] for turn in seen[who])
+        assert "[9]" not in text and "[10]" not in text
+
+
+def test_synth_messages_strip_citations_even_with_raw_history():
+    """writer 边界再兜一层：直接调用时传进来的历史同样不带旧编号。"""
+    from app.agent.writer import build_synth_messages
+
+    messages = build_synth_messages(
+        "q",
+        [{"n": 1, "source_kind": "own_content", "title": "t", "text": "x"}],
+        [{"role": "assistant", "content": "旧答案[3]。"}],
+    )
+
+    assert messages[1] == {"role": "assistant", "content": "旧答案。"}
+
+
 def test_history_reaches_query_extraction(monkeypatch):
     monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
     core_only(monkeypatch)
