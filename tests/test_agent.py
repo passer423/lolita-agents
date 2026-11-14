@@ -1087,6 +1087,41 @@ def test_lolibrary_brand_only_query_lists_brand_items(workdir):
     assert [item["ref"] for item in result] == ["aatp-captain-hat"]
 
 
+def test_question_intent_separates_community_from_knowledge():
+    """「怎么洗」是知识题（自有词条），「闲鱼/要不要」才是 UGC 题。"""
+    assert (
+        channels.question_intent("闲鱼收二手lo裙怎么判断山正 要不要细节图")
+        == channels.INTENT_OPERATIONAL
+    )
+    assert channels.question_intent("水洗标是什么意思 不能湿洗怎么办") == (
+        channels.INTENT_DEFINITION
+    )
+    assert channels.question_intent("烫金和亮片的裙子怎么洗") == ""
+    assert channels.question_intent("安琪有什么经典款") == ""
+
+
+def test_lolibrary_skips_care_question_that_only_names_brand(workdir):
+    """real-03：水洗标问题只点了 AP/Baby，品牌档案不该凭品牌命中占满前排。"""
+    from app.config import AppSettings
+
+    app = AppSettings(data_dir=workdir)
+    app.ensure_dirs()
+    _write_catalog(
+        app,
+        {"slug": "ap-memorial-cake", "url": "https://lolibrary.org/items/ap-memorial-cake",
+         "title": "Memorial Cake JSK", "brand": "Angelic Pretty", "category": "JSK"},
+        {"slug": "baby-ribbon", "url": "https://lolibrary.org/items/baby-ribbon",
+         "title": "Ribbon JSK", "brand": "Baby, the Stars Shine Bright", "category": "JSK"},
+    )
+    ctx = RecallContext(settings=app)
+
+    assert channels.recall(
+        "lolibrary", "AP 和 Baby 的水洗标是什么意思 不能湿洗怎么办", ctx
+    ) == []
+    # 有系列名时仍然召回——那时档案是在回答「这条是什么」。
+    assert channels.recall("lolibrary", "AP Memorial Cake JSK 怎么洗", ctx)
+
+
 def test_lolibrary_needs_two_terms_without_brand(workdir):
     """没点名品牌时，只命中一个分类词（jsk）不算相关，否则术语题会带出无关档案。"""
     from app.config import AppSettings

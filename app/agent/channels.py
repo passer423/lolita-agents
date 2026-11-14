@@ -84,6 +84,54 @@ def _clip(text: str) -> str:
     return text if len(text) <= EVIDENCE_TEXT_LIMIT else text[:EVIDENCE_TEXT_LIMIT] + "…"
 
 
+# --------------------------------------------------------------------- 问题意图
+
+# 操作型：用户要的是「在社群里怎么处理」——二手交易、求助、要不要下手。
+# 真实帖子和社交平台里才有踩过坑的人；规范词条只能给定义。
+#
+# **刻意不收「怎么 / 如何 / 判断 / 注意什么」**：实测把这些算进来，7 条自有词条
+# 的洗护/尺码/搭配题会被网友帖子挤下去（评测 MRR 0.882→0.800），代价远大于
+# 收益。知识型「怎么洗」仍然是规范词条该答的题。
+#
+# 「收」「出」也不按单字匹配：它们混在「收藏」「出街」「出现」里的频率太高。
+_OPERATIONAL_MARKERS = (
+    "要不要", "该不该", "求助", "求问", "求推荐", "靠不靠谱", "踩雷", "避雷",
+    "闲鱼", "二手", "收裙", "收一条", "收lo", "出物", "出二手", "出裙", "转手",
+)
+
+# 定义型：用户要的是「这是什么 / 两者有什么区别」。自有词条与品牌档案更可靠。
+_DEFINITION_MARKERS = (
+    "是什么", "什么意思", "区别", "定义", "含义", "指什么", "代表什么",
+    "差在哪", "叫什么",
+)
+
+# 档案（lolibrary）只回答「这条裙子是什么 / 哪年出的 / 原价多少」。下面这些问法
+# 要的是洗护、尺码、判断方法或名词解释——品牌档案一条都答不了，却会因为命中
+# 品牌名占满前排（real-03 的三条 AP 档案）。只点名品牌时整通道跳过。
+_ARCHIVE_IRRELEVANT_MARKERS = (
+    "水洗标", "怎么洗", "能不能洗", "湿洗", "干洗", "洗护", "洗涤", "保养", "存放",
+    "怎么选", "怎么判断", "注意什么", "怎么办", "尺码", "偏大", "偏小", "搭配",
+    "是什么", "什么意思", "区别", "定义",
+)
+
+INTENT_OPERATIONAL = "operational"
+INTENT_DEFINITION = "definition"
+
+
+def question_intent(question: str) -> str:
+    """问题意图（operational / definition / 空）。
+
+    两者都命中时按 operational：二手/求助类问题即使夹着「是什么意思」，
+    用户真正要的也是社群里的处理办法，名词解释只是附带。
+    """
+    text = question or ""
+    if any(marker in text for marker in _OPERATIONAL_MARKERS):
+        return INTENT_OPERATIONAL
+    if any(marker in text for marker in _DEFINITION_MARKERS):
+        return INTENT_DEFINITION
+    return ""
+
+
 # --------------------------------------------------------------------- own / real
 
 
@@ -289,6 +337,23 @@ def _recall_lolibrary(question: str, ctx: RecallContext, query: str = "") -> lis
         term.isascii() and term not in _GENERIC_TERMS for term in terms
     ):
         return []
+
+    # 洗护/尺码/名词解释类问题只点了品牌、没给系列：档案只有身份/年份/原价，
+    # 答不了这些，却会凭品牌命中占满前排（real-03 的三条 AP 档案就是这么来的）。
+    # 有系列名时不禁——那时档案是在回答「这条是什么」。
+    if brand_targets and any(
+        marker in (question or "") for marker in _ARCHIVE_IRRELEVANT_MARKERS
+    ):
+        series_terms = [
+            term for term in terms if term.isascii() and term not in _GENERIC_TERMS
+        ]
+        if not series_terms:
+            logger.info(
+                "lolibrary 跳过：问题只点了品牌（%s），没有系列级检索词",
+                "、".join(sorted(brand_targets)),
+            )
+            return []
+
     records = load_catalog(ctx)
     if not records:
         return []
@@ -589,7 +654,7 @@ def recall(channel: str, question: str, ctx: RecallContext | None = None, *, que
     if handler is None:
         raise ChannelUnavailable(f"未知通道：{channel}")
     try:
-        return handler(question, ctx, query=query)
+        items = handler(question, ctx, query=query)
     except ChannelUnavailable:
         raise
     except Exception as exc:  # noqa: BLE001 - 单通道意外异常局部化，不拖垮整个召回
@@ -599,3 +664,10 @@ def recall(channel: str, question: str, ctx: RecallContext | None = None, *, que
         raise ChannelUnavailable(
             f"{channel} 召回失败：{type(exc).__name__}: {str(exc)[:160]}"
         ) from exc
+
+    # 意图是**问题级**属性，但合并层（``graph._normalize``）只拿到证据列表，
+    # 拿不到问题。打在每条证据上，评测复用同一个合并函数时权重才不会丢。
+    intent = question_intent(question)
+    if intent and items:
+        return [{**item, "intent": intent} for item in items]
+    return items

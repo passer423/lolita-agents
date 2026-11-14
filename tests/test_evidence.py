@@ -12,8 +12,8 @@ from __future__ import annotations
 from app.agent import graph
 
 
-def _item(channel, source_kind, *, url="", ref="", title=""):
-    return {
+def _item(channel, source_kind, *, url="", ref="", title="", intent=""):
+    item = {
         "channel": channel,
         "source_kind": source_kind,
         "url": url,
@@ -21,6 +21,9 @@ def _item(channel, source_kind, *, url="", ref="", title=""):
         "title": title,
         "text": title or channel,
     }
+    if intent:
+        item["intent"] = intent
+    return item
 
 
 # --------------------------------------------------------------------- 去重
@@ -119,3 +122,69 @@ def test_limit_exemption_allows_exceeding_cap_when_only_supplementary():
     ordered = graph._normalize(extra, ["xhs"], limit=2)
 
     assert len(ordered) == 3
+
+
+# --------------------------------------------------------------------- 意图权重
+
+
+def _three_kinds(intent):
+    return [
+        _item("own", "own_content", ref="own-1", title="规范词条", intent=intent),
+        _item("lolibrary", "third_party", ref="lib-1", title="品牌档案", intent=intent),
+        _item("real", "upstream_ugc", ref="real-1", title="求助帖", intent=intent),
+    ]
+
+
+def test_operational_question_puts_ugc_before_own_and_archive():
+    """问「怎么判断」时，踩过坑的帖子比泛化词条更贴近问题。"""
+    ordered = graph._normalize(_three_kinds("operational"), [])
+
+    assert [item["ref"] for item in ordered] == ["real-1", "own-1", "lib-1"]
+
+
+def test_definition_question_keeps_own_and_archive_first():
+    """问「是什么」时，规范词条与品牌档案仍在前。"""
+    ordered = graph._normalize(_three_kinds("definition"), [])
+
+    assert [item["ref"] for item in ordered] == ["own-1", "lib-1", "real-1"]
+
+
+def test_no_intent_tag_keeps_previous_order():
+    ordered = graph._normalize(_three_kinds(""), [])
+
+    assert [item["ref"] for item in ordered] == ["own-1", "lib-1", "real-1"]
+
+
+def test_operational_duplicate_keeps_ugc_version():
+    """意图翻转后，同一篇留下的仍是「更符合这次意图」的那版。"""
+    items = [
+        _item(
+            "own", "own_content", url="https://example.com/a", title="自有转述",
+            intent="operational",
+        ),
+        _item(
+            "real", "upstream_ugc", url="https://example.com/a/", title="网友原帖",
+            intent="operational",
+        ),
+    ]
+
+    ordered = graph._normalize(items, [])
+
+    assert len(ordered) == 1
+    assert ordered[0]["title"] == "网友原帖"
+
+
+def test_operational_keeps_supplementary_priority_and_exemption():
+    """意图权重不能推翻补查通道优先与截断豁免。"""
+    items = [
+        *_many(20, channel="own", kind="own_content"),
+        _item("real", "upstream_ugc", ref="real-1", intent="operational"),
+        _item("xhs", "realtime", ref="xhs-1", intent="operational"),
+    ]
+    items = [{**item, "intent": "operational"} for item in items]
+
+    ordered = graph._normalize(items, ["xhs"], limit=12)
+
+    assert ordered[0]["channel"] == "xhs"
+    assert len(ordered) == 12
+    assert ordered[1]["channel"] == "real"

@@ -93,6 +93,19 @@ _CHANNEL_ORDER = {name: index for index, name in enumerate(ALL_CHANNELS)}
 # 证据效力等级 → 排序权重。自有内容在前，网友发言在后。
 _KIND_ORDER = {"own_content": 0, "third_party": 1, "realtime": 2, "upstream_ugc": 3}
 
+# 操作型问题（怎么洗 / 要不要细节图 / 闲鱼收）要的是踩过坑的人怎么说，
+# 不是规范词条怎么定义。此时把 UGC 整体提到自有内容与档案前面。
+_KIND_ORDER_OPERATIONAL = {
+    "realtime": 0,
+    "upstream_ugc": 1,
+    "own_content": 2,
+    "third_party": 3,
+}
+
+# 意图标签由 ``channels.recall`` 打在证据上：意图是问题级属性，但合并层只拿到
+# 证据列表（评测也复用同一个 ``_normalize``，不能改成额外传问题）。
+_INTENT_ORDERS = {"operational": _KIND_ORDER_OPERATIONAL}
+
 
 class AgentState(TypedDict, total=False):
     question: str
@@ -128,10 +141,20 @@ def _evidence_key(item: dict) -> str:
     return str(item.get("ref") or "").strip()
 
 
-def _rank(item: dict, extra: set[str]) -> tuple[int, int, int]:
+def _intent_of(evidence: list[dict]) -> str:
+    for item in evidence:
+        intent = str(item.get("intent") or "")
+        if intent:
+            return intent
+    return ""
+
+
+def _rank(
+    item: dict, extra: set[str], kind_order: dict[str, int]
+) -> tuple[int, int, int]:
     return (
         0 if item.get("channel") in extra else 1,
-        _KIND_ORDER.get(item.get("source_kind"), 9),
+        kind_order.get(item.get("source_kind"), 9),
         _CHANNEL_ORDER.get(item.get("channel"), 99),
     )
 
@@ -148,17 +171,22 @@ def _normalize(
     1. **本次补查的通道优先** —— 用户问价格时，小红书的实拍和网页的现货页，
        比知识库里的术语解释更该先看到；把它们统一压到末尾，等于用编号位置
        告诉读者「这条不重要」，而它恰恰是唯一回答问题的。
-    2. **来源效力** —— 自有内容 > 第三方档案 > 实时内容 > 网友发言。
+    2. **意图 + 来源效力** —— 默认自有内容 > 第三方档案 > 实时内容 > 网友发言；
+       **操作型问题反过来**（UGC > 自有 > 档案）：问「怎么判断山正」时，
+       具体求助帖比泛化的词条更贴近问题。
     3. **通道固定顺序** —— 同前两级相同时按通道定序，消除并行完成顺序的漂移。
 
     这是**规则排序，不是相关性排序**：各通道的分数不可比（BM25 / 向量相似度 /
-    搜索排序是三套量纲），跨通道没法打一个统一的分。
+    搜索排序是三套量纲），跨通道没法打一个统一的分。问题意图由召回层写在
+    证据的 ``intent`` 字段上（``channels.question_intent``），所以评测复用
+    本函数时也走同一套权重。
 
     去重按 URL/ref，保留排序更靠前的版本（来源效力更强的留下）。``limit > 0``
     时限制总条数，但补查通道**整体豁免**：它们是用户这个问题才触发的，不能被
     核心通道的长列表挤掉；豁免后允许略超上限。
     """
     extra = set(supplementary or ())
+    kind_order = _INTENT_ORDERS.get(_intent_of(evidence), _KIND_ORDER)
 
     best: dict[str, dict] = {}
     anonymous: list[dict] = []
@@ -168,10 +196,15 @@ def _normalize(
             anonymous.append(item)
             continue
         current = best.get(key)
-        if current is None or _rank(item, extra) < _rank(current, extra):
+        if current is None or _rank(item, extra, kind_order) < _rank(
+            current, extra, kind_order
+        ):
             best[key] = item
 
-    ordered = sorted(list(best.values()) + anonymous, key=lambda item: _rank(item, extra))
+    ordered = sorted(
+        list(best.values()) + anonymous,
+        key=lambda item: _rank(item, extra, kind_order),
+    )
     if limit <= 0 or len(ordered) <= limit:
         return ordered
 
