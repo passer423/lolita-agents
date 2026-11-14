@@ -106,6 +106,11 @@ class AppSettings(BaseSettings):
     # 离线部署或测试可以关掉；关掉后只返回本地档案已有的字段。
     lolibrary_online_enabled: bool = True
 
+    # ---------- 会话记忆 ----------
+    # 服务端持久化的对话保留最近多少条消息（一问一答算 2 条）。<=0 表示不自动
+    # 清理。默认 100 条 ≈ 50 轮，足够接住追问，又不会让 app.db 无限增长。
+    conversation_retention_messages: int = 100
+
     # ---------- 可观测性 ----------
     # 轨迹 JSONL 按文件大小轮转，避免 data/logs/chat_runs.jsonl 随使用无限增长。
     # 只保留最近 N 个归档；<=0 关闭轮转（排查时可以临时关掉）。

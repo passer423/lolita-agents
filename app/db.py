@@ -2,7 +2,9 @@
 
 多路召回 agent 是**单用户自托管**服务（默认只监听本机），所以去掉账号体系：
 * ``follows`` 存关注项（品牌/系列/来源链接 + 上次状态），供"关注项更新时通知"；
-* ``conversations`` 存会话记忆，供多轮上下文与长期记忆。
+* ``conversations`` 存服务端会话记忆：客户端不传历史时由服务端补上，追问才能
+  接住上一轮的上下文。保留条数由 ``CONVERSATION_RETENTION_MESSAGES`` 控制，
+  ``DELETE /api/chat/history`` 可整体清空。
 """
 
 from __future__ import annotations
@@ -170,17 +172,35 @@ def unread_follow_events(db_path: Path) -> int:
 # --------------------------------------------------------------------- 会话记忆
 
 
-def add_conversation(db_path: Path, role: str, content: str) -> None:
+def add_exchange(db_path: Path, question: str, answer: str, *, keep: int = 0) -> None:
+    """把一问一答写进会话记忆；``keep > 0`` 时只保留最近这么多条消息。
+
+    一问一答必须同一次事务写入：只落 user 不落 assistant 会让下一轮上下文
+    出现「用户说了话但助手没回应」的断片，模型会把它当成未完成的任务。
+    """
     with connect(db_path) as conn:
-        conn.execute(
+        conn.executemany(
             "INSERT INTO conversations (role, content, created_at) VALUES (?, ?, ?)",
-            (role, content, now()),
+            [("user", question, now()), ("assistant", answer, now())],
         )
+        if keep > 0:
+            conn.execute(
+                "DELETE FROM conversations WHERE id NOT IN "
+                "(SELECT id FROM conversations ORDER BY id DESC LIMIT ?)",
+                (keep,),
+            )
 
 
 def recent_conversations(db_path: Path, limit: int = 20) -> list[dict]:
+    """按时间正序返回最近 ``limit`` 条消息；调用方负责再按上下文预算裁剪。"""
     with connect(db_path) as conn:
         rows = conn.execute(
             "SELECT role, content FROM conversations ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
     return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
+
+
+def clear_conversations(db_path: Path) -> int:
+    """清空会话记忆，返回删掉的条数。轨迹与关注项不受影响。"""
+    with connect(db_path) as conn:
+        return conn.execute("DELETE FROM conversations").rowcount

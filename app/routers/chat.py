@@ -24,10 +24,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app import db
 from app.agent import channels, graph, trace
 from app.agent.channels import RecallContext
 from app.agent.planner import DeepSeekPlanner, PlannerUnavailable
-from app.agent.writer import DeepSeekWriter, sanitize_history
+from app.agent.writer import MAX_HISTORY_TURNS, DeepSeekWriter, sanitize_history
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -49,9 +50,10 @@ class ChatTurn(BaseModel):
 
 class ChatIn(BaseModel):
     message: str = Field(..., min_length=1, max_length=300)
-    # 多轮：客户端带上最近几轮。服务端不存会话——**编号只在单轮内有效**，
-    # 所以历史里只留文字，不再引用上一轮的 [n]。
-    history: list[ChatTurn] = Field(default_factory=list, max_length=16)
+    # 多轮：``None`` = 服务端从会话记忆里补最近几轮；显式 ``[]`` = 开新对话，
+    # 不加载旧上下文（清空请用 DELETE /api/chat/history）。
+    # **编号只在单轮内有效**：落库与回填时都会剥掉 [n]（见 sanitize_history）。
+    history: list[ChatTurn] | None = Field(default=None, max_length=16)
 
 
 def _make_planner(app=settings):
@@ -65,8 +67,33 @@ def _make_writer(app=settings):
     return DeepSeekWriter(app)
 
 
-def _history_of(payload: ChatIn) -> list[dict]:
-    return sanitize_history([turn.model_dump() for turn in payload.history])
+def _history_of(payload: ChatIn, app=settings) -> list[dict]:
+    """客户端没传历史（``None``）时从服务端会话记忆补最近几轮。
+
+    显式传空列表是「开新对话」，不是「没传」——否则用户永远摆脱不掉旧上下文。
+    两条路径都要过 ``sanitize_history``：落库的历史同样可能带上一轮的 [n]。
+    """
+    if payload.history is None:
+        raw = db.recent_conversations(app.db_path, limit=MAX_HISTORY_TURNS)
+    else:
+        raw = [turn.model_dump() for turn in payload.history]
+    return sanitize_history(raw)
+
+
+def _remember(question: str, answer: str, app=settings) -> None:
+    """把本轮问答写进会话记忆。失败只 warning：记不住不等于答不了。"""
+    answer = (answer or "").strip()
+    if not answer:
+        return
+    try:
+        db.add_exchange(
+            app.db_path,
+            question,
+            answer,
+            keep=app.conversation_retention_messages,
+        )
+    except Exception as exc:  # noqa: BLE001 - 持久化失败不能影响已经给出的回答
+        logger.warning("会话记忆写入失败（不影响回答）：%s", exc)
 
 
 def _ctx(app=settings) -> RecallContext:
@@ -119,6 +146,7 @@ def chat(payload: ChatIn) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    _remember(payload.message, str(result.get("answer") or ""))
     return result
 
 
@@ -163,6 +191,9 @@ async def chat_stream(payload: ChatIn, request: Request):
                     history=history,
                     stop=stop,
                 ):
+                    # 只在拿到 final 后落库：中途断开的半截回答不该进入下一轮上下文。
+                    if event.get("type") == "final":
+                        _remember(payload.message, str(event.get("answer") or ""))
                     deliver(("event", event))
                     if stop.is_set():
                         break
@@ -206,6 +237,12 @@ async def chat_stream(payload: ChatIn, request: Request):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.delete("/history")
+def clear_history() -> dict:
+    """清空服务端会话记忆（= 开新对话）。关注项与排查轨迹不受影响。"""
+    return {"removed": db.clear_conversations(settings.db_path)}
 
 
 @router.get("/runs")

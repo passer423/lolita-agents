@@ -148,6 +148,15 @@ START ──fanout──▶ own ─┐
 - 通道不可用 **≠** 没有更新：不写事件、不覆盖基线，界面显示原因（与「skip 不是 empty」同一条纪律）。
 - 接口：`GET/POST /api/follows`、`DELETE /api/follows/{id}`、`POST /api/follows/check`、`POST /api/follows/events/read`。
 
+## 会话记忆
+
+- 存储：`data/app.db` 的 `conversations` 表，一问一答同事务写入。
+- 回填：请求**不传** `history` 时，服务端自动补最近几轮；显式传 `history: []` 表示开新对话，不加载旧上下文。
+- 编号：落库与回填都会剥掉 assistant 内容里的 `[n]`——编号只在单轮内有效，上一轮的 `[1]` 指向的是上一轮证据。
+- 保留：只留最近 `CONVERSATION_RETENTION_MESSAGES` 条消息（默认 100 条 ≈ 50 轮，一问一答算 2 条），超出即删最旧的；设为 `<=0` 关闭自动清理。
+- 清理：`DELETE /api/chat/history` 清空会话记忆（返回删除条数），不影响关注项与排查轨迹。
+- 只落最终回答：流式回答中途断开时不写库，半截回答不会进入下一轮上下文。
+
 ## 边界与纪律
 
 - **微博 UGC 与自有内容永不混用。** `real` 语料只进索引、不落盘、不对外。

@@ -225,6 +225,98 @@ def test_stream_requires_nonempty_message(client):
     assert client.post("/api/chat/stream", json={"message": ""}).status_code == 422
 
 
+# --------------------------------------------------------------------- 会话记忆
+
+
+def _capture_runs(monkeypatch):
+    """把 graph.run 换成记录 history 的假实现，返回收集到的 history 列表。"""
+    seen: list[list[dict]] = []
+
+    def fake_run(question, *, ctx, planner, writer, history):
+        seen.append(history)
+        return {"question": question, "answer": f"答{len(seen)}", "refused": False}
+
+    monkeypatch.setattr(chat_router.graph, "run", fake_run)
+    _inject(monkeypatch)
+    return seen
+
+
+def test_chat_persists_and_reloads_history(client, monkeypatch):
+    from app import db
+    from app.config import settings
+
+    seen = _capture_runs(monkeypatch)
+
+    assert client.post("/api/chat", json={"message": "第一条"}).status_code == 200
+    assert seen[0] == []
+    assert db.recent_conversations(settings.db_path) == [
+        {"role": "user", "content": "第一条"},
+        {"role": "assistant", "content": "答1"},
+    ]
+
+    client.post("/api/chat", json={"message": "第二条"})
+    assert seen[1] == [
+        {"role": "user", "content": "第一条"},
+        {"role": "assistant", "content": "答1"},
+    ]
+
+
+def test_chat_explicit_empty_history_starts_new_conversation(client, monkeypatch):
+    seen = _capture_runs(monkeypatch)
+
+    client.post("/api/chat", json={"message": "第一条"})
+    client.post("/api/chat", json={"message": "新话题", "history": []})
+
+    assert seen[1] == []
+
+
+def test_chat_strips_citations_from_loaded_history(client, monkeypatch):
+    """W3 的编号净化也要覆盖「从库里补出来」的历史。"""
+    from app import db
+    from app.config import settings
+
+    db.add_exchange(settings.db_path, "上一轮", "[1] 装洗衣袋。")
+    seen = _capture_runs(monkeypatch)
+
+    client.post("/api/chat", json={"message": "那这条呢"})
+
+    assert seen[0][-1] == {"role": "assistant", "content": "装洗衣袋。"}
+
+
+def test_clear_history_endpoint_removes_memory(client, monkeypatch):
+    from app import db
+    from app.config import settings
+
+    _capture_runs(monkeypatch)
+    client.post("/api/chat", json={"message": "第一条"})
+
+    response = client.delete("/api/chat/history")
+
+    assert response.status_code == 200
+    assert response.json()["removed"] == 2
+    assert db.recent_conversations(settings.db_path) == []
+
+
+def test_stream_persists_final_answer(client, monkeypatch):
+    from app import db
+    from app.config import settings
+
+    def fake_stream(question, **_kwargs):
+        yield {"type": "delta", "text": "半截"}
+        yield {"type": "final", "question": question, "answer": "最终[1]", "refused": False}
+
+    monkeypatch.setattr(chat_router.graph, "stream", fake_stream)
+    _inject(monkeypatch)
+
+    response = client.post("/api/chat/stream", json={"message": "怎么洗"})
+
+    assert response.status_code == 200
+    assert db.recent_conversations(settings.db_path) == [
+        {"role": "user", "content": "怎么洗"},
+        {"role": "assistant", "content": "最终[1]"},
+    ]
+
+
 # --------------------------------------------------------------------- 轨迹 / 静态
 
 
