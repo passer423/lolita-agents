@@ -974,6 +974,64 @@ def test_kb_evidence_keeps_provenance(monkeypatch):
     assert item["retriever"] == "bm25+vector"
 
 
+# --------------------------------------------------------------------- 中英边界回退
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("痛lo是什么意思", "痛 lo 是什么意思"),
+    ("痛LO", "痛 LO"),
+    ("SK和JSK怎么搭配", "SK 和 JSK 怎么搭配"),
+    ("痛 lo 是什么意思", ""),   # 已经有空格，无需回退
+    ("蕾丝怎么洗", ""),         # 没有中英边界
+])
+def test_latin_cjk_variant_only_touches_boundaries(text, expected):
+    assert channels._latin_cjk_variant(text) == expected
+
+
+def test_own_channel_retries_with_spaced_variant_when_empty(monkeypatch):
+    """「痛lo」整词 df=0 被判成语料之外时，用「痛 lo」再试一次。"""
+    calls: list[str] = []
+
+    def search_kb(text, app, *, top_k=None):
+        calls.append(text)
+        return [] if " " not in text else [_hit("bm25+vector", "term-tonglo#0")]
+
+    monkeypatch.setattr(channels.bridge, "search_kb", search_kb)
+
+    result = channels.recall("own", "痛lo是什么意思", ctx())
+
+    assert [item["ref"] for item in result] == ["term-tonglo#0"]
+    assert calls == ["痛lo是什么意思", "痛 lo 是什么意思"]
+
+
+def test_own_channel_does_not_retry_when_first_pass_has_hits(monkeypatch):
+    calls: list[str] = []
+
+    def search_kb(text, app, *, top_k=None):
+        calls.append(text)
+        return [_hit("bm25+vector", "x")]
+
+    monkeypatch.setattr(channels.bridge, "search_kb", search_kb)
+
+    channels.recall("own", "痛lo是什么意思", ctx())
+
+    assert calls == ["痛lo是什么意思"]
+
+
+def test_own_channel_does_not_retry_without_latin_cjk_boundary(monkeypatch):
+    """纯中文查询为空是真的没有，不能靠回退去凑结果。"""
+    calls: list[str] = []
+
+    def search_kb(text, app, *, top_k=None):
+        calls.append(text)
+        return []
+
+    monkeypatch.setattr(channels.bridge, "search_kb", search_kb)
+
+    assert channels.recall("own", "红烧肉怎么做", ctx()) == []
+    assert calls == ["红烧肉怎么做"]
+
+
 def test_lolibrary_keyword_match(workdir):
     from app.config import AppSettings
 

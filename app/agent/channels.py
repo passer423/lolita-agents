@@ -34,6 +34,7 @@ import json
 import logging
 import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -153,13 +154,52 @@ def _kb_evidence(channel: str, hits: list[dict]) -> list[dict]:
     ]
 
 
+# 「痛lo」这类中文紧贴拉丁字母的写法，上游分词会当成**一个整词**；而语料正文写的
+# 是「痛 lo」，索引里存的是「痛」「lo」两个 token。整词在语料里 df=0，上游的
+# 「问到语料之外」闸门于是把召回直接判空（评测 own-12 / own-12c 就是这么 miss 的）。
+#
+# 修在上游要连索引和全量评测一起回归，代价不对等；所以放在查询侧做**回退**：
+# 只在首轮召回为空、且查询确实含中英边界时，给边界补一个空格重试一次。
+# 刻意不做查询预处理：上游只吞「英文+空格+中文」的空格，不吞「中文+空格+英文」，
+# 全局改写会改变普通问句的分词，而这类副作用借现有评测看不见。
+# 上游分词修好后首轮就有结果，这个回退不会再触发，届时可以删掉。
+_LATIN_CJK_BOUNDARY = re.compile(
+    r"(?<=[A-Za-z])(?=[\u4e00-\u9fff])|(?<=[\u4e00-\u9fff])(?=[A-Za-z])"
+)
+
+
+def _latin_cjk_variant(text: str) -> str:
+    """在中英文边界补空格；没有边界（或补完没变化）时返回空串。"""
+    text = (text or "").strip()
+    variant = _LATIN_CJK_BOUNDARY.sub(" ", text)
+    return variant if variant != text else ""
+
+
+def _search_with_boundary_retry(
+    search: Callable[..., list[dict]], text: str, ctx: RecallContext
+) -> list[dict]:
+    """先按原样检索；为空且含中英边界时，换「隔开写法」再试一次。
+
+    「痛lo」为什么需要这一步见 ``_LATIN_CJK_BOUNDARY`` 上方。触发条件限定为
+    **首轮为空**：有结果就完全不碰，普通问句的召回与排序不受影响。
+    """
+    hits = search(text, ctx.settings, top_k=ctx.settings.top_k)
+    if hits:
+        return hits
+    variant = _latin_cjk_variant(text)
+    if not variant:
+        return hits
+    logger.info("召回为空，按中英边界展开重试：%r -> %r", text, variant)
+    return search(variant, ctx.settings, top_k=ctx.settings.top_k)
+
+
 def _recall_own(question: str, ctx: RecallContext, query: str = "") -> list[dict]:
-    hits = bridge.search_kb(query or question, ctx.settings, top_k=ctx.settings.top_k)
+    hits = _search_with_boundary_retry(bridge.search_kb, query or question, ctx)
     return _kb_evidence("own", hits)
 
 
 def _recall_real(question: str, ctx: RecallContext, query: str = "") -> list[dict]:
-    hits = bridge.search_real(query or question, ctx.settings, top_k=ctx.settings.top_k)
+    hits = _search_with_boundary_retry(bridge.search_real, query or question, ctx)
     # 只保留「向量路也认可」的命中（retriever 为 vector / bm25+vector）。
     #
     # 只被 bm25 命中的片段 = 字面重合，不构成「语料里有答案」的证据：实测问
