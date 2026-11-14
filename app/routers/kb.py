@@ -18,8 +18,12 @@ router = APIRouter(prefix="/api/kb", tags=["kb"])
 
 @router.get("/status")
 def kb_status() -> dict:
-    """两份索引分开报：``own`` 是自有知识库，``real`` 是上游真实语料。"""
+    """两份索引分开报：``own`` 是自有知识库，``real`` 是上游真实语料。
+
+    ``upstream`` 是路径自检：索引坏了要能一眼分清是「没建」还是「上游路径指错」。
+    """
     return {
+        "upstream": bridge.upstream_status(settings),
         "sources": {
             "own": bridge.index_status(settings, source="own"),
             "real": bridge.index_status(settings, source="real"),

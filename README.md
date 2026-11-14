@@ -64,6 +64,24 @@ python -m app.main            # http://127.0.0.1:8787
 
 没有 `LLM_API_KEY` 时，`/api/chat/status` 会明确禁用聊天，`/api/chat` 返回 503。补查通道（xhs / weibo / web）按 `.env` 里各自开关与凭据决定是否可用，缺了就跳过、不猜数据。
 
+## 知识库索引与上游路径
+
+`own` 与 `real` 是**两份独立索引**，状态必须分开看：
+
+| 索引 | 位置 | 谁建 |
+|---|---|---|
+| `own` | `DATA_DIR/kbindex`（默认 `data/kbindex`） | 本仓 `python scripts/build_kb_index.py` |
+| `real` | 上游 `lolita-rag/data/index` | 上游 `python scripts/build_index.py --source raw`（或它自己的 `daily_update` / `sync_brands`） |
+
+`LOLITA_RAG_ROOT` 必须指向一个**固定的** lolita-rag checkout。不要填临时工作目录（例如 `...\temp_xxx\...`）：目录被清理后 `real` 与自有索引的构建都会失败，而报错看起来像代码故障。换机器或挪目录后按这个顺序做：
+
+1. 改 `.env` 的 `LOLITA_RAG_ROOT`；
+2. `python scripts/build_kb_index.py --rebuild` 重建自有索引；加 `--notify` 会顺带通知正在跑的服务重载；
+3. 起服务后看 `GET /api/kb/status`：每份索引的 `ready` / `chunks` / `built_at` / `error`，以及上游的 `root` / `exists` 都在这里；
+4. 不想重启服务时 `POST /api/kb/reload` 手动重载（`build_kb_index.py --notify` 自动做这一步）。
+
+`real` 是可选的：上游没有索引时该通道返回空，不影响其它通道；但 `own` 的构建本身也依赖上游代码，所以 `LOLITA_RAG_ROOT` 不能省。
+
 ## 结构
 
 ```

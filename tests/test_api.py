@@ -93,10 +93,23 @@ def test_status_reports_channels_without_key(client):
 def test_kb_status_reports_both_indexes_even_when_missing(client):
     response = client.get("/api/kb/status")
     assert response.status_code == 200
-    sources = response.json()["sources"]
-    assert set(sources) == {"own", "real"}
-    assert sources["own"]["source"] == "own"
-    assert sources["own"]["ready"] is False
+    body = response.json()
+    assert set(body["sources"]) == {"own", "real"}
+    assert body["sources"]["own"]["source"] == "own"
+    assert body["sources"]["own"]["ready"] is False
+    # 上游路径自检：区分「没建索引」与「LOLITA_RAG_ROOT 指错」。
+    assert body["upstream"]["root"]
+    assert isinstance(body["upstream"]["exists"], bool)
+
+
+def test_upstream_status_reports_bad_path(workdir):
+    from app.bridge import upstream_status
+    from app.config import AppSettings
+
+    status = upstream_status(AppSettings(lolita_rag_root=str(workdir)))
+
+    assert status["exists"] is False
+    assert "LOLITA_RAG_ROOT" in status["error"]
 
 
 def test_kb_reload_is_200_when_own_index_missing(client):

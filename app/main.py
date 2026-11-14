@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import __version__, db
+from app import __version__, bridge, db
 from app.config import settings
 from app.routers import chat, follows, kb
 
@@ -35,6 +35,19 @@ async def lifespan(_: FastAPI):
     db.init_db(settings.db_path)
     logger.info("数据目录：%s", settings.data_dir)
     logger.info("自有知识库索引：%s", settings.kb_index_dir)
+
+    # 启动自检：上游路径失效是最常见的「看起来像代码坏了」，先把话说清楚。
+    upstream = bridge.upstream_status(settings)
+    if upstream["exists"]:
+        logger.info("上游知识管线：%s", upstream["root"])
+    else:
+        logger.warning("%s", upstream["error"])
+    for source in ("own", "real"):
+        info = bridge.index_status(settings, source=source)
+        if info["ready"]:
+            logger.info("索引 %s 就绪：%s 个片段（%s）", source, info["chunks"], info["built_at"])
+        else:
+            logger.warning("索引 %s 未就绪：%s", source, info["error"] or "还没有建立")
     yield
 
 

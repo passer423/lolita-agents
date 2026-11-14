@@ -67,6 +67,25 @@ def _install_upstream(root: Path) -> None:
         sys.path.insert(0, text)
 
 
+def upstream_status(app: AppSettings | None = None) -> dict:
+    """上游仓库路径自检：只查文件，不 import、不建索引。
+
+    启动日志与 ``/api/kb/status`` 共用。路径失效是很常见的事（换了机器、
+    临时目录被清理），但报错长得像代码故障；这里把「配置指错了」单独说清楚。
+    """
+    app = app or default_settings
+    root = Path(app.lolita_rag_root)
+    exists = (root / "src" / "config.py").exists()
+    return {
+        "root": str(root),
+        "exists": exists,
+        "error": "" if exists else (
+            f"找不到上游知识管线：{root}（期望存在 src/config.py）。"
+            "请在 .env 里把 LOLITA_RAG_ROOT 改成固定的 lolita-rag 仓库路径。"
+        ),
+    }
+
+
 def upstream_settings(app: AppSettings | None = None, *, source: str = "own"):
     """构造一份只属于本应用的上游 Settings。
 
