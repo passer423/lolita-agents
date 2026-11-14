@@ -70,7 +70,7 @@ from typing import Annotated, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
-from app.agent import channels, cost, dress, routing, trace
+from app.agent import channels, conflicts, cost, dress, routing, trace
 from app.agent.channels import ALL_CHANNELS, ChannelUnavailable, RecallContext
 from app.agent.planner import PlannerOutputError, plan_channels, plan_intents
 from app.agent.writer import sanitize_history
@@ -988,6 +988,7 @@ def _finish(
         limit=ctx.settings.evidence_max_items,
     )
     cost_block = _cost_block(planner, writer, ctx.settings, route)
+    conflict_block = conflicts.diagnose(question, state.get("answer", ""), evidence)
     payload = {
         "question": question,
         "answer": state.get("answer", ""),
@@ -998,6 +999,7 @@ def _finish(
         "follow_suggestion": _follow_suggestion(question, state, evidence, ctx),
         "dress": state.get("dress_profile") or None,
         "citation_coverage": _citation_coverage(writer),
+        "conflict_diagnostics": conflict_block,
         "usage": _merge_usage(planner, writer),
         "route": route.as_dict() if route is not None else None,
         "cost": cost_block,
@@ -1013,6 +1015,7 @@ def _finish(
             "evidence": len(evidence),
             "usage": payload["usage"],
             "citation_coverage": payload["citation_coverage"],
+            "conflict_diagnostics": conflict_block,
             "route": payload["route"],
             "cost": cost_block,
             "duration_ms": duration_ms,
@@ -1241,6 +1244,7 @@ def stream(
 
     duration_ms = int((time.perf_counter() - started) * 1000)
     cost_block = _cost_block(planner, writer, ctx.settings, route)
+    conflict_block = conflicts.diagnose(question, text, evidence)
     payload = {
         "question": question,
         "answer": text,
@@ -1253,6 +1257,7 @@ def stream(
         "follow_suggestion": _follow_suggestion(question, state, evidence, ctx),
         "dress": state.get("dress_profile") or None,
         "citation_coverage": _citation_coverage(writer),
+        "conflict_diagnostics": conflict_block,
         "usage": _merge_usage(planner, writer),
         "route": route.as_dict(),
         "cost": cost_block,
@@ -1268,6 +1273,7 @@ def stream(
             "evidence": len(evidence),
             "usage": payload["usage"],
             "citation_coverage": payload["citation_coverage"],
+            "conflict_diagnostics": conflict_block,
             "route": payload["route"],
             "cost": cost_block,
             "duration_ms": duration_ms,
