@@ -2,10 +2,18 @@
 
 每个来源是一个独立召回通道，统一签名 ``recall(channel, question, ctx) -> list[dict]``：
 
-* 每条证据带 ``channel / ref / title / text / url``；
+* 每条证据带 ``channel / source_kind / ref / title / text / url / score / retriever``；
+  ``score`` / ``retriever`` 只用于排查（不同通道的量纲不可比，不参与跨通道排序）；
 * 通道失败抛 :class:`ChannelUnavailable`，调用方（graph 的通道节点）跳过不猜；
 * 实时通道（``xhs`` / ``weibo`` / ``web``）的结果只作本次回答的临时证据，
   **不落盘、不入索引**（小红书 6 小时缓存只是避免同一 query 反复启动浏览器）。
+
+``source_kind`` 是**证据的效力等级**，不是来源分类——写作用它决定哪句能当规范：
+
+* ``own_content``  自己整理的知识库，可作规范；
+* ``third_party``  官方/档案馆数据，可作事实（但不含现价）；
+* ``realtime``     网页搜索/小红书的结果摘要，时效信息可用，来源需标注；
+* ``upstream_ugc`` 他人微博发言，**只能写成「有网友提到」，不得当规范**。
 
 六通道：
 
@@ -25,7 +33,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import urlparse
 
 from app import bridge
@@ -38,8 +48,24 @@ CORE_CHANNELS = ("own", "real", "lolibrary")
 SUPPLEMENTARY_CHANNELS = ("xhs", "weibo", "web")
 ALL_CHANNELS = (*CORE_CHANNELS, *SUPPLEMENTARY_CHANNELS)
 
+# 通道 → 证据效力等级。``own`` 与 ``real`` 是同一召回机制（bridge + 向量检索），
+# 但语料性质完全不同：前者自己写，后者是采集来的他人发言——混成一种就没有
+# 「不许拿网友的话当规范」这条约束了。
+CHANNEL_SOURCE_KIND = {
+    "own": "own_content",
+    "real": "upstream_ugc",
+    "lolibrary": "third_party",
+    "xhs": "realtime",
+    "weibo": "realtime",
+    "web": "realtime",
+}
+
 EVIDENCE_TEXT_LIMIT = 300
 LOLIBRARY_TOP_K = 3
+WEIBO_MAX_EVIDENCE = 3
+# 微博页面在搜索结果里占比很低：只取 5 条再过滤，常常一条微博都剩不下。
+# 先多拿候选再筛，比把搜索条数调大当默认值更精准（其他通道不需要这么多）。
+WEIBO_CANDIDATES = 10
 
 
 class ChannelUnavailable(RuntimeError):
@@ -48,10 +74,9 @@ class ChannelUnavailable(RuntimeError):
 
 @dataclass(slots=True)
 class RecallContext:
-    """一次召回所需的上下文。偏好用于个性化排序；v1 只做单用户记忆。"""
+    """一次召回所需的上下文（单用户：只有配置）。"""
 
     settings: AppSettings = field(default_factory=lambda: default_settings)
-    preferences: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _clip(text: str) -> str:
@@ -63,13 +88,18 @@ def _clip(text: str) -> str:
 
 
 def _kb_evidence(channel: str, hits: list[dict]) -> list[dict]:
+    # score / retriever 原样带出去：上游 hits_to_dicts 已经算好了，丢掉它就只能
+    # 靠重跑检索才能回答「这条为什么进来」——排查噪声证据时那是唯一的线索。
     return [
         {
             "channel": channel,
+            "source_kind": CHANNEL_SOURCE_KIND[channel],
             "ref": hit.get("chunk_id") or "",
-            "title": hit.get("author") or ("自有知识库" if channel == "own" else "真实语料"),
+            "title": hit.get("author") or ("自有知识库" if channel == "own" else "过往网友讨论"),
             "text": _clip(hit.get("text") or ""),
-            "url": "",
+            "url": hit.get("url") or "",
+            "score": hit.get("score"),
+            "retriever": hit.get("retriever") or "",
         }
         for hit in hits
     ]
@@ -82,7 +112,17 @@ def _recall_own(question: str, ctx: RecallContext, query: str = "") -> list[dict
 
 def _recall_real(question: str, ctx: RecallContext, query: str = "") -> list[dict]:
     hits = bridge.search_real(query or question, ctx.settings, top_k=ctx.settings.top_k)
-    return _kb_evidence("real", hits)
+    # 只保留「向量路也认可」的命中（retriever 为 vector / bm25+vector）。
+    #
+    # 只被 bm25 命中的片段 = 字面重合，不构成「语料里有答案」的证据：实测问
+    # 「Baby 秋日私语 JSK 现在多少钱」时，real 通道 top3 全是纯 bm25，捞到的是
+    # 「兔熊抵工资」这种只共享一个词的段子。分数切不开（bm25 归一化后同样是
+    # 1.0），retriever 字段切得开。上游对「纯关键词命中」本来就要求 ≥2 个内容词
+    # 才豁免向量下限（BM25_ONLY_MIN_CONTENT_MATCHES，为「谢安然穿哪个牌子」这类
+    # 真答案留的口子）；这里更严一档：真实语料是他人发言，一旦进证据就可能被
+    # writer 当成事实陈述，宁可漏也不能把道听途说当答案。
+    semantic = [hit for hit in hits if "vector" in (hit.get("retriever") or "")]
+    return _kb_evidence("real", semantic)
 
 
 # --------------------------------------------------------------------- lolibrary
@@ -103,11 +143,82 @@ def _query_terms(question: str) -> list[str]:
     return terms
 
 
+# 品牌别名：圈内提问几乎只写缩写或中文叫法，档案里存的却是品牌全称。
+# 值是档案 `brand` 字段的全称，分两类匹配：
+# * 拉丁缩写按**整词**命中（`_LATIN_RE` 的 token），否则 "ap" 会命中 Cape / wrap；
+# * 中文叫法按**子串**命中（中文没有词边界，且都 ≥2 字）。
+# 「宝贝」「变态」这类故意不收：它们同时是日常用词，一旦当品牌，
+# 「这个设计好变态」会被整句强行限定到 Metamorphose。
+BRAND_ALIASES = {
+    "ap": "Angelic Pretty",
+    "baby": "Baby, the Stars Shine Bright",
+    "btssb": "Baby, the Stars Shine Bright",
+    "aatp": "Alice and the Pirates",
+    "atp": "Alice and the Pirates",
+    "etc": "Emily Temple Cute",
+    "emily": "Emily Temple Cute",
+    "meta": "Metamorphose Temps de Fille",
+    "metamorphose": "Metamorphose Temps de Fille",
+    "moitie": "Moi-même-Moitié",
+    "mmm": "Moi-même-Moitié",
+    "axes": "Axes Femme",
+    "vw": "Vivienne Westwood",
+    "miho": "Miho Matsuda",
+    "hearte": "Heart E",
+    "iw": "Innocent World",
+    "vm": "Victorian Maiden",
+    "jj": "Juliette et Justine",
+    "jm": "Jane Marple",
+    "kl": "Krad Lanrete",
+    "mm": "Mary Magdalene",
+    "安琪": "Angelic Pretty",
+    "海盗": "Alice and the Pirates",
+    "无辜世界": "Innocent World",
+}
+
+
+# 品类词不构成「相关」：任何一条 JSK 都能命中它。品牌查询可以靠它收窄，
+# 但没点名品牌时，至少要命中一个品类词以外的词，否则术语题会带出无关档案。
+_GENERIC_TERMS = {
+    "jsk", "op", "skirt", "blouse", "cardigan", "coat", "jacket", "cape",
+    "socks", "otks", "tights", "bag", "shoes", "accessory", "headdress",
+    "set", "dress", "cutsew", "salopette", "pinafore",
+}
+
+
+def _brand_targets(question: str) -> tuple[set[str], str]:
+    """找出问题里点名的品牌，返回 ``(品牌全称小写集合, 去掉中文别名后的文本)``。
+
+    中文别名必须整词替换掉：否则「安琪」会被 `_query_terms` 拆成「安」「琪」
+    两个单字继续参与打分，而别名本身永远拼不出来（这正是加中文别名前的老问题）。
+    """
+    lowered = (question or "").lower()
+    targets = {BRAND_ALIASES[token] for token in _LATIN_RE.findall(lowered) if token in BRAND_ALIASES}
+
+    cjk_aliases = sorted(
+        (alias for alias in BRAND_ALIASES if _CJK_RE.search(alias)),
+        key=len,
+        reverse=True,
+    )
+    for alias in cjk_aliases:
+        if alias in lowered:
+            targets.add(BRAND_ALIASES[alias])
+            lowered = lowered.replace(alias, " ")
+    return {target.lower() for target in targets}, lowered
+
+
 def _record_text(record: dict) -> str:
     return " ".join(
         str(record.get(key) or "")
         for key in ("title", "brand", "category", "product_number")
     ) + " " + " ".join(record.get("colors") or []) + " " + " ".join(record.get("tags") or [])
+
+
+def _term_in(term: str, text: str) -> bool:
+    """拉丁词按词边界匹配：两三个字母的缩写真当子串用会误配（"op" 命中 "Top"）。"""
+    if term.isascii():
+        return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text) is not None
+    return term in text
 
 
 def _lolibrary_summary(record: dict) -> str:
@@ -126,47 +237,87 @@ def _lolibrary_summary(record: dict) -> str:
     return "｜".join(p for p in parts if p)
 
 
-def _load_catalog(ctx: RecallContext) -> list[dict]:
+_catalog_lock = threading.Lock()
+_catalog_cache: dict[str, Any] = {"path": "", "mtime": 0.0, "records": []}
+
+
+def load_catalog(ctx: RecallContext) -> list[dict]:
+    """读档案；进程内按 ``(路径, mtime)`` 缓存，档案更新后下一次请求自动换新。"""
     path = ctx.settings.lolibrary_catalog_path
-    if not path.exists():
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
         return []
+
+    key = str(path)
+    with _catalog_lock:
+        if _catalog_cache["path"] == key and _catalog_cache["mtime"] == mtime:
+            return _catalog_cache["records"]
+
     records: list[dict] = []
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(record, dict) and record.get("slug"):
-                records.append(record)
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
         logger.info("Lolibrary 档案读取失败：%s", exc)
         return []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and record.get("slug"):
+            records.append(record)
+
+    with _catalog_lock:
+        _catalog_cache.update(path=key, mtime=mtime, records=records)
     return records
 
 
 def _recall_lolibrary(question: str, ctx: RecallContext, query: str = "") -> list[dict]:
-    terms = _query_terms(query or question)
-    if not terms:
+    brand_targets, text = _brand_targets(query or question)
+    # 别名已经展开成品牌全称，不能再当文本词打分（"ap" 会命中 "Cape"）。
+    terms = [t for t in _query_terms(text) if t not in BRAND_ALIASES]
+    if not terms and not brand_targets:
         return []
-    records = _load_catalog(ctx)
+    # 没点名品牌时，还必须命中一个品类词以外的**拉丁**词：档案是英文的，中文单字
+    # 本来就匹配不上（只会把「有什么区别」拆成「区」「别」「是」骗过判定）；
+    # 而 "jsk" / "op" 这类品类词谁都命中，不足以说明相关。
+    if not brand_targets and not any(
+        term.isascii() and term not in _GENERIC_TERMS for term in terms
+    ):
+        return []
+    records = load_catalog(ctx)
     if not records:
         return []
 
+    # 命中了品牌就只在品牌内挑：用户明确点名 "ap" / "安琪"，别家条目再相关也不该混进来。
+    # 只点名品牌、没有其它词时（「安琪有什么经典款」），score=1 即可入选——
+    # 此时排序退化为该品牌的档案顺序，正好可以当浏览用。
+    # 没点名品牌时至少要命中两个词，且不能只靠品类词：只命中 "jsk" / "op" 的话，
+    # 问「JSK 和 OP 有什么区别」会冒出几条无关条目——那是知识库该答的题，
+    # 档案只该在用户点到具体品牌或系列时插话。
+    min_score = 1 if brand_targets else 2
+
     scored: list[tuple[int, dict]] = []
     for record in records:
-        text = _record_text(record).lower()
-        score = sum(1 for term in terms if term in text)
-        if score > 0:
+        text_content = _record_text(record).lower()
+        brand_hit = any(target in str(record.get("brand") or "").lower() for target in brand_targets)
+        if brand_targets and not brand_hit:
+            continue
+        score = sum(1 for term in terms if _term_in(term, text_content))
+        if brand_hit:
+            score += 1
+        if score >= min_score:
             scored.append((score, record))
     scored.sort(key=lambda item: (-item[0], str(item[1].get("slug") or "")))
 
     return [
         {
             "channel": "lolibrary",
+            "source_kind": CHANNEL_SOURCE_KIND["lolibrary"],
             "ref": record.get("slug") or "",
             "title": str(record.get("title") or record.get("slug") or ""),
             "text": _clip(_lolibrary_summary(record)),
@@ -183,6 +334,7 @@ def _search_evidence(channel: str, results: list) -> list[dict]:
     return [
         {
             "channel": channel,
+            "source_kind": CHANNEL_SOURCE_KIND[channel],
             "ref": r.url,
             "title": r.title,
             "text": _clip(r.content or r.snippet),
@@ -203,17 +355,117 @@ def _host(url: str) -> str:
     return (urlparse(url).hostname or "").lower()
 
 
+# 微博域下这些子域不是「用户发言」：站内搜索页、登录/客服/服务页。
+# 不排掉的话，site: 查询会把 service.weibo.com 当成命中，证据里全是空壳页。
+_WEIBO_NON_CONTENT_HOSTS = {
+    "s.weibo.com",
+    "service.weibo.com",
+    "passport.weibo.com",
+    "login.weibo.com",
+    "account.weibo.com",
+    "help.weibo.com",
+    "kefu.weibo.com",
+    "app.weibo.com",
+    "d.weibo.com",
+}
+
+
 def _is_weibo(url: str) -> bool:
     host = _host(url)
-    return host == "weibo.com" or host.endswith(".weibo.com") or host == "weibo.cn" or host.endswith(".weibo.cn")
+    if host in _WEIBO_NON_CONTENT_HOSTS:
+        return False
+    return (
+        host == "weibo.com"
+        or host.endswith(".weibo.com")
+        or host == "weibo.cn"
+        or host.endswith(".weibo.cn")
+    )
+
+
+def _weibo_queries(text: str) -> tuple[str, ...]:
+    """两段式 query：先站内限定，再退回关键词诱导。
+
+    `scripts/probe_search.py` 实测（智谱 search_std，3 条裙子查询）：
+    ``site:weibo.com`` 平均命中 2.00 条，``{q} 微博`` / ``{q} 微博 实拍`` 只有 0.33。
+    所以站内限定做主查询；关键词只在它一条都没带出时兜底。
+    """
+    keyword = text if "微博" in text else f"{text} 微博"
+    return (f"site:weibo.com {text}", keyword)
+
+
+def _weibo_relevant(result, text: str) -> bool:
+    """判断这条微博是不是真在说这个问题。
+
+    ``site:weibo.com`` 只保证域名，不保证话题：问「Baby 秋日私语 JSK」时，
+    搜索引擎会带回一堆标题含「秋日私语」的秋天散文。规则：
+
+    * 查询里有拉丁词（Baby / JSK / AP）：必须命中最少一个——品牌或款式是
+      这条裙子的身份，只共享「秋日私语」这种泛化短语不算相关；
+    * 纯中文查询（花与珍珠匣 缎带 测评）：命中**最长片段**（通常是品牌/系列名）。
+
+    命中不足按 skip 报，不冒充「微博上没有」。
+    """
+    lowered = (text or "").lower()
+    latin = _LATIN_RE.findall(lowered)
+    cjk = _CJK_RE.findall(text or "")
+    haystack = f"{result.title} {result.content or result.snippet}".lower()
+
+    if latin:
+        return any(_term_in(token, haystack) for token in latin)
+    if cjk:
+        return _term_in(max(cjk, key=len), haystack)
+    return True
 
 
 def _recall_weibo(question: str, ctx: RecallContext, query: str = "") -> list[dict]:
     from app.services import web_search
 
-    text = " ".join(part for part in ((query or question), "微博") if part).strip()
-    results = web_search.search(text, ctx.settings, max_results=3)
-    return _search_evidence("weibo", [r for r in results if _is_weibo(r.url)])
+    # 这是「经搜索引擎找微博页面」，不是微博站内搜索。query 构造直接决定命中率，
+    # 先用 scripts/probe_search.py 实测再改，别凭感觉调。
+    text = (query or question).strip()
+    candidates = min(50, max(ctx.settings.search_max_results * 2, WEIBO_CANDIDATES))
+    seen: set[str] = set()
+    found: list[web_search.SearchResult] = []
+    total = 0
+    seen_weibo = 0
+    fallback_error = ""
+
+    for index, attempt in enumerate(_weibo_queries(text)):
+        try:
+            results = web_search.search(attempt, ctx.settings, max_results=candidates)
+        except Exception as exc:  # noqa: BLE001
+            if index == 0:
+                # 连第一次都失败（缺 key / 网络）时交给 recall() 统一转 ChannelUnavailable，
+                # 不要用第二次尝试把真实原因盖掉。
+                raise
+            fallback_error = f"{type(exc).__name__}: {str(exc)[:80]}"
+            continue
+        total += len(results)
+        for result in results:
+            if not _is_weibo(result.url) or result.url in seen:
+                continue
+            seen.add(result.url)
+            seen_weibo += 1
+            if _weibo_relevant(result, text):
+                found.append(result)
+        if len(found) >= WEIBO_MAX_EVIDENCE:
+            break
+
+    if not found:
+        # 二阶检索（搜索 → 微博）取不到微博页，**不能**当成「微博上没有」：
+        # 前者是检索策略没带出来，后者是事实缺失。两者混在一起，前端就会把
+        # 「没查」渲染成「微博 → 空」，把策略失败伪装成事实缺失。
+        # 这是 skip 而不是 empty —— 只有直连微博拿到空结果，才有资格说「没有」。
+        if seen_weibo:
+            detail = f"搜索引擎返回 {seen_weibo} 条微博页面，但均未命中查询词"
+        elif total:
+            detail = f"搜索引擎返回 {total} 条但无微博页面"
+        else:
+            detail = "搜索引擎 0 条结果"
+        if fallback_error:
+            detail += f"；关键词兜底失败（{fallback_error}）"
+        raise ChannelUnavailable(f"微博通道未取到页面：{detail}")
+    return _search_evidence("weibo", found[:WEIBO_MAX_EVIDENCE])
 
 
 def _recall_web(question: str, ctx: RecallContext, query: str = "") -> list[dict]:
@@ -255,4 +507,8 @@ def recall(channel: str, question: str, ctx: RecallContext | None = None, *, que
         raise
     except Exception as exc:  # noqa: BLE001 - 单通道意外异常局部化，不拖垮整个召回
         logger.warning("通道 %s 召回失败：%s: %s", channel, type(exc).__name__, exc)
-        raise ChannelUnavailable(f"{channel} 召回失败：{type(exc).__name__}") from exc
+        # 带上原始原因：只留异常类名时，界面只能显示「召回失败：SearchUnavailable」，
+        # 用户看不出是缺 key 还是网络问题。截断避免把整段堆栈塞进 steps。
+        raise ChannelUnavailable(
+            f"{channel} 召回失败：{type(exc).__name__}: {str(exc)[:160]}"
+        ) from exc

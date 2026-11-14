@@ -10,13 +10,13 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__, db
 from app.config import settings
-from app.routers import chat
+from app.routers import chat, follows
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,7 +53,7 @@ class UTF8JSONResponse(JSONResponse):
 app = FastAPI(
     title="lolita-agents",
     version=__version__,
-    description="Lolita 领域问答助手：多路召回 → 生成回答 → 记忆偏好 → 关注项通知",
+    description="Lolita 领域问答助手：多路召回 → 生成回答 → 关注项通知",
     lifespan=lifespan,
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
@@ -62,6 +62,40 @@ app = FastAPI(
 
 # 1) API 先注册
 app.include_router(chat.router)
+app.include_router(follows.router)
+
+
+def _asset_version() -> str:
+    """前端资源版本号：chat.js / style.css 一改就换 URL。
+
+    同端口曾经跑过 lo-life，它的 Service Worker 对 /chat.js、/style.css 是
+    cache-first；只靠 HTTP 缓存头绕不过去，换 URL 才是最稳的失效方式。
+    """
+    stamps = [
+        path.stat().st_mtime
+        for path in (STATIC_DIR / "chat.js", STATIC_DIR / "style.css")
+        if path.exists()
+    ]
+    return str(int(max(stamps))) if stamps else __version__
+
+
+@app.get("/", include_in_schema=False)
+def index() -> HTMLResponse:
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    version = _asset_version()
+    html = html.replace('src="/chat.js"', f'src="/chat.js?v={version}"')
+    html = html.replace('href="/style.css"', f'href="/style.css?v={version}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+@app.middleware("http")
+async def no_store_ui(request: Request, call_next):
+    """前端外壳不缓存：本地服务改完就应该立刻生效，别让人靠 Ctrl+F5。"""
+    response = await call_next(request)
+    if request.url.path in ("/chat.js", "/style.css", "/sw.js"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 
 # 2) 静态资源最后挂。
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="app")

@@ -16,13 +16,23 @@
     .replace(/\n/g, '<br>');
 
   // 召回通道名 → 人话（过程里别直接甩英文通道名）
+  // real 不能叫「真实语料」：它其实是采集来的他人发言，叫"真实"会让人以为是
+  // 权威来源。界面必须让用户一眼看出哪条是网友说的。
   const CHANNEL_LABELS = {
     own: '自有知识库',
-    real: '真实语料',
+    real: '过往网友讨论',
     lolibrary: 'Lolibrary 档案',
+    dress: '裙子档案',
     xhs: '小红书',
     weibo: '微博',
     web: '网页搜索',
+  };
+
+  const REGION_LABELS = {
+    JP: '日牌',
+    CN: '国牌',
+    OTHER: '其他地区',
+    UNKNOWN: '地区未识别',
   };
 
   function toast(message) {
@@ -43,15 +53,126 @@
     }
     if (step.kind === 'skip') {
       const label = CHANNEL_LABELS[step.channel] || step.channel;
-      return '· ' + label + ' 不可用';
+      // 带上原因：没有原因的「不可用」会让人以为是网络问题，
+      // 而真实原因往往是「搜索没带出微博页」这类策略问题。
+      return '· ' + label + ' 不可用' + (step.reason ? '（' + esc(step.reason) + '）' : '');
     }
     if (step.kind === 'route') {
-      if (step.error) return '· 补查决策失败，仅用核心通道';
+      // 补查由规则决定；error 只表示检索词没提出来，不影响补查
+      if (step.error) {
+        return '· 检索词提取失败，仍补查：' +
+          (step.supplementary || []).map((c) => CHANNEL_LABELS[c] || c).join('、');
+      }
       return step.supplementary && step.supplementary.length
         ? '· 追加实时通道：' + step.supplementary.map((c) => CHANNEL_LABELS[c] || c).join('、')
-        : '· 核心通道已覆盖，无需补查';
+        : '· 不需要实时信息，不补查';
+    }
+    if (step.kind === 'dress') {
+      if (step.pending) return '· 裙子档案：本地没认出，正在让模型识别…';
+      const region = REGION_LABELS[step.region] || '地区未识别';
+      return '· 裙子档案：' + esc(step.brand || '品牌未识别') + '（' + region + '）' +
+        (step.series ? ' · ' + esc(step.series) : '');
+    }
+    if (step.kind === 'dress_profile') {
+      const region = REGION_LABELS[step.region] || '地区未识别';
+      return '· 档案整合：' + esc(step.brand || '品牌未识别') + '（' + region + '）';
+    }
+    if (step.kind === 'dress_search') {
+      const via = step.via === 'web' ? '网页反查' : '关键词检索';
+      const candidates = (step.candidates || []).join(' / ');
+      if (step.matched_title) {
+        return '· ' + via + '：' + esc(candidates) + ' → 命中 ' + esc(step.matched_title);
+      }
+      return '· ' + via + '：' + esc(candidates || '无候选') + ' → ' +
+        esc(step.error || '未命中');
+    }
+    if (step.kind === 'timeout') {
+      // 整体预算用尽：说清"等到哪一步"，别让用户以为是某一路挂死
+      const waited = step.deadline_s ? Math.round(step.deadline_s) + ' 秒' : '';
+      const pending = (step.pending || []).map((c) => CHANNEL_LABELS[c] || c).join('、');
+      return '· 整体超时' + (waited ? '（' + waited + '）' : '') +
+        (pending ? '，未返回：' + pending : '') + '，先返回已查到的内容';
     }
     return '· ' + esc(step.kind);
+  }
+
+  function markCitations(wrap, bubble, message) {
+    const invalid = message.invalidCitations || [];
+    const problems = message.citationProblems || [];
+    if (!invalid.length && !problems.length) return;
+
+    if (!invalid.length) {
+      // 没有越界编号，说明问题是"整段没标来源"——逐条标不出来，只能整体提示
+      const warn = document.createElement('div');
+      warn.className = 'notice warn cite-warn';
+      warn.textContent = '这段回答没有标注来源，事实以下方「参考来源」为准。';
+      wrap.insertBefore(warn, bubble.nextSibling);
+      return;
+    }
+
+    const bad = new Set(invalid.map(String));
+    bubble.querySelectorAll('.cite').forEach((node) => {
+      if (!bad.has(node.dataset.n)) return;
+      node.classList.add('invalid');
+      node.title = '这条引用对不上任何来源';
+    });
+
+    const warn = document.createElement('div');
+    warn.className = 'notice warn cite-warn';
+    warn.textContent = '有 ' + invalid.length + ' 处引用对不上来源（' +
+      invalid.map((n) => '[' + n + ']').join('、') + '），已标出；事实以下方「参考来源」为准。';
+    wrap.insertBefore(warn, bubble.nextSibling);
+  }
+
+  function dressPrice(dress) {
+    if (dress.price_conflict) return '来源说法不一致';
+    if (!dress.price) return '未查到';
+    if (dress.price_kind === 'archive_original') return dress.price + '（历史原价）';
+    if (dress.price_kind === 'social_unverified') return dress.price + '（网友提到，未核实）';
+    return dress.price;
+  }
+
+  function dressCard(dress) {
+    if (!dress || (!dress.brand && !dress.title && !dress.title_cn)) return '';
+    const region = REGION_LABELS[dress.region] || '地区未识别';
+    const tagClass = dress.region === 'JP' ? ' jp' : (dress.region === 'CN' ? ' cn' : '');
+    const title = dress.title
+      ? (dress.title_cn ? dress.title + '（' + dress.title_cn + '）' : dress.title)
+      : (dress.title_cn || '');
+    const rows = [
+      ['发售', dress.release_conflict ? '来源说法不一致' : (dress.release || '未查到')],
+      ['价格', dressPrice(dress)],
+      ['款式', dress.style_conflict ? '来源说法不一致' : (dress.style || '未查到')],
+      ['配色', (dress.colors || []).length ? dress.colors.join(' / ') : '未查到'],
+    ];
+    const notes = [];
+    if (dress.verified === false && (dress.source === 'model' || dress.source === 'pending_model')) {
+      notes.push('模型识别，未在 Lolibrary 档案中核实');
+    }
+    if (dress.verified === false && dress.source === 'brand_alias') {
+      notes.push('未识别到具体系列');
+    }
+    if (dress.verified === true && dress.source === 'model_verified') {
+      notes.push('已用 Lolibrary 档案核实');
+    }
+    if (dress.price_kind === 'archive_original') notes.push('历史原价，不代表现价');
+    if ([dress.release_kind, dress.price_kind, dress.style_kind].indexOf('social_unverified') >= 0) {
+      notes.push('社媒字段未核实');
+    }
+    (dress.notes || []).forEach((note) => {
+      if (note && notes.indexOf(note) < 0) notes.push(note);
+    });
+    if ((dress.missing || []).length) notes.push('未查到：' + dress.missing.join('、'));
+    return '<div class="dress-card">' +
+      '<div class="dress-head"><span class="dress-name">' +
+        esc((dress.brand || '品牌未识别') + (title ? ' · ' + title : '')) +
+      '</span><span class="dress-tag' + tagClass + '">' + esc(region) + '</span></div>' +
+      '<div class="dress-grid">' + rows.map(([label, value]) =>
+        '<div class="dress-row"><span>' + label + '</span><b>' + esc(value) + '</b></div>').join('') +
+      '</div>' +
+      (notes.length ? '<div class="dress-note">' + esc(notes.join('；')) + '</div>' : '') +
+      (dress.url ? '<div class="dress-src">来源：' + esc(dress.url) + '</div>' : '') +
+      '</div>';
   }
 
   function messageNode(message) {
@@ -62,6 +183,10 @@
     bubble.className = 'bubble';
     bubble.innerHTML = formatText(message.content);
     wrap.appendChild(bubble);
+
+    markCitations(wrap, bubble, message);
+
+    if (message.dress) wrap.insertAdjacentHTML('beforeend', dressCard(message.dress));
 
     if (message.steps && message.steps.length) {
       const details = document.createElement('details');
@@ -94,6 +219,26 @@
         });
       });
     }
+    if (message.role === 'assistant' && message.followSuggestion) {
+      const suggest = document.createElement('div');
+      suggest.className = 'follow-suggest';
+      if (message.followAdded) {
+        suggest.innerHTML = '<span>已加入关注项：' +
+          esc(message.followSuggestion.subject) + '</span>';
+      } else {
+        suggest.innerHTML = '<span>' + esc(message.followSuggestion.reason || '需要我持续关注这条吗？') + '</span>' +
+          '<button class="ghost sm" data-follow="add">持续关注</button>' +
+          '<button class="ghost sm" data-follow="skip">不用</button>';
+        suggest.querySelector('[data-follow="add"]').addEventListener('click', () => {
+          addFollowFromSuggestion(message);
+        });
+        suggest.querySelector('[data-follow="skip"]').addEventListener('click', () => {
+          message.followSuggestion = null;
+          paintMessages(document.getElementById('chat-list'));
+        });
+      }
+      wrap.appendChild(suggest);
+    }
     return wrap;
   }
 
@@ -102,7 +247,9 @@
     if (!state.messages.length) {
       host.innerHTML = '<div class="hint" style="text-align:center;padding:18px 0">' +
         '问点什么。它会并行查自有知识库、真实语料和 Lolibrary 档案，' +
-        '需要时再补查小红书、微博和网页。</div>';
+        '需要时再补查小红书、微博和网页。<br>' +
+        '问具体裙子时会先判断日牌/国牌：日牌查 Lolibrary，国牌查小红书和微博；' +
+        '中文译名也认（比如「皇家千层公主」），查不到会如实说明。</div>';
       return;
     }
     state.messages.forEach((message) => host.appendChild(messageNode(message)));
@@ -182,6 +329,10 @@
             answer.steps = event.steps || steps;
             answer.evidence = event.evidence || [];
             answer.refused = !!event.refused;
+            answer.citationProblems = event.citation_problems || [];
+            answer.invalidCitations = event.invalid_citations || [];
+            answer.followSuggestion = event.follow_suggestion || null;
+            answer.dress = event.dress || null;
           } else if (event.type === 'error') {
             throw new Error(event.detail || '流式失败');
           }
@@ -202,6 +353,209 @@
     }
   }
 
+  // ---------------------------------------------------------------- 工具
+
+  async function getJSON(url, options) {
+    const response = await fetch(url, options);
+    if (!response.ok) {
+      let detail = response.status + ' ' + response.statusText;
+      try { const data = await response.json(); if (data.detail) detail = data.detail; } catch (_) { /* 非 JSON */ }
+      throw new Error(detail);
+    }
+    return response.json();
+  }
+
+  // ---------------------------------------------------------------- 关注项（D2 形态甲）
+  // 自动检查只在**每天第一次打开页面**时做一次；手动「检查更新」随时可用。
+  // 后端不常驻定时任务，页面关掉就停。
+  const FOLLOW_CHECK_KEY = 'follow_checked_on';   // 存本地日期（YYYY-MM-DD）
+  let followState = null;
+  let followBusy = false;
+
+  function todayKey() {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    return now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate());
+  }
+
+  const sourceLabel = (name) => {
+    const item = ((followState && followState.sources) || []).find((source) => source.name === name);
+    return item ? item.label : (CHANNEL_LABELS[name] || name);
+  };
+
+  function formatTime(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (isNaN(date.getTime())) return value;
+    const pad = (n) => String(n).padStart(2, '0');
+    return (date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' +
+      pad(date.getHours()) + ':' + pad(date.getMinutes());
+  }
+
+  function renderFollows() {
+    const unreadNode = document.getElementById('follow-unread');
+    const listNode = document.getElementById('follow-list');
+    const eventsNode = document.getElementById('follow-events');
+    const panel = document.getElementById('follow-panel');
+    if (!listNode || !followState) return;
+
+    const follows = followState.follows || [];
+    const events = followState.events || [];
+
+    // 关注项不是固定区块：没有关注项时整块不出现（避免空面板 + 手动入口）。
+    if (panel) panel.style.display = follows.length ? '' : 'none';
+
+    if (unreadNode) {
+      unreadNode.textContent = followState.unread ? followState.unread + ' 条更新' : '';
+      unreadNode.className = 'badge' + (followState.unread ? ' on' : '');
+      unreadNode.style.display = followState.unread ? '' : 'none';
+    }
+
+    eventsNode.innerHTML = events.length
+      ? events.map((event) =>
+          '<div class="follow-event' + (event.read ? '' : ' unread') + '">' +
+            '<div class="head"><b>' + esc(event.subject || '已删除的关注项') + '</b>' +
+              '<span>' + esc(sourceLabel(event.source)) + '</span>' +
+              '<span>' + esc(formatTime(event.created_at)) + '</span></div>' +
+            '<div>' + esc(event.summary) + '</div>' +
+          '</div>').join('')
+      : '<div class="follow-empty">还没有更新。第一次检查只记录基线，之后才开始对比。</div>';
+
+    const results = {};
+    (followState.lastResults || []).forEach((item) => { results[item.follow_id] = item; });
+
+    listNode.innerHTML = follows.map((follow) => {
+      const result = results[follow.id];
+      let detail = '';
+      if (result && result.status !== 'unchanged') {
+        const text = result.status === 'updated' ? result.detail
+          : result.status === 'unavailable' ? '通道不可用：' + result.detail
+          : result.status === 'baseline' ? result.detail
+          : '检查失败：' + result.detail;
+        detail = '<div class="meta">' + esc(text) + '</div>';
+      }
+      return '<div class="follow-row">' +
+        '<div class="grow"><div class="name">' + esc(follow.subject) + '</div>' +
+        '<div class="meta">' + esc(sourceLabel(follow.source)) + ' · 上次检查 ' +
+          esc(formatTime(follow.updated_at)) + '</div>' + detail + '</div>' +
+        '<button class="follow-del" data-del="' + follow.id + '" title="取消关注">×</button>' +
+      '</div>';
+    }).join('');
+
+    listNode.querySelectorAll('[data-del]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        if (!window.confirm('取消关注这个关键词？')) return;
+        try {
+          followState = await getJSON('/api/follows/' + button.dataset.del, { method: 'DELETE' });
+          renderFollows();
+        } catch (error) {
+          toast('删除失败：' + error.message);
+        }
+      });
+    });
+
+    if (followState.unread) {
+      const panel = document.getElementById('follow-panel');
+      if (panel) panel.open = true;
+    }
+  }
+
+  // 用户在回答下方点「持续关注」才建关注项——不做手动输入入口。
+  async function addFollowFromSuggestion(message) {
+    const suggestion = message.followSuggestion;
+    if (!suggestion) return;
+    try {
+      const response = await fetch('/api/follows', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        body: JSON.stringify({
+          subject: suggestion.subject,
+          source: suggestion.source || 'web',
+        }),
+      });
+      if (response.status === 409) {
+        // 已经关注过，不是失败：刷新快照就好
+        followState = await getJSON('/api/follows');
+      } else if (!response.ok) {
+        let detail = response.status + ' ' + response.statusText;
+        try {
+          const data = await response.json();
+          if (data.detail) detail = data.detail;
+        } catch (_) { /* 非 JSON */ }
+        throw new Error(detail);
+      } else {
+        followState = await response.json();
+      }
+      message.followAdded = true;
+      renderFollows();
+      paintMessages(document.getElementById('chat-list'));
+      toast('已加入关注：' + suggestion.subject);
+    } catch (error) {
+      toast('关注失败：' + error.message);
+    }
+  }
+
+  async function checkFollows(auto) {
+    if (followBusy) return;
+    if (!followState || !(followState.follows || []).length) return;
+    if (document.visibilityState !== 'visible') return;
+
+    followBusy = true;
+    const statusNode = document.getElementById('follow-status');
+    const button = document.getElementById('follow-check');
+    if (statusNode) statusNode.textContent = '正在检查…';
+    if (button) button.disabled = true;
+
+    try {
+      const data = await getJSON('/api/follows/check', { method: 'POST' });
+      if (data.busy) {
+        if (statusNode) statusNode.textContent = '已有一轮检查在进行，稍后自动刷新。';
+        return;
+      }
+      localStorage.setItem(FOLLOW_CHECK_KEY, todayKey());
+      followState = {
+        ...followState,
+        events: data.events,
+        unread: data.unread,
+        lastResults: data.results || [],
+      };
+      renderFollows();
+
+      const results = data.results || [];
+      const updated = results.filter((item) => item.status === 'updated').length;
+      const unavailable = results.filter((item) => item.status === 'unavailable').length;
+      const failed = results.filter((item) => item.status === 'error').length;
+      const parts = [];
+      if (updated) parts.push(updated + ' 条有更新');
+      if (unavailable) parts.push(unavailable + ' 条通道不可用');
+      if (failed) parts.push(failed + ' 条检查失败');
+      if (!parts.length) parts.push('没有变化');
+      if (statusNode) {
+        statusNode.textContent = '检查完成（' + formatTime(data.checked_at) + '）：' + parts.join('，');
+      }
+      if (auto && updated) toast('有关注项更新了');
+    } catch (error) {
+      if (statusNode) statusNode.textContent = '检查失败：' + error.message;
+    } finally {
+      followBusy = false;
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function loadFollows() {
+    try {
+      followState = await getJSON('/api/follows');
+      renderFollows();
+      const checkedOn = localStorage.getItem(FOLLOW_CHECK_KEY);
+      if ((followState.follows || []).length && checkedOn !== todayKey()) {
+        checkFollows(true);
+      }
+    } catch (error) {
+      const list = document.getElementById('follow-list');
+      if (list) list.innerHTML = '<div class="notice warn">关注项载入失败：' + esc(error.message) + '</div>';
+    }
+  }
+
   async function render() {
     const root = view();
     let status = null;
@@ -219,6 +573,8 @@
       return;
     }
 
+    // 问答是主区域，放最上面；关注项是辅助功能，折叠在下面，
+    // 不占首屏、也不需要用户先滑过设置才能提问。
     root.innerHTML =
       '<div class="card chat-card">' +
         '<div class="chat-head">' +
@@ -235,7 +591,20 @@
           ['蕾丝和真丝能机洗吗？', 'AP 最近有什么新款？', 'Baby 缎带与齿轮 预约价多少？'].map((text) =>
             '<button class="chip" data-q="' + esc(text) + '">' + esc(text) + '</button>').join('') +
         '</div>' +
-      '</div>';
+      '</div>' +
+      '<details class="card fold" id="follow-panel" style="display:none">' +
+        '<summary>关注项 <span class="badge" id="follow-unread" style="display:none"></span>' +
+          '<span class="fold-hint">每天第一次打开页面时检查</span></summary>' +
+        '<div class="fold-body">' +
+          '<div class="follow-events" id="follow-events"></div>' +
+          '<div class="follow-list" id="follow-list"></div>' +
+          '<div class="follow-actions">' +
+            '<button class="ghost sm" id="follow-check">检查更新</button>' +
+            '<button class="ghost sm" id="follow-read">全部已读</button>' +
+            '<span class="hint" id="follow-status"></span>' +
+          '</div>' +
+        '</div>' +
+      '</details>';
 
     const ui = {
       list: document.getElementById('chat-list'),
@@ -268,6 +637,23 @@
       paintMessages(ui.list);
     });
 
+    // 关注项（形态甲）：打开页面时载入；有历史关注项才显示面板，不提供手动新增
+    loadFollows();
+
+    document.getElementById('follow-check').addEventListener('click', () => checkFollows(false));
+    document.getElementById('follow-read').addEventListener('click', async () => {
+      try {
+        followState = await getJSON('/api/follows/events/read', { method: 'POST' });
+        renderFollows();
+        const statusNode = document.getElementById('follow-status');
+        if (statusNode) statusNode.textContent = '已全部标为已读';
+      } catch (error) {
+        toast('操作失败：' + error.message);
+      }
+    });
+
+    // 不做轮询：自动检查已在 loadFollows() 里按「每日首次打开」触发，
+    // 页面一直开着也不再重复请求；要刷新就点「检查更新」。
     paintMessages(ui.list);
     ui.input.focus();
   }

@@ -23,7 +23,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.agent import channels, graph, trace
-from app.agent.channels import ALL_CHANNELS, RecallContext
+from app.agent.channels import RecallContext
 from app.agent.planner import DeepSeekPlanner, PlannerUnavailable
 from app.agent.writer import DeepSeekWriter, sanitize_history
 from app.config import settings
@@ -60,7 +60,6 @@ def _history_of(payload: ChatIn) -> list[dict]:
 
 
 def _ctx(app=settings) -> RecallContext:
-    # v1 单用户：偏好记忆后续接入 db；召回通道先不依赖偏好。
     return RecallContext(settings=app)
 
 

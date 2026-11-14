@@ -202,7 +202,7 @@ html, body {
   background: var(--ok-soft);
   color: var(--ok);
 }
-/* 「命中」不是加分理由，是筛选条件——换个颜色，别和偏好加权混在一起 */
+/* 「命中」不是加分理由，是筛选条件——换个颜色，别和其它筛选状态混在一起 */
 .reason.hit { background: #eef1f6; color: #4a5568; }
 
 /* 搜索框 */
@@ -245,60 +245,6 @@ html, body {
 /* 两个按钮并排（登录 / 注册） */
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .row2 button { width: 100%; }
-
-/* ---------------------------------------------------------------- 标签组件 */
-/* 注意 .tag / .tags 是卡片上的"展示标签"，这里是"可点选的标签"，故意不同名 */
-
-.tag-group { margin-bottom: 16px; }
-.tag-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
-.tag-label { font-size: 13.5px; font-weight: 600; }
-.tag-state { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.tag-clear {
-  margin-left: auto;
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
-  font-size: 11.5px;
-  color: var(--accent);
-  cursor: pointer;
-}
-.tags-input { display: flex; flex-wrap: wrap; gap: 7px; }
-.tag-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 11px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--card);
-  color: var(--ink);
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-  transition: background .12s, border-color .12s, color .12s;
-}
-.tag-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
-.tag-x { font-style: normal; margin-left: 6px; font-size: 13px; opacity: .85; }
-.tag-hint { font-size: 11.5px; color: var(--muted); margin: 6px 0 0; }
-
-/* 自定义标签的输入行 */
-.tag-add { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
-.tag-add .tag-input { flex: 1; min-width: 0; padding: 8px 11px; font-size: 14px; }
-.tag-add button { flex: 0 0 auto; }
-
-/* 偏好摘要行 */
-.pref-row {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 7px 0;
-  border-bottom: 1px solid var(--line);
-  font-size: 13.5px;
-}
-.pref-row:last-child { border-bottom: none; }
-.pref-label { flex: 0 0 88px; color: var(--muted); font-size: 12.5px; }
-.pref-values { flex: 1; min-width: 0; }
 
 /* 提示条里的链接要能看出来是链接 */
 .notice a { color: inherit; text-decoration: underline; }
@@ -471,9 +417,10 @@ ul.plain li { margin-bottom: 2px; }
 .chat-head { display: flex; align-items: center; justify-content: space-between; }
 .chat-model { font-size: 12px; color: var(--muted); }
 
+/* 问答是主页面的主区域：给足首屏高度，输入框始终在卡片底部可见 */
 .chat-list {
-  min-height: 160px;
-  max-height: 56vh;
+  min-height: min(42vh, 380px);
+  max-height: 62vh;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -512,10 +459,51 @@ ul.plain li { margin-bottom: 2px; }
 .ev-text { opacity: .9; }
 .ev.flash { background: var(--accent-soft); border-radius: 8px; padding: 6px 8px; }
 
+/* 引用对不上来源：就地标出，而不是把整段回答换掉 */
+.cite.invalid {
+  color: #b3261e;
+  background: rgba(179, 38, 30, .12);
+  text-decoration: line-through;
+  cursor: help;
+}
+.cite-warn { margin-top: 8px; font-size: 12px; line-height: 1.6; }
+
 .chat-input { display: flex; gap: 8px; align-items: flex-end; }
 .chat-input textarea { flex: 1; min-width: 0; min-height: 44px; max-height: 120px; }
 .chat-input .primary { width: auto; flex: 0 0 auto; padding: 12px 18px; }
 .chat-chips { padding-bottom: 0; }
+
+/* 裙子档案：结构化字段卡片（历史原价与社媒线索必须能一眼区分） */
+.dress-card {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+}
+.dress-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dress-name { font-size: 13px; font-weight: 600; color: var(--ink); line-height: 1.5; }
+.dress-tag {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.dress-tag.jp { color: #8a5a2b; border-color: #e2c9a8; background: #fbf3e8; }
+.dress-tag.cn { color: #2f6b4f; border-color: #b9dcc8; background: #eef8f2; }
+.dress-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+  margin-top: 8px;
+}
+.dress-row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+.dress-row span { flex: 0 0 auto; color: var(--muted); }
+.dress-row b { min-width: 0; font-weight: 500; color: var(--ink); text-align: right; }
+.dress-note { margin-top: 6px; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
+.dress-src { margin-top: 4px; font-size: 11px; color: var(--muted); word-break: break-all; }
 
 /* ---------------------------------------------------------------- 身材参数 */
 /* 这部分由 profile.js 挂到「我的」页，样式单独一段 */
@@ -538,3 +526,93 @@ ul.plain li { margin-bottom: 2px; }
 }
 .body-field input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 .body-field em { font-style: normal; font-size: 10.5px; opacity: .7; }
+
+/* ---------------------------------------------------------------- 关注面板 */
+/* 折叠卡片：摘要行始终可见，展开才载入内容，避免首屏被面板占满 */
+.fold { padding: 0; overflow: hidden; }
+.fold > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::after {
+  content: '▾';
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  transition: transform .15s;
+}
+.fold[open] > summary::after { transform: rotate(180deg); }
+.fold-hint { font-size: 11.5px; color: var(--muted); font-weight: 400; }
+.fold-body { padding: 0 14px 14px; }
+
+/* 关注项 */
+.follow-events { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.follow-event {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--muted);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.follow-event.unread { border-left-color: var(--accent); background: #fdf6f7; }
+.follow-event .head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 3px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.follow-event .head b { color: var(--ink); font-size: 12.5px; }
+
+.follow-list { border-top: 1px solid var(--line); }
+.follow-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+.follow-row .grow { flex: 1; min-width: 0; }
+.follow-row .name { font-size: 14px; font-weight: 600; }
+.follow-row .meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.follow-del {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 17px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.follow-empty { padding: 8px 0; font-size: 12.5px; color: var(--muted); }
+
+.follow-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.follow-actions .hint { margin: 0; }
+
+/* 回答下方的「持续关注」提议：只在未发售 / 预约类问题后出现 */
+.follow-suggest {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  font-size: 12.5px;
+  color: var(--ink);
+  line-height: 1.5;
+}
+.follow-suggest span { flex: 1 1 160px; min-width: 0; }
+.follow-suggest .ghost.sm { padding: 5px 10px; font-size: 12.5px; }

@@ -34,6 +34,24 @@ WRITER_TIMEOUT = 60.0
 MAX_HISTORY_TURNS = 8
 MAX_HISTORY_CHARS = 500
 
+# 证据效力等级 → 给模型看的标签。与 channels.CHANNEL_SOURCE_KIND 一一对应。
+SOURCE_KIND_LABELS = {
+    "own_content": "自有知识库",
+    "third_party": "第三方档案",
+    "realtime": "网络实时内容",
+    "upstream_ugc": "网友发言",
+}
+
+# 能当规范的来源。其余一律只作线索——这是「一源一通道」在提示词层的落地：
+# 通道层分开了，结果层又混成一锅，等于白分。
+_AUTHORITATIVE_KINDS = frozenset({"own_content", "third_party"})
+
+_CLUE_HEADER = (
+    "【仅作线索·不得当作规范】\n"
+    "以下是网友发言或网络实时内容。引用时写成「有网友提到」「网上看到」，"
+    "不得作为洗护方式、尺码、材质、工艺的规范结论；与【可作依据】冲突时，以后者为准。"
+)
+
 SYNTH_SYSTEM = """你是 Lolita 领域的问答助手，像微信里一个懂 Lolita 的朋友那样回话。
 
 ## 怎么说
@@ -55,7 +73,48 @@ SYNTH_SYSTEM = """你是 Lolita 领域的问答助手，像微信里一个懂 Lo
 4. 证据里没有、或者只沾一点边，就直接说「这个我这边没查到」「资料里没写」，
    可以顺带告诉用户换个什么问法；但不许硬编一个答案。
 5. 证据互相打架时，说清楚两边分别怎么讲，别替用户拍板。
+6. 证据分两类：【可作依据】是自有知识库与官方档案，可以直接陈述；
+   【仅作线索】是网友发言和网络内容，只能写成「有网友提到」「网上看到」，
+   不能当规范。两者冲突时以【可作依据】为准。
 """
+
+
+def _evidence_line(item: dict) -> str:
+    """一条证据：``[n]（效力标签）标题：正文（来源 url）``。
+
+    标签必须在**每条**上都出现，而不是只在分块标题上说一次——模型引用时看的是
+    那一条，块标题离得远，容易被忽略。
+    """
+    label = SOURCE_KIND_LABELS.get(item.get("source_kind"), "来源")
+    line = f"[{item.get('n')}]（{label}）{item.get('title', '')}：{item.get('text', '')}"
+    url = item.get("url")
+    if url:
+        line += f"（来源 {url}）"
+    return line
+
+
+def _evidence_block(evidence: list[dict]) -> str:
+    """按效力分两块：可作依据 / 仅作线索。
+
+    分块的目的是让"这是网友说的"成为**结构**而不是模型自己去记的一条规则。
+    编号仍全局唯一（引用靠它定位），所以分块后编号可能不连续——这是有意的，
+    编号是标识不是阅读顺序。
+    """
+    if not evidence:
+        return "（没有任何证据）"
+    authoritative = [item for item in evidence if item.get("source_kind") in _AUTHORITATIVE_KINDS]
+    clues = [item for item in evidence if item.get("source_kind") not in _AUTHORITATIVE_KINDS]
+
+    sections: list[str] = []
+    if authoritative:
+        sections.append(
+            "【可作依据】\n" + "\n".join(_evidence_line(item) for item in authoritative)
+        )
+    if clues:
+        sections.append(
+            _CLUE_HEADER + "\n" + "\n".join(_evidence_line(item) for item in clues)
+        )
+    return "\n\n".join(sections)
 
 
 def build_synth_messages(
@@ -63,14 +122,7 @@ def build_synth_messages(
     evidence: list[dict],
     history: list[dict] | None = None,
 ) -> list[dict]:
-    blocks = []
-    for item in evidence:
-        line = f"[{item.get('n')}] {item.get('title', '')}：{item.get('text', '')}"
-        url = item.get("url")
-        if url:
-            line += f"（来源 {url}）"
-        blocks.append(line)
-    evidence_text = "\n".join(blocks) if blocks else "（没有任何证据）"
+    evidence_text = _evidence_block(evidence)
     messages: list[dict] = [{"role": "system", "content": SYNTH_SYSTEM}]
     for turn in (history or [])[-MAX_HISTORY_TURNS:]:
         messages.append({"role": turn["role"], "content": turn["content"]})
@@ -122,7 +174,12 @@ class DeepSeekWriter:
             self.usage["prompt_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
             self.usage["completion_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
 
-    def write(self, question: str, evidence: list[dict], history: list[dict] | None = None) -> str:
+    def write(
+        self,
+        question: str,
+        evidence: list[dict],
+        history: list[dict] | None = None,
+    ) -> str:
         response = self._client.chat.completions.create(
             model=self._model,
             messages=build_synth_messages(question, evidence, history),
@@ -133,7 +190,10 @@ class DeepSeekWriter:
         return (response.choices[0].message.content or "").strip()
 
     def stream(
-        self, question: str, evidence: list[dict], history: list[dict] | None = None
+        self,
+        question: str,
+        evidence: list[dict],
+        history: list[dict] | None = None,
     ) -> Iterator[str]:
         """逐段产出。**调用方负责拼接**——这里不缓存整段，否则就不是流式了。"""
         stream = self._client.chat.completions.create(

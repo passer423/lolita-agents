@@ -11,8 +11,9 @@
 
 from __future__ import annotations
 
+import time
+
 from app.agent import channels
-from app.agent.planner import PlannerUnavailable
 from app.routers import chat as chat_router
 
 
@@ -29,10 +30,10 @@ class ScriptedPlanner:
 class StubWriter:
     usage = {"calls": 1}
 
-    def write(self, question, evidence, history=None):
+    def write(self, question, evidence, history=None, **_kwargs):
         return "[1] 装洗衣袋。"
 
-    def stream(self, question, evidence, history=None):
+    def stream(self, question, evidence, history=None, **_kwargs):
         yield "蕾丝要装洗衣袋[1]。"
 
 
@@ -121,6 +122,7 @@ def test_chat_returns_numbered_evidence(client, monkeypatch):
     assert body["refused"] is False
     assert [item["n"] for item in body["evidence"]] == [1, 2, 3]
     assert {item["channel"] for item in body["evidence"]} == {"own", "real", "lolibrary"}
+    assert body["dress"] is None
     assert body["steps"]
 
 
@@ -139,6 +141,25 @@ def test_chat_degrades_without_writer(client, monkeypatch):
 
     assert body["refused"] is False
     assert "查到的事实" in body["answer"]
+
+
+def test_chat_deadline_returns_200_with_partial_evidence(client, monkeypatch):
+    """整体预算用尽也要给 200 + 已查到的证据，不能变成 500。"""
+    def recall(channel, question, ctx, *, query=""):
+        if channel == "own":
+            time.sleep(1.0)
+        return [{"channel": channel, "ref": channel, "title": channel, "text": "内容", "url": ""}]
+
+    monkeypatch.setattr(chat_router.settings, "agent_deadline", 0.3)
+    _inject(monkeypatch, recall=recall)
+
+    response = client.post("/api/chat", json={"message": "蕾丝怎么洗"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stopped_reason"] == "deadline"
+    assert {item["channel"] for item in body["evidence"]} == {"real", "lolibrary"}
+    assert "部分通道超时" in body["answer"]
 
 
 # --------------------------------------------------------------------- SSE 流式
