@@ -13,8 +13,8 @@
 ### 开工前
 
 - 先 `git status` 确认工作区干净，有未提交改动就先说明情况再继续。
-- 确认 `.env` 存在，缺了就从模板复制：`copy .env.example .env`，再把 `LOLITA_RAG_ROOT` 改成上游 lolita-rag 仓库的真实路径。
-- 缺 `LOLITA_RAG_ROOT` 时 `pytest` 会有 7 项失败，报错形似代码故障，实际是环境没配；`.env` 不进 git（理由见「提交」一节）。
+- 确认 `.env` 存在，缺了就从模板复制（Windows `copy .env.example .env`，macOS/Linux `cp .env.example .env`），再把 `LOLITA_RAG_ROOT` 改成上游 lolita-rag 仓库的真实路径。
+- 缺 `LOLITA_RAG_ROOT` 时 `pytest` 会失败（当前是 `tests/test_api.py::test_status_reports_channels_without_key` 1 项），报错形似代码故障，实际是环境没配；`.env` 不进 git（理由见「提交」一节）。
 - `git fetch` 后再开分支，分支名形如 `feat/xxx`、`fix/xxx`。
 - 本仓库同一时刻只跑一个写代码的任务：多个会话共享同一工作目录，并发会互相踩 Git 状态和文件。
 
@@ -39,20 +39,22 @@
 python -m pytest
 ```
 
-必跑——lint（增量口径：只对本次改动的文件要求全绿，整仓历史遗留不阻塞本次推送）。规则写在 `pyproject.toml`（ruff），工具在 `requirements-dev.txt` 里声明；没装过就先装开发依赖，再把改动的文件列进去跑：
+必跑——lint（增量口径：只对本次改动的文件要求全绿，整仓历史遗留不阻塞本次推送）。规则写在 `pyproject.toml`（ruff），工具在 `requirements-dev.txt` 里声明；没装过就先装开发依赖，再把本次改动的文件逐个列进去跑（下面是示例，替换成你实际改的文件）：
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m ruff check <本次改动的文件>
+python -m ruff check app/main.py scripts/smoke.py
 ```
 
-也可以直接 `python -m ruff check .` 看全貌，但整仓不为 0 不作为阻塞条件。
+也可以直接 `python -m ruff check .` 看全貌，但整仓不为 0 不作为阻塞条件（历史遗留由单独任务清理）。
 
-可选——端到端冒烟，需要服务在跑（另开一个终端 `python -m app.main`）：
+可选——端到端冒烟，需要服务在跑（另开一个终端 `python -m app.main`，默认 http://127.0.0.1:8787）：
 
 ```bash
 python scripts/smoke.py
 ```
+
+它只测首页、`/api/chat/status`、未配 key 时 `/api/chat` 的 503、`/api/follows`，不需要模型 key；服务不在默认地址时用 `python scripts/smoke.py --base-url http://127.0.0.1:<port>`。
 
 ### 冲突处理
 
