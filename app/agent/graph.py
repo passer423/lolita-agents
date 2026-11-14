@@ -33,6 +33,11 @@ LangGraph 的 ``Send`` 扇出 + reducer 合并 + 条件边正好是它的原生�
 
 两种路径共用同一张图的召回编排，不会出现"网页和命令行行为不一致"。
 
+``stream()`` 不等整张图跑完：图在后台线程里跑，各节点一完成就往 ``_Progress``
+的队列里塞 step，主线程边收边转成 ``step`` 事件。召回阶段因此能逐通道显示状态，
+而不是先空白几十秒再一次性补上。``stop`` 事件（客户端点「停止」）在下一个
+chunk 边界收尾：召回循环与写作循环都会检查它，不再继续消费。
+
 ## 整体预算：到点就交卷
 
 单通道其实都有超时（搜索的 urlopen、小红书子进程、LLM 客户端），但把它们串起来，
@@ -207,16 +212,33 @@ class _DeadlineExceeded(RuntimeError):
     """后台迭代在整体预算内没有交回下一段。"""
 
 
+class _StopRequested(RuntimeError):
+    """客户端已请求停止：在下一个 chunk 边界收尾。"""
+
+
+# 队列里的收尾哨兵。放在模块层，identity 比较不受 pickle / 相等性影响。
+_PROGRESS_DONE = object()
+
+# 等进度事件的最长间隔。也是检查 stop 与 deadline 的粒度（0.25s 足够跟手）。
+_POLL_SECONDS = 0.25
+
+
 class _Progress:
     """线程安全的部分进度：通道/规划一返回就记账，供整体超时时接管。
 
     图的状态不能当"部分结果"：LangGraph 的并行节点要**整步结束**才交出状态，
     xhs 卡住时，同一步里已经返回的 web 证据也会被一起扣住。所以节点在返回前
     直接回填这里，超时时就能拿到"已经查到的"。
+
+    ``events=True`` 时同一次记账还会塞进一个队列：流式路径据此**边跑边吐**
+    step，而不是等整张图结束再一次性补。记账与入队在同一把锁里完成，
+    队列顺序与 ``snapshot()["steps"]`` 完全一致，超时后用"已吐出多少条"
+    就能接着补剩下的，不会重复。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, events: bool = False) -> None:
         self._lock = threading.Lock()
+        self._queue: queue.Queue | None = queue.Queue() if events else None
         self._evidence: list[dict] = []
         self._steps: list[dict] = []
         self._recalled: list[str] = []
@@ -225,28 +247,48 @@ class _Progress:
         self._dress_query: dict = {}
         self._dress_profile: dict = {}
 
+    def _record(self, steps: list[dict]) -> None:
+        """记账并（可选）入队。调用方必须已持有锁。"""
+        self._steps.extend(steps)
+        if self._queue is not None:
+            for step in steps:
+                self._queue.put(step)
+
     def channel_done(self, name: str, evidence: list[dict], step: dict) -> None:
         with self._lock:
             self._evidence.extend(evidence)
-            self._steps.append(step)
             self._recalled.append(name)
+            self._record([step])
 
     def dress_done(self, query: dict, step: dict) -> None:
         with self._lock:
             self._dress_query = dict(query or {})
-            self._steps.append(step)
+            self._record([step])
 
     def profile_done(self, profile: dict, evidence: list[dict], step: dict) -> None:
         with self._lock:
             self._dress_profile = dict(profile or {})
             self._evidence.extend(evidence)
-            self._steps.append(step)
+            self._record([step])
 
-    def route_done(self, supplementary: list[str], step: dict) -> None:
+    def route_done(
+        self, supplementary: list[str], step: dict, extra_steps: list[dict] | None = None
+    ) -> None:
         with self._lock:
             self._supplementary = list(supplementary)
             self._routed = True
-            self._steps.append(step)
+            self._record([*(extra_steps or []), step])
+
+    def close(self) -> None:
+        """图跑完了（或已失败）：叫醒等事件的一方。"""
+        if self._queue is not None:
+            self._queue.put(_PROGRESS_DONE)
+
+    def next_step(self, timeout: float):
+        """取下一个 step；超时抛 ``queue.Empty``。只给 ``events=True`` 用。"""
+        if self._queue is None:
+            raise RuntimeError("这个 _Progress 没有开事件队列")
+        return self._queue.get(timeout=timeout)
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -383,11 +425,12 @@ def _invoke_with_deadline(
     return result.get("state", {}), False
 
 
-def _iter_with_deadline(iterator, deadline_at: float):
+def _iter_with_deadline(iterator, deadline_at: float, stop: threading.Event | None = None):
     """把阻塞式迭代（LLM 流）搬进后台线程，主线程最多等到 ``deadline_at``。
 
     同步生成器一旦卡在 ``next()`` 上就没法打断，只能由后台线程持有它；到点后
     主线程直接放弃等待（工作线程同样会泄漏，取舍见 ``_invoke_with_deadline``）。
+    ``stop`` 置位时抛 :class:`_StopRequested`，让流在下一个 chunk 边界收尾。
     """
     events: queue.Queue = queue.Queue()
 
@@ -402,13 +445,15 @@ def _iter_with_deadline(iterator, deadline_at: float):
 
     threading.Thread(target=_pump, name="agent-writer", daemon=True).start()
     while True:
+        if stop is not None and stop.is_set():
+            raise _StopRequested
         remaining = deadline_at - time.monotonic()
         if remaining <= 0:
             raise _DeadlineExceeded
         try:
-            kind, value = events.get(timeout=remaining)
+            kind, value = events.get(timeout=min(remaining, _POLL_SECONDS))
         except queue.Empty:
-            raise _DeadlineExceeded from None
+            continue
         if kind == "item":
             yield value
         elif kind == "error":
@@ -598,11 +643,11 @@ def build_graph(
             )
         if error:
             step["error"] = error
-        if progress is not None:
-            progress.route_done(wanted, step)
         search_steps = [
             {"kind": "dress_search", **trace} for trace in search_traces if trace
         ]
+        if progress is not None:
+            progress.route_done(wanted, step, search_steps)
         return {
             "supplementary": wanted,
             "query": query,
@@ -903,44 +948,91 @@ def stream(
     planner,
     writer=None,
     history: list[dict] | None = None,
+    stop: threading.Event | None = None,
 ) -> Iterator[dict]:
-    """流式：先吐 step 事件（各通道召回 + 补查决策），再吐答案增量，最后吐 final。
+    """流式：边召回边吐 step，再吐答案增量，最后吐 final。
 
     事件类型：``step`` / ``delta`` / ``replace`` / ``final`` / ``error``。
     整体预算同时覆盖召回与写作：到点不再等剩余通道、也不再继续收字，直接用
     已查到的证据收尾（``replace`` + ``final``），不抛 500。
+
+    ``stop`` 由调用方（SSE 路由）在客户端断开 / 点「停止」时置位：召回与写作
+    都在下一个 chunk 边界收尾，不再继续消费上游结果。
     """
     question = (question or "").strip()
     if not question:
         yield {"type": "error", "detail": "问题不能为空"}
         return
+    if stop is not None and stop.is_set():
+        return
 
     started = time.perf_counter()
     budget = _deadline_of(ctx)
     deadline_at = time.monotonic() + budget if budget > 0 else None
-    progress = _Progress()
+    progress = _Progress(events=True)
     graph = build_graph(planner, writer, ctx, stream=True, progress=progress)
-    state, timed_out = _invoke_with_deadline(
-        graph,
-        {
-            "question": question,
-            "history": sanitize_history(history),
-            "evidence": [],
-            "steps": [],
-            "recalled": [],
-            "stream": True,
-            "dress_query": {},
-            "dress_profile": {},
-            "dress_unresolved": False,
-            "dress_unverified": False,
-        },
-        None if deadline_at is None else max(0.0, deadline_at - time.monotonic()),
-    )
+
+    result: dict = {}
+    failure: dict = {}
+
+    def _work() -> None:
+        try:
+            result["state"] = graph.invoke(
+                {
+                    "question": question,
+                    "history": sanitize_history(history),
+                    "evidence": [],
+                    "steps": [],
+                    "recalled": [],
+                    "stream": True,
+                    "dress_query": {},
+                    "dress_profile": {},
+                    "dress_unresolved": False,
+                    "dress_unverified": False,
+                },
+                config={"recursion_limit": MAX_RECURSION},
+            )
+        except BaseException as exc:  # noqa: BLE001 - 原样抛回调用线程
+            failure["error"] = exc
+        finally:
+            progress.close()
+
+    threading.Thread(target=_work, name="agent-graph", daemon=True).start()
+
+    # 召回阶段：不再等整张图，谁先完成就先报谁的 step。
+    timed_out = False
+    emitted = 0
+    while True:
+        if stop is not None and stop.is_set():
+            return
+        wait = _POLL_SECONDS
+        if deadline_at is not None:
+            remaining = deadline_at - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            wait = min(wait, remaining)
+        try:
+            item = progress.next_step(wait)
+        except queue.Empty:
+            continue
+        if item is _PROGRESS_DONE:
+            break
+        emitted += 1
+        yield {"type": "step", **item}
+
+    if stop is not None and stop.is_set():
+        return
+
     if timed_out:
         state = _partial_state(question, progress, budget, ctx=ctx)
-
-    for step in state.get("steps", []):
-        yield {"type": "step", **step}
+        # 已经吐过的 step 不再重复；`_partial_state` 在快照后面补了超时说明。
+        for step in state.get("steps", [])[emitted:]:
+            yield {"type": "step", **step}
+    else:
+        if "error" in failure:
+            raise failure["error"]
+        state = result.get("state", {})
 
     evidence = _normalize(state.get("evidence", []), state.get("supplementary"))
     numbered = _numbered(evidence)
@@ -966,9 +1058,13 @@ def stream(
                     sanitize_history(history),
                 ),
                 deadline_at if deadline_at is not None else float("inf"),
+                stop=stop,
             ):
                 chunks.append(delta)
                 yield {"type": "delta", "text": delta}
+        except _StopRequested:
+            # 客户端已经离开：不再收字、也不再补 final（没人收）。
+            return
         except _DeadlineExceeded:
             logger.warning("流式写作超过整体预算 %.0fs，停止收字", budget)
             step = _timeout_step(progress.snapshot(), budget)

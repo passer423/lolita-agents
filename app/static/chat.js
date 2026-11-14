@@ -4,7 +4,7 @@
 (function () {
   const MAX_HISTORY = 8;          // 与服务端 writer.MAX_HISTORY_TURNS 对齐
 
-  const state = { messages: [], busy: false };
+  const state = { messages: [], busy: false, abort: null, channels: null };
 
   const esc = (value) => String(value == null ? '' : value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -94,6 +94,56 @@
         (pending ? '，未返回：' + pending : '') + '，先返回已查到的内容';
     }
     return '· ' + esc(step.kind);
+  }
+
+  // 首字前的逐通道状态：核心通道先以「查询中…」占位，谁先返回就先更新谁；
+  // route 决定补查后再补上实时通道的占位。用户因此不会对着空白气泡等。
+  function recallRows(answer) {
+    const order = [];
+    const rows = {};
+    const put = (key, text, done) => {
+      if (!rows[key]) order.push(key);
+      rows[key] = { text: text, done: done };
+    };
+
+    const core = (state.channels && state.channels.core) || ['own', 'real', 'lolibrary'];
+    core.forEach((name) => put(name, (CHANNEL_LABELS[name] || name) + ' · 查询中…', false));
+
+    (answer.steps || []).forEach((step) => {
+      const text = stepText(step).replace(/^· /, '');
+      if (step.kind === 'recall' || step.kind === 'skip') {
+        put(step.channel, text, true);
+      } else if (step.kind === 'route') {
+        put('route', text, true);
+        (step.supplementary || []).forEach((name) => {
+          put(name, (CHANNEL_LABELS[name] || name) + ' · 查询中…', false);
+        });
+      } else if (step.kind === 'dress') {
+        put('dress', text, true);
+      } else if (step.kind === 'dress_profile') {
+        put('dress_profile', text, true);
+      } else if (step.kind === 'dress_search') {
+        put('dress_search_' + order.length, text, true);
+      } else if (step.kind === 'timeout') {
+        put('timeout', text, true);
+      }
+    });
+
+    return order.map((key) => rows[key]);
+  }
+
+  // 状态行里的动态部分已在 stepText 里转义过，这里直接拼 HTML。
+  function renderLiveRecall(wrap, answer) {
+    let panel = wrap.querySelector('.recall-live');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.className = 'recall-live';
+      wrap.appendChild(panel);
+    }
+    panel.innerHTML = '<div class="recall-head">正在召回</div>' +
+      recallRows(answer).map((row) =>
+        '<div class="recall-row' + (row.done ? ' done' : '') + '">' +
+        '<span class="dot"></span>' + row.text + '</div>').join('');
   }
 
   function markCitations(wrap, bubble, message) {
@@ -268,6 +318,10 @@
     state.busy = true;
     ui.input.disabled = true;
     ui.send.disabled = true;
+    if (ui.stop) {
+      ui.stop.style.display = '';
+      ui.stop.disabled = false;
+    }
 
     const userMessage = { role: 'user', content: question };
     const history = historyPayload();      // 在追加本轮问题之前取，否则问题会被发两遍
@@ -277,15 +331,21 @@
     state.messages.push(answer);
     paintMessages(ui.list);
 
-    const bubble = ui.list.lastElementChild.querySelector('.bubble');
+    const wrap = ui.list.lastElementChild;
+    const bubble = wrap.querySelector('.bubble');
     let steps = [];
     const started = performance.now();
+
+    // 「停止」不只是前端断开：服务端在下一个 chunk 边界收尾，不再消费上游结果。
+    const controller = new AbortController();
+    state.abort = controller;
 
     try {
       const response = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json; charset=utf-8' },
         body: JSON.stringify({ message: question, history: history }),
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -308,20 +368,27 @@
           const frame = buffer.slice(0, cut);
           buffer = buffer.slice(cut + 2);
           const line = frame.split('\n').find((item) => item.indexOf('data: ') === 0);
-          if (!line) continue;
+          if (!line) continue;   // 心跳是 ": keep-alive" 注释帧，忽略
           let event;
           try { event = JSON.parse(line.slice(6)); } catch (_) { continue; }
 
           if (event.type === 'step') {
             steps.push(event);
-            if ((event.kind === 'recall' || event.kind === 'skip') && !answer.content) {
+            answer.steps = steps;
+            if (!answer.content) {
+              // 首字前：逐通道展示「查询中 / 几条 / 不可用（原因）」。
               bubble.innerHTML = '<span class="thinking">正在召回…</span>';
+              renderLiveRecall(wrap, answer);
             }
           } else if (event.type === 'delta') {
+            const panel = wrap.querySelector('.recall-live');
+            if (panel) panel.remove();
             answer.content += event.text;
             bubble.innerHTML = formatText(answer.content);
             ui.list.scrollTop = ui.list.scrollHeight;
           } else if (event.type === 'replace') {
+            const panel = wrap.querySelector('.recall-live');
+            if (panel) panel.remove();
             answer.content = event.text;
             bubble.innerHTML = formatText(answer.content);
           } else if (event.type === 'final') {
@@ -342,13 +409,23 @@
       answer.ms = Math.round(performance.now() - started);
       paintMessages(ui.list);
     } catch (error) {
-      answer.error = true;
-      answer.content = '出错了：' + error.message;
+      if (error && error.name === 'AbortError') {
+        answer.stopped = true;
+        answer.content = (answer.content ? answer.content + '\n\n' : '') + '（已停止生成）';
+      } else {
+        answer.error = true;
+        answer.content = '出错了：' + error.message;
+      }
       paintMessages(ui.list);
     } finally {
       state.busy = false;
+      state.abort = null;
       ui.input.disabled = false;
       ui.send.disabled = false;
+      if (ui.stop) {
+        ui.stop.style.display = 'none';
+        ui.stop.disabled = true;
+      }
       ui.input.focus();
     }
   }
@@ -579,7 +656,10 @@
       '<div class="card chat-card">' +
         '<div class="chat-head">' +
           '<span class="chat-model">' + esc(status.model) + '</span>' +
-          '<button class="ghost sm" id="chat-clear">清空对话</button>' +
+          '<div class="chat-actions">' +
+            '<button class="ghost sm" id="chat-stop" style="display:none" disabled>停止</button>' +
+            '<button class="ghost sm" id="chat-clear">清空对话</button>' +
+          '</div>' +
         '</div>' +
         '<div class="chat-list" id="chat-list"></div>' +
         '<div class="chat-input">' +
@@ -606,10 +686,13 @@
         '</div>' +
       '</details>';
 
+    state.channels = status.channels;
+
     const ui = {
       list: document.getElementById('chat-list'),
       input: document.getElementById('chat-text'),
       send: document.getElementById('chat-send'),
+      stop: document.getElementById('chat-stop'),
     };
 
     const send = () => {
@@ -620,6 +703,11 @@
     };
 
     ui.send.addEventListener('click', send);
+    ui.stop.addEventListener('click', () => {
+      if (!state.abort) return;
+      ui.stop.disabled = true;
+      state.abort.abort();
+    });
     ui.input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
         event.preventDefault();

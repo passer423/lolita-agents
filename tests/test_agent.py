@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 import pytest
@@ -677,6 +678,76 @@ def test_stream_writer_failure_falls_back(monkeypatch):
     assert events[-1]["answer"]
 
 
+def test_stream_emits_steps_while_recall_still_running(monkeypatch):
+    """召回阶段不再等整张图：慢通道还卡着，核心通道的 step 已经先到了。"""
+    monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+
+    def recall(channel, question, ctx, *, query=""):
+        if channel == "xhs":
+            time.sleep(0.8)
+            return []
+        return evidence(channel) if channel in {"own", "real", "lolibrary"} else []
+
+    monkeypatch.setattr(channels, "recall", recall)
+
+    started = time.monotonic()
+    stream = graph.stream(
+        "有实拍测评吗", ctx=ctx(), planner=ScriptedPlanner(["测评"]), writer=StubWriter()
+    )
+    first = next(stream)
+    first_after = time.monotonic() - started
+    rest = list(stream)
+    total = time.monotonic() - started
+
+    assert first["type"] == "step"
+    assert first_after < 0.6, "第一个 step 应该在慢通道返回前就吐出来"
+    assert total >= 0.7, "整轮仍要等慢通道（或到预算）才有 final"
+    assert [*rest][-1]["type"] == "final"
+
+
+def test_stream_stop_before_start_emits_nothing(monkeypatch):
+    monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+    core_only(monkeypatch)
+    stop = threading.Event()
+    stop.set()
+
+    events = list(
+        graph.stream(
+            "蕾丝怎么洗", ctx=ctx(), planner=ScriptedPlanner([]),
+            writer=StubWriter(), stop=stop,
+        )
+    )
+
+    assert events == []
+
+
+def test_stream_stop_mid_answer_closes_without_final(monkeypatch):
+    """用户点「停止」：写作在下一个 chunk 边界收尾，不再补 final。"""
+    monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+    core_only(monkeypatch)
+
+    class SlowWriter:
+        usage = {}
+
+        def stream(self, question, evidence, history=None, **_kwargs):
+            yield "第一段[1]。"
+            time.sleep(0.6)
+            yield "第二段。"
+
+    stop = threading.Event()
+    events = []
+    for event in graph.stream(
+        "蕾丝怎么洗", ctx=ctx(), planner=ScriptedPlanner([]),
+        writer=SlowWriter(), stop=stop,
+    ):
+        events.append(event)
+        if event["type"] == "delta":
+            stop.set()
+
+    assert any(event["type"] == "delta" for event in events)
+    assert not any(event["type"] == "final" for event in events)
+
+
 # --------------------------------------------------------------------- 整体预算
 
 
@@ -1213,6 +1284,81 @@ def test_xhs_unknown_provider_is_unavailable():
     assert not xhs_search.available(app)
     with pytest.raises(xhs_search.XhsUnavailable, match="未知的 XHS_PROVIDER"):
         xhs_search.search("Baby", app)
+
+
+def test_xhs_cache_separates_provider_and_limit(tmp_path, monkeypatch):
+    """缓存键必须带 provider 与 limit：换 provider / 换条数不能复用旧结果。"""
+    from app.services import xhs_search, xhs_spider
+
+    calls: list[tuple[str, int]] = []
+
+    def fake_playwright(_query, _app, limit, _timeout):
+        calls.append(("playwright", limit))
+        return [{"title": f"p{limit}", "url": f"https://x/p{limit}", "content": "c"}]
+
+    def fake_spider(_query, _app, limit, *, timeout=None):
+        calls.append(("spider", limit))
+        return [{"title": "s", "url": "https://x/s", "content": "c"}]
+
+    monkeypatch.setattr(xhs_search, "available", lambda _app: True)
+    monkeypatch.setattr(xhs_search, "_playwright_fetch_notes", fake_playwright)
+    monkeypatch.setattr(xhs_spider, "fetch_notes", fake_spider)
+
+    playwright = AppSettings(xhs_enabled=True, data_dir=tmp_path, xhs_provider="playwright")
+    xhs_search.search("Baby", playwright, max_results=1)
+    # 同一 query、换了 limit：必须重新抓，而不是命中 limit=1 的旧缓存
+    xhs_search.search("Baby", playwright, max_results=2)
+
+    spider = AppSettings(xhs_enabled=True, data_dir=tmp_path, xhs_provider="spider_xhs")
+    # 同一 query、同一 limit、换了 provider：也必须重新抓
+    xhs_search.search("Baby", spider, max_results=2)
+
+    assert calls == [("playwright", 1), ("playwright", 2), ("spider", 2)]
+
+
+def test_xhs_spider_honors_timeout(monkeypatch):
+    """spider 分支必须读 XHS_TIMEOUT；卡住时要按预算抛不可用，而不是一直等。"""
+    from app.services import xhs_search, xhs_spider
+
+    class SlowApi:
+        def __init__(self, _auth):
+            pass
+
+        def search_some_note(self, _query, _limit):
+            time.sleep(0.4)
+            return True, "", []
+
+    class FakeAuth:
+        @classmethod
+        def from_cookie(cls, _cookie):
+            return cls()
+
+    monkeypatch.setattr(xhs_spider, "_load_api", lambda _app: (SlowApi, FakeAuth))
+    app = AppSettings(xhs_enabled=True, xhs_cookie="c", xhs_timeout=0.05)
+
+    started = time.monotonic()
+    with pytest.raises(xhs_search.XhsUnavailable, match="超时"):
+        xhs_spider.fetch_notes("Baby", app, 1, timeout=app.xhs_timeout)
+
+    assert time.monotonic() - started < 0.3
+
+
+def test_xhs_recall_uses_configured_limit(monkeypatch):
+    """通道不再硬编码 3 条：条数由 XHS_MAX_RESULTS 决定。"""
+    from app.services import xhs_search
+
+    seen: dict[str, int] = {}
+
+    def fake_search(_query, _app, *, max_results=3, timeout=None):
+        seen["limit"] = max_results
+        return []
+
+    monkeypatch.setattr(xhs_search, "search", fake_search)
+    ctx = RecallContext(settings=AppSettings(xhs_max_results=7))
+
+    channels._recall_xhs("Baby", ctx)
+
+    assert seen["limit"] == 7
 
 
 # --------------------------------------------------------------------- 证据分源与排序

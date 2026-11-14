@@ -14,11 +14,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import threading
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -30,6 +32,14 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+# 召回 / 写作都安静超过这个时长就发一个 SSE 注释帧。
+# 反向代理与手机网络会把长时间无字节的连接掐掉；心跳也让前端知道服务还活着。
+HEARTBEAT_SECONDS = 10.0
+
+
+def _sse(payload: dict) -> str:
+    return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
 
 class ChatTurn(BaseModel):
@@ -113,8 +123,16 @@ def chat(payload: ChatIn) -> dict:
 
 
 @router.post("/stream")
-def chat_stream(payload: ChatIn):
-    """SSE：先推进度（各通道召回几条、补查决策），再推答案增量，最后推 final。"""
+async def chat_stream(payload: ChatIn, request: Request):
+    """SSE：召回阶段逐通道推进度，再推答案增量，最后推 final。
+
+    图的消费放在后台线程（``graph.stream`` 是同步生成器），事件经
+    ``asyncio.Queue`` 回到事件循环：这样等待期间还能发心跳、还能
+    ``await request.is_disconnected()``，不会把整个事件循环堵住。
+
+    客户端断开（点「停止」或关页面）时置位 ``stop``：graph 在下一个 chunk
+    边界收尾，不再消费上游结果，也不再有线程继续逐字拉模型。
+    """
     try:
         planner = _make_planner(settings)
     except PlannerUnavailable as exc:
@@ -127,21 +145,56 @@ def chat_stream(payload: ChatIn):
 
     history = _history_of(payload)
 
-    def generate():
+    async def generate():
+        loop = asyncio.get_running_loop()
+        events: asyncio.Queue = asyncio.Queue()
+        stop = threading.Event()
+
+        def deliver(item) -> None:
+            loop.call_soon_threadsafe(events.put_nowait, item)
+
+        def pump() -> None:
+            try:
+                for event in graph.stream(
+                    payload.message,
+                    ctx=_ctx(settings),
+                    planner=planner,
+                    writer=writer,
+                    history=history,
+                    stop=stop,
+                ):
+                    deliver(("event", event))
+                    if stop.is_set():
+                        break
+            except Exception as exc:  # noqa: BLE001 - 流已经开始，只能以事件形式报错
+                logger.exception("流式回答失败")
+                deliver(("error", f"{type(exc).__name__}: {exc}"))
+            finally:
+                deliver(("done", None))
+
+        threading.Thread(target=pump, name="chat-sse", daemon=True).start()
         try:
-            for event in graph.stream(
-                payload.message,
-                ctx=_ctx(settings),
-                planner=planner,
-                writer=writer,
-                history=history,
-            ):
-                yield "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
-        except Exception as exc:  # noqa: BLE001 - 流已经开始，只能以事件形式报错
-            logger.exception("流式回答失败")
-            yield "data: " + json.dumps(
-                {"type": "error", "detail": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False
-            ) + "\n\n"
+            while True:
+                if await request.is_disconnected():
+                    logger.info("客户端已断开，停止本轮流式回答")
+                    break
+                try:
+                    kind, value = await asyncio.wait_for(
+                        events.get(), timeout=HEARTBEAT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    # SSE 注释帧：浏览器忽略，但连接不会因长时间无字节被中间层掐断。
+                    yield ": keep-alive\n\n"
+                    continue
+
+                if kind == "done":
+                    break
+                if kind == "error":
+                    yield _sse({"type": "error", "detail": value})
+                    break
+                yield _sse(value)
+        finally:
+            stop.set()
 
     return StreamingResponse(
         generate(),
