@@ -48,6 +48,14 @@ python -m ruff check app/main.py scripts/smoke.py
 
 也可以直接 `python -m ruff check .` 看全貌，但整仓不为 0 不作为阻塞条件（历史遗留由单独任务清理）。
 
+提交前（改动涉及召回、合并层或知识库内容时必跑）——检索回归门禁：
+
+```bash
+python -m eval.run --subset quick --min-recall1 0.66 --min-cite1 0.75
+```
+
+12 条金标子集（own 4 / real 5 / lolibrary 3），本机 14–18 秒（含模型装载）。退出码非 0 就别提交：报告会直接列出排名掉的条目，在 `eval/reports/<时间戳>/report.md`。只想看数字、不判红绿时去掉 `--min-*`。这一项不进 PR CI（依赖上游仓库与索引，托管 runner 没有），手工触发用 `.github/workflows/eval-gate.yml`。
+
 可选——端到端冒烟，需要服务在跑（另开一个终端 `python -m app.main`，默认 http://127.0.0.1:8787）：
 
 ```bash

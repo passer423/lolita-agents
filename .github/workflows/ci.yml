@@ -1,6 +1,9 @@
 name: CI
 
 # 只对 PR 触发：本仓库约定不直接推 main，合入前的门禁就是这里。
+# 只跑托管 runner 上真能跑的两项（ruff + pytest），绿就是真绿。
+# 检索质量回归需要上游仓库与两份索引，不挂 PR：走手动工作流 eval-gate.yml，
+# 或在有数据的机器上按 AGENTS.md 本地执行。
 on:
   pull_request:
 
@@ -30,73 +33,3 @@ jobs:
 
       - name: 单元测试（pytest）
         run: python -m pytest
-
-  eval-gate:
-    # 检索质量回归门禁：只跑 golden 的 quick 子集（12 条，own / real / lolibrary），
-    # recall@1 或引用@1 低于阈值就红；完整报告在 Artifacts → eval-report。
-    #
-    # 阈值来源（2026-11-14，commit d9d1c1d，本地执行下面这条命令实测）：
-    #   python -m eval.run --subset quick --configs baseline
-    #   → recall@1 = 0.750，cite@1 = 0.833
-    # 子集 12 条，1 条 = 0.083；两个阈值各留 1 条余量，避免排序抖动造成假红：
-    #   recall@1 = 0.75 → 0.66，cite@1 = 0.833 → 0.75
-    #
-    # 更新方法：改动召回 / 合并层后先本地跑同一条命令；确认提升属实，再把本注释的
-    # 实测值和下面的 --min-* 一起上调。只有数值确实恢复时才允许下调，且需在 PR 里
-    # 写明哪条样本、为什么。
-    #
-    # 注意：评测依赖上游 lolita-rag 与两份索引（本仓 data/、上游 data/ 都不进 git）。
-    # 托管 runner 默认没有这些数据，前置检查会明确报缺失项后失败，不会假装通过。
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-          cache: pip
-
-      - name: 安装依赖
-        run: python -m pip install -r requirements-dev.txt
-
-      - name: 检查评测环境（缺一项就红，不跳过）
-        env:
-          LOLITA_RAG_ROOT: ${{ vars.LOLITA_RAG_ROOT || '../lolita-rag' }}
-        run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          root = Path(os.environ.get("LOLITA_RAG_ROOT") or "../lolita-rag")
-          required = {
-              "上游代码": root / "src" / "config.py",
-              "上游真实语料索引": root / "data" / "index" / "manifest.json",
-              "自有知识库索引": Path("data/kbindex/index/manifest.json"),
-              "裙子档案": Path("data/lolibrary/catalog.jsonl"),
-          }
-          missing = [f"{name}：{path}" for name, path in required.items() if not path.exists()]
-          if missing:
-              raise SystemExit(
-                  "评测环境不完整（本仓 data/ 与上游 data/ 都不进 git，托管 runner 默认没有）：\n- "
-                  + "\n- ".join(missing)
-                  + "\n处理：在带数据的 self-hosted runner 上跑，或用仓库变量 LOLITA_RAG_ROOT"
-                  " 指向已装好的上游仓库，并把两份索引放在对应 data/ 下。"
-              )
-          print("评测环境检查通过：" + "、".join(required))
-          PY
-
-      - name: 快速评测（回归门禁）
-        env:
-          LOLITA_RAG_ROOT: ${{ vars.LOLITA_RAG_ROOT || '../lolita-rag' }}
-        run: >-
-          python -m eval.run --subset quick --configs baseline
-          --min-recall1 0.66 --min-cite1 0.75
-
-      - name: 上传评测报告
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: eval-report
-          path: eval/reports/
-          if-no-files-found: warn
-          retention-days: 14
