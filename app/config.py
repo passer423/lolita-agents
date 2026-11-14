@@ -91,6 +91,13 @@ class AppSettings(BaseSettings):
     search_max_results: int = 5
     search_timeout: float = 20.0
 
+    # ---------- 关注项扫描 ----------
+    # 单个关注项的超时与整轮扫描的总预算（秒）。xhs 最坏要「搜索 + 3 次详情」
+    # 约 4×15s，关注项一多就会把「检查更新」拖成几分钟。超时的项只报 timeout，
+    # 不写事件、不动基线，下次扫描再比。<=0 表示该项不限制。
+    follow_item_timeout: float = 60.0
+    follow_check_deadline: float = 120.0
+
     # ---------- 裙子档案 ----------
     # 日牌本地档案缺少发售年/原价/配色时，是否在线查 Lolibrary 补详情。
     # 离线部署或测试可以关掉；关掉后只返回本地档案已有的字段。

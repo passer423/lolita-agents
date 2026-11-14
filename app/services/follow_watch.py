@@ -15,13 +15,21 @@
 * 通道不可用**不**算「没有更新」，也不更新基线——返回 unavailable，让界面显示原因。
 
 快照只存前 8 条、每条正文截 300 字（与通道证据的上限一致），避免 last_state 膨胀。
+
+## 时间预算
+
+单项召回与整轮扫描都有上限（``FOLLOW_ITEM_TIMEOUT`` / ``FOLLOW_CHECK_DEADLINE``）。
+超时的项状态为 ``timeout``、预算耗尽后未跑的项为 ``skipped``，两者都不写事件、
+不动基线——「这轮没查完」和「没有更新」是两件事。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import queue
 import threading
+import time
 
 from app import db
 from app.agent import channels
@@ -35,6 +43,54 @@ MAX_EVENT_SUMMARY = 240
 
 # 同一时刻只跑一轮扫描：前端轮询和手动点击可能撞在一起，串行化避免重复写事件。
 _check_lock = threading.Lock()
+
+
+class RecallTimeout(RuntimeError):
+    """单项召回超过预算。
+
+    超时既不是「没有更新」，也不是「通道不可用」：底下的请求可能还在跑，
+    但结果已经不能用了（再等下去会把整轮扫描拖死）。调用方只报状态，不写基线。
+    """
+
+
+def _recall_with_timeout(
+    follow: dict,
+    app: AppSettings,
+    timeout: float | None,
+) -> list[dict]:
+    """在独立线程里跑召回，最多等 ``timeout`` 秒。
+
+    线程无法安全强杀，超时后让它自己结束；关键是**结果丢弃、基线不写**。
+    ``channels.recall`` 的底层请求都有自己的超时，这里只是兜住最坏情况。
+    """
+    box: queue.Queue = queue.Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            evidence = channels.recall(
+                follow["source"],
+                follow["subject"],
+                RecallContext(settings=app),
+            )
+            box.put(("ok", evidence))
+        except Exception as exc:  # noqa: BLE001 - 原样带回调用方分类
+            box.put(("error", exc))
+
+    thread = threading.Thread(
+        target=worker,
+        name=f"follow-{follow['id']}",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        kind, payload = box.get(timeout=timeout)
+    except queue.Empty as exc:
+        raise RecallTimeout(
+            f"召回超过 {timeout:g} 秒未返回" if timeout else "召回超时"
+        ) from exc
+    if kind == "error":
+        raise payload
+    return payload
 
 
 def _items(evidence: list[dict]) -> list[dict]:
@@ -109,18 +165,26 @@ def _diff_summary(old: list[dict], new: list[dict]) -> str:
     return "；".join(parts)[:MAX_EVENT_SUMMARY]
 
 
-def _check_one(follow: dict, app: AppSettings) -> dict:
+def _check_one(
+    follow: dict,
+    app: AppSettings,
+    *,
+    timeout: float | None = None,
+) -> dict:
     result = {
         "follow_id": follow["id"],
         "subject": follow["subject"],
         "source": follow["source"],
     }
     try:
-        evidence = channels.recall(
-            follow["source"],
-            follow["subject"],
-            RecallContext(settings=app),
-        )
+        evidence = _recall_with_timeout(follow, app, timeout)
+    except RecallTimeout as exc:
+        # 超时可能只是这一轮慢；基线保持原样，下次扫描继续和旧快照比。
+        return {
+            **result,
+            "status": "timeout",
+            "detail": f"{exc}；未写事件、基线未变",
+        }
     except ChannelUnavailable as exc:
         # 通道不可用 ≠ 没有更新：不写事件、不动基线，把原因原样带回界面。
         return {**result, "status": "unavailable", "detail": str(exc)[:200]}
@@ -154,22 +218,53 @@ def _check_one(follow: dict, app: AppSettings) -> dict:
 
 
 def check_all(app: AppSettings) -> dict:
-    """扫描所有关注项。已有扫描在跑就直接返回 busy，不排队。"""
+    """扫描所有关注项。已有扫描在跑就直接返回 busy，不排队。
+
+    整轮有总预算（``FOLLOW_CHECK_DEADLINE``）：预算用完后的关注项标记
+    ``skipped``，不会无限期占着扫描锁。单项超时（``FOLLOW_ITEM_TIMEOUT``）
+    同样不写事件、不动基线。
+    """
     if not _check_lock.acquire(blocking=False):
         return {
             "busy": True,
             "checked_at": db.now(),
             "results": [],
+            "partial": False,
             "events": db.list_follow_events(app.db_path, limit=20),
             "unread": db.unread_follow_events(app.db_path),
         }
     try:
         follows = db.list_follows(app.db_path)
-        results = [_check_one(follow, app) for follow in follows]
+        deadline = (
+            time.monotonic() + app.follow_check_deadline
+            if app.follow_check_deadline > 0
+            else None
+        )
+        results: list[dict] = []
+        for follow in follows:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                results.append(
+                    {
+                        "follow_id": follow["id"],
+                        "subject": follow["subject"],
+                        "source": follow["source"],
+                        "status": "skipped",
+                        "detail": "本轮扫描总预算已用完，未检查；基线未变",
+                    }
+                )
+                continue
+            timeout = app.follow_item_timeout if app.follow_item_timeout > 0 else None
+            if remaining is not None:
+                timeout = remaining if timeout is None else min(timeout, remaining)
+            results.append(_check_one(follow, app, timeout=timeout))
         return {
             "busy": False,
             "checked_at": db.now(),
             "results": results,
+            "partial": any(
+                item["status"] in ("timeout", "skipped") for item in results
+            ),
             "events": db.list_follow_events(app.db_path, limit=20),
             "unread": db.unread_follow_events(app.db_path),
         }

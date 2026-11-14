@@ -112,6 +112,58 @@ def test_channel_unavailable_is_not_no_update(client, monkeypatch):
     assert recovered["results"][0]["status"] == "updated"
 
 
+def test_check_timeout_does_not_touch_baseline(client, monkeypatch):
+    """单项超时只报 timeout：不写事件、不写基线，下次扫描仍按旧快照对比。"""
+    import time
+
+    from app import db
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "follow_item_timeout", 0.05)
+    monkeypatch.setattr(settings, "follow_check_deadline", 10.0)
+
+    def slow(*_args, **_kwargs):
+        time.sleep(0.4)
+        return [_evidence("https://a/1", "新款")]
+
+    monkeypatch.setattr(channels, "recall", slow)
+    follow = client.post(
+        "/api/follows", json={"subject": "AP 新款", "source": "web"}
+    ).json()["follows"][0]
+
+    body = client.post("/api/follows/check").json()
+
+    assert body["results"][0]["status"] == "timeout"
+    assert body["partial"] is True
+    assert body["events"] == []
+    assert not db.get_follow(settings.db_path, follow["id"])["last_state"]
+
+
+def test_check_total_deadline_skips_remaining_items(client, monkeypatch):
+    """整轮预算用完时，后面的关注项标记 skipped，而不是继续排队等几分钟。"""
+    import time
+
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "follow_item_timeout", 10.0)
+    monkeypatch.setattr(settings, "follow_check_deadline", 0.1)
+
+    def slow(*_args, **_kwargs):
+        time.sleep(0.3)
+        return [_evidence("https://a/1", "新款")]
+
+    monkeypatch.setattr(channels, "recall", slow)
+    client.post("/api/follows", json={"subject": "AP 新款", "source": "web"})
+    client.post("/api/follows", json={"subject": "Baby 新款", "source": "web"})
+
+    body = client.post("/api/follows/check").json()
+
+    statuses = [item["status"] for item in body["results"]]
+    assert statuses == ["timeout", "skipped"]
+    assert body["partial"] is True
+    assert body["events"] == []
+
+
 def test_delete_follow_removes_its_events(client, monkeypatch):
     monkeypatch.setattr(channels, "recall", lambda *_a, **_k: [_evidence("https://a/1", "旧款")])
     follow = client.post(
