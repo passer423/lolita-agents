@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -21,24 +23,52 @@ from app.services.xhs_search import XhsUnavailable
 
 logger = logging.getLogger(__name__)
 
-_EXPLORE_URL = "https://www.xiaohongshu.com/explore/{note_id}?xsec_token={token}"
+_EXPLORE_URL = (
+    "https://www.xiaohongshu.com/explore/{note_id}?xsec_token={token}&xsec_source=pc_search"
+)
+
+# 搜索结果卡片通常只有标题、没有正文；详情接口才有 desc。只对前几条取详情，
+# 每条多一次请求，再多就只是拖慢整体预算。
+_DETAIL_LIMIT = 3
+
+# 进程 PATH 可能是「装 Node 之前」的快照（服务先于 Node 启动），此时 PyExecJS
+# 会退化到 Windows 的 JScript，签名跑不起来。补上常见安装目录即可。
+_NODE_DIRS = (
+    Path(r"C:\Program Files\nodejs"),
+    Path(os.environ.get("LOCALAPPDATA") or "") / "Programs" / "nodejs",
+)
 
 
 def _spider_root(app: AppSettings) -> Path:
     return Path(app.xhs_spider_root).expanduser().resolve()
 
 
+def _ensure_node_on_path() -> None:
+    if shutil.which("node"):
+        return
+    for node_dir in _NODE_DIRS:
+        if (node_dir / "node.exe").exists():
+            os.environ["PATH"] = f"{node_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+            return
+
+
 def available(app: AppSettings) -> bool:
-    """Spider_XHS 是否就绪（``xhs_enabled`` 由 xhs_search.available 统一判）。"""
+    """Spider_XHS 是否就绪（``xhs_enabled`` 由 xhs_search.available 统一判）。
+
+    Node 是硬依赖：签名在 Spider_XHS 里靠 Node 跑 JS，缺了必然失败，
+    这里先判掉，让状态接口如实显示「不可用」而不是等到召回时才报错。
+    """
     if not str(app.xhs_cookie).strip():
         return False
     if not (_spider_root(app) / "apis").is_dir():
         return False
-    return True
+    _ensure_node_on_path()
+    return shutil.which("node") is not None
 
 
 def _load_api(app: AppSettings):
     """把 Spider_XHS 根注入 sys.path 后导入 PC API，失败抛 XhsUnavailable。"""
+    _ensure_node_on_path()
     root = _spider_root(app)
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
@@ -55,10 +85,31 @@ def _note_to_dict(note: dict) -> dict:
     card = note.get("note_card") or {}
     title = str(card.get("display_title") or card.get("title") or "").strip()
     content = str(card.get("desc") or card.get("describe") or "").strip()
-    note_id = str(note.get("id") or note.get("note_id") or "")
-    token = str(note.get("xsec_token") or "")
+    note_id = str(note.get("id") or note.get("note_id") or card.get("note_id") or "")
+    token = str(note.get("xsec_token") or card.get("xsec_token") or "")
     url = _EXPLORE_URL.format(note_id=note_id, token=token) if note_id else ""
     return {"title": title, "url": url, "content": content, "comments": []}
+
+
+def _fill_detail(api, item: dict) -> None:
+    """用详情接口补正文。失败就保留卡片内容——单条详情失败不该拖垮整路召回。"""
+    if not item.get("url"):
+        return
+    try:
+        success, _msg, payload = api.get_note_info(item["url"])
+    except Exception as exc:  # noqa: BLE001 - 风控/网络失败都只影响这一条
+        logger.info("小红书笔记详情失败 %s：%s", item["url"], exc)
+        return
+    if not success or not isinstance(payload, dict):
+        return
+    items = (payload.get("data") or {}).get("items") or []
+    card = (items[0] or {}).get("note_card") if items else None
+    if not isinstance(card, dict):
+        return
+    title = str(card.get("title") or "").strip()
+    content = str(card.get("desc") or "").strip()
+    item["title"] = title or item["title"]
+    item["content"] = content or item["content"]
 
 
 def fetch_notes(query: str, app: AppSettings, limit: int) -> list[dict]:
@@ -74,8 +125,14 @@ def fetch_notes(query: str, app: AppSettings, limit: int) -> list[dict]:
     if not success:
         raise XhsUnavailable(f"Spider_XHS 搜索失败：{msg}")
 
-    return [
-        _note_to_dict(note)
-        for note in notes
-        if isinstance(note, dict) and note.get("model_type") == "note"
-    ]
+    results: list[dict] = []
+    for note in notes:
+        if not isinstance(note, dict):
+            continue
+        if note.get("model_type") != "note" and not note.get("note_card"):
+            continue
+        item = _note_to_dict(note)
+        if len(results) < _DETAIL_LIMIT:
+            _fill_detail(api, item)
+        results.append(item)
+    return results

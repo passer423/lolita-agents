@@ -156,7 +156,7 @@ def search(
 
     ``provider`` 可显式指定 ``bocha`` / ``zhipu``，不依赖全局 ``SEARCH_PROVIDER``。
     """
-    if not app.search_enabled:
+    if not app.search_enabled or not app.search_api_key.strip():
         raise SearchUnavailable(
             "没有配置搜索 API key：在 .env 里填 SEARCH_API_KEY（博查或智谱）"
         )

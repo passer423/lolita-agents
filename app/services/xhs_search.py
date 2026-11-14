@@ -38,8 +38,16 @@ def script_path() -> Path:
     return APP_ROOT / "scripts" / "xhs_search.py"
 
 
+_PROVIDERS = ("playwright", "spider_xhs")
+
+
 def _provider(app: AppSettings) -> str:
-    return (app.xhs_provider or "playwright").strip().lower()
+    value = (app.xhs_provider or "playwright").strip().lower()
+    if value not in _PROVIDERS:
+        raise XhsUnavailable(
+            f"未知的 XHS_PROVIDER：{value}（只支持 {' / '.join(_PROVIDERS)}）"
+        )
+    return value
 
 
 def _playwright_available(app: AppSettings) -> bool:
@@ -55,7 +63,11 @@ def available(app: AppSettings) -> bool:
     """只有“启用 + 对应 provider 就绪”才认为能搜。"""
     if not app.xhs_enabled:
         return False
-    if _provider(app) == "spider_xhs":
+    try:
+        provider = _provider(app)
+    except XhsUnavailable:
+        return False
+    if provider == "spider_xhs":
         from app.services import xhs_spider
 
         return xhs_spider.available(app)
@@ -98,6 +110,9 @@ def _notes_to_results(notes: list[dict]) -> list[web_search.SearchResult]:
         url = str(note.get("url") or "").strip()
         content = str(note.get("content") or "").strip()
         comments = note.get("comments") or []
+        # 正文可以退化成标题，但标题和链接不能缺：没有链接就不是可引用的线索。
+        # 搜索卡片常常只有标题，若这里强求正文，整路结果会被清空。
+        content = content or title
         if not (title and url and content):
             continue
         joined = "\n".join(
@@ -179,6 +194,8 @@ def search(
     query = (query or "").strip()
     if not query:
         return []
+    # 先解析 provider：配置写错时要报「未知 XHS_PROVIDER」，而不是含糊的「未启用」。
+    provider = _provider(app)
     if not available(app):
         raise XhsUnavailable("小红书未启用或未登录")
 
@@ -190,7 +207,7 @@ def search(
     limit = max(1, min(10, max_results))
     timeout_seconds = float(timeout or app.xhs_timeout)
 
-    if _provider(app) == "spider_xhs":
+    if provider == "spider_xhs":
         from app.services import xhs_spider
 
         notes = xhs_spider.fetch_notes(query, app, limit)
