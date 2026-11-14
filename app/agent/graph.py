@@ -115,10 +115,35 @@ class AgentState(TypedDict, total=False):
     stream: bool
 
 
-def _normalize(evidence: list[dict], supplementary: list[str] | tuple[str, ...] = ()) -> list[dict]:
-    """排序证据，让 ``[n]`` 编号既稳定、又把「为这个问题才去查的」放在最前。
+def _evidence_key(item: dict) -> str:
+    """去重键：优先 URL，其次 ref。
 
-    三级排序键：
+    URL 去掉锚点与末尾斜杠——同一篇文章被不同通道抓到时常只差这两处。
+    两个字段都没有（例如 Lolibrary 档案里的聚合条目）就不去重：没有稳定
+    标识时强行合并会误删不同条目。
+    """
+    url = str(item.get("url") or "").strip()
+    if url:
+        return url.split("#", 1)[0].rstrip("/")
+    return str(item.get("ref") or "").strip()
+
+
+def _rank(item: dict, extra: set[str]) -> tuple[int, int, int]:
+    return (
+        0 if item.get("channel") in extra else 1,
+        _KIND_ORDER.get(item.get("source_kind"), 9),
+        _CHANNEL_ORDER.get(item.get("channel"), 99),
+    )
+
+
+def _normalize(
+    evidence: list[dict],
+    supplementary: list[str] | tuple[str, ...] = (),
+    limit: int = 0,
+) -> list[dict]:
+    """去重、排序并限量，让 ``[n]`` 编号既稳定、又把「为这个问题才去查的」放在最前。
+
+    排序是三级规则：
 
     1. **本次补查的通道优先** —— 用户问价格时，小红书的实拍和网页的现货页，
        比知识库里的术语解释更该先看到；把它们统一压到末尾，等于用编号位置
@@ -127,18 +152,32 @@ def _normalize(evidence: list[dict], supplementary: list[str] | tuple[str, ...] 
     3. **通道固定顺序** —— 同前两级相同时按通道定序，消除并行完成顺序的漂移。
 
     这是**规则排序，不是相关性排序**：各通道的分数不可比（BM25 / 向量相似度 /
-    搜索排序是三套量纲），跨通道没法打一个统一的分。所以这里只表达「这一路
-    是不是为这个问题追加的」+「这类证据能当什么用」，不假装在算相关性。
+    搜索排序是三套量纲），跨通道没法打一个统一的分。
+
+    去重按 URL/ref，保留排序更靠前的版本（来源效力更强的留下）。``limit > 0``
+    时限制总条数，但补查通道**整体豁免**：它们是用户这个问题才触发的，不能被
+    核心通道的长列表挤掉；豁免后允许略超上限。
     """
     extra = set(supplementary or ())
-    return sorted(
-        evidence,
-        key=lambda item: (
-            0 if item.get("channel") in extra else 1,
-            _KIND_ORDER.get(item.get("source_kind"), 9),
-            _CHANNEL_ORDER.get(item.get("channel"), 99),
-        ),
-    )
+
+    best: dict[str, dict] = {}
+    anonymous: list[dict] = []
+    for item in evidence:
+        key = _evidence_key(item)
+        if not key:
+            anonymous.append(item)
+            continue
+        current = best.get(key)
+        if current is None or _rank(item, extra) < _rank(current, extra):
+            best[key] = item
+
+    ordered = sorted(list(best.values()) + anonymous, key=lambda item: _rank(item, extra))
+    if limit <= 0 or len(ordered) <= limit:
+        return ordered
+
+    head = [item for item in ordered if item.get("channel") in extra]
+    rest = [item for item in ordered if item.get("channel") not in extra]
+    return head + rest[: max(limit - len(head), 0)]
 
 
 def _numbered(evidence: list[dict]) -> list[dict]:
@@ -377,7 +416,11 @@ def _partial_state(
                     "timeout": True,
                 },
             )
-    normalized = _normalize(evidence, snapshot["supplementary"])
+    normalized = _normalize(
+        evidence,
+        snapshot["supplementary"],
+        limit=ctx.settings.evidence_max_items,
+    )
     return {
         "question": question,
         "evidence": evidence,
@@ -722,7 +765,11 @@ def build_graph(
             }
         if state.get("stream"):
             return {}
-        evidence = _normalize(state.get("evidence", []), state.get("supplementary"))
+        evidence = _normalize(
+            state.get("evidence", []),
+            state.get("supplementary"),
+            limit=ctx.settings.evidence_max_items,
+        )
         if not evidence:
             return {"answer": _forced_answer([], reason="no_evidence"), "stopped_reason": "no_evidence"}
         if writer is None:
@@ -743,7 +790,11 @@ def build_graph(
             return {}
         if state.get("dress_unresolved") or state.get("dress_unverified"):
             return {}
-        evidence = _normalize(state.get("evidence", []), state.get("supplementary"))
+        evidence = _normalize(
+            state.get("evidence", []),
+            state.get("supplementary"),
+            limit=ctx.settings.evidence_max_items,
+        )
         text = state.get("answer", "")
         problems = citation_problems(text, len(evidence))
         if not problems:
@@ -864,7 +915,11 @@ def _finish(
     duration_ms: int,
 ) -> dict:
     """把图的结果收尾成完整响应（编号、轨迹）。"""
-    evidence = _normalize(state.get("evidence", []), state.get("supplementary"))
+    evidence = _normalize(
+        state.get("evidence", []),
+        state.get("supplementary"),
+        limit=ctx.settings.evidence_max_items,
+    )
     payload = {
         "question": question,
         "answer": state.get("answer", ""),
@@ -1034,7 +1089,11 @@ def stream(
             raise failure["error"]
         state = result.get("state", {})
 
-    evidence = _normalize(state.get("evidence", []), state.get("supplementary"))
+    evidence = _normalize(
+        state.get("evidence", []),
+        state.get("supplementary"),
+        limit=ctx.settings.evidence_max_items,
+    )
     numbered = _numbered(evidence)
 
     if state.get("dress_unresolved") or state.get("dress_unverified"):
