@@ -25,6 +25,11 @@ langgraph>=0.2,<1.0
 # imagefetch.py 显式用 certifi 的 CA bundle（这台机器的 Anaconda 默认证书路径是坏的）。
 certifi>=2023.7.22
 
+# ---------- 鉴权（可选模式） ----------
+# AUTH_MODE=jwt 时校验/签发 HS256 令牌。AUTH_MODE=off/api_key 不 import 它，
+# 但仍是必装：模块顶层导入了 jwt，缺包会让服务直接起不来。
+PyJWT>=2.8,<3.0
+
 # ---------- 小红书通道（可选，默认不装）----------
 # 只服务 XHS_PROVIDER=playwright。代码在缺包时会判该通道 not ready 并跳过，
 # 不影响其它通道，所以不做必装依赖。需要时手动装：

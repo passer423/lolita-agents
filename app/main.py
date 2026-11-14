@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__, bridge, db
+from app import auth as access_control
 from app.agent import channels
 from app.config import settings
 from app.routers import chat, follows, jobs, kb
@@ -84,11 +85,16 @@ app = FastAPI(
     default_response_class=UTF8JSONResponse,
 )
 
+# 可选访问控制：默认 AUTH_MODE=off，行为与以前完全一致；配置错误会在构造期
+# 直接抛错，而不是静默放行或静默拒绝。
+app.add_middleware(access_control.AccessControl, settings=settings)
+
 # 1) API 先注册
 app.include_router(chat.router)
 app.include_router(follows.router)
 app.include_router(kb.router)
 app.include_router(jobs.router)
+app.include_router(access_control.router)
 
 
 @app.get("/api/health", tags=["health"])

@@ -34,7 +34,13 @@ class AppSettings(BaseSettings):
     )
 
     # 这些项一旦进日志就等于泄露账号会话 / 账单，上游踩过（pytest 打印 fixture）。
-    SECRET_FIELDS: ClassVar[tuple[str, ...]] = ("llm_api_key", "search_api_key", "xhs_cookie")
+    SECRET_FIELDS: ClassVar[tuple[str, ...]] = (
+        "llm_api_key",
+        "search_api_key",
+        "xhs_cookie",
+        "auth_api_keys",
+        "auth_jwt_secret",
+    )
 
     def __repr__(self) -> str:
         parts: list[str] = []
@@ -155,6 +161,21 @@ class AppSettings(BaseSettings):
     # 只保留最近 N 个归档；<=0 关闭轮转（排查时可以临时关掉）。
     trace_max_bytes: int = 5 * 1024 * 1024
     trace_keep_files: int = 3
+
+    # ---------- 鉴权与配额（可选，默认全关） ----------
+    # 本地单用户默认 off：打开就能用。开启后只保护 /api/*（静态资源与首页公开）。
+    # off / api_key / jwt 三选一；api_key 用 X-API-Key 或 Bearer，jwt 用 Bearer。
+    auth_mode: str = "off"
+    # 逗号分隔；支持 "key:展示名"。展示名只用于日志与限流分桶，原始 key 不落日志。
+    auth_api_keys: str = ""
+    auth_jwt_secret: str = ""
+    auth_jwt_ttl: int = 3600
+    # 每个 key 在窗口内最多几次；<=0 关闭限流。0 次/0 秒都不启用。
+    rate_limit_requests: int = 0
+    rate_limit_window: float = 60.0
+    # 每日 LLM 成本配额（与 LLM_PRICE_CURRENCY 同币种）；<=0 关闭。
+    # 读数来自 trace.cost_summary(days=1)，不另起计量。
+    daily_quota: float = 0.0
 
     # ---------- 派生路径 ----------
     @property
