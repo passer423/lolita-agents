@@ -80,14 +80,19 @@ app.include_router(kb.router)
 
 
 def _asset_version() -> str:
-    """前端资源版本号：chat.js / style.css 一改就换 URL。
+    """前端资源版本号：chat.js / style.css / sw.js 一改就换 URL。
 
     同端口曾经跑过 lo-life，它的 Service Worker 对 /chat.js、/style.css 是
     cache-first；只靠 HTTP 缓存头绕不过去，换 URL 才是最稳的失效方式。
+    sw.js 也参与版本：清理工的 URL 变了，旧 worker 的缓存就拦不住新脚本。
     """
     stamps = [
         path.stat().st_mtime
-        for path in (STATIC_DIR / "chat.js", STATIC_DIR / "style.css")
+        for path in (
+            STATIC_DIR / "chat.js",
+            STATIC_DIR / "style.css",
+            STATIC_DIR / "sw.js",
+        )
         if path.exists()
     ]
     return str(int(max(stamps))) if stamps else __version__
@@ -99,6 +104,7 @@ def index() -> HTMLResponse:
     version = _asset_version()
     html = html.replace('src="/chat.js"', f'src="/chat.js?v={version}"')
     html = html.replace('href="/style.css"', f'href="/style.css?v={version}"')
+    html = html.replace("/sw.js?v=__ASSET_VERSION__", f"/sw.js?v={version}")
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 

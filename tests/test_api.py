@@ -238,5 +238,13 @@ def test_static_shell_served(client):
     assert "text/html" in response.headers["content-type"]
 
 
+def test_shell_registers_versioned_cleanup_worker(client):
+    """首屏只带版本号注册清理工；占位符必须已被服务端替换。"""
+    body = client.get("/").text
+    assert "__ASSET_VERSION__" not in body
+    assert "/sw.js?v=" in body
+    assert "getRegistrations" in body
+
+
 def test_unknown_route_is_404(client):
     assert client.get("/api/nope").status_code == 404
