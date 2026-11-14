@@ -395,6 +395,107 @@ def build_synth_messages(
     return messages
 
 
+# --------------------------------------------------------------------- 图片兜底提示
+#
+# 小红书笔记的价格/尺码常只写在配图里。本地 OCR 实测不可靠（见
+# ``eval/ocr_accuracy.md``：行级完整率 46.8%，还有静默错值与不可复现），
+# 所以这里**不读图里的数字**，只补一句固定提示。
+#
+# 措辞由代码给，不由提示词给：模型只看到「有 N 张图」时，很容易写成
+# 「图中价格表显示…」，把「有图」说成「有价格」。这句话必须一字不差、
+# 且全答案最多出现一次。
+
+_IMAGE_HINT_PRICE = (
+    "价格", "多少钱", "定金", "尾款", "预约价", "现货价", "全款", "售价", "贵不贵",
+)
+_IMAGE_HINT_SIZE = (
+    "尺码", "码数", "尺寸", "胸围", "腰围", "肩宽", "袖长", "裙长", "衣长", "穿多大", "什么码",
+)
+
+# 正文里已经有对应数字时不必再提示「图里可能有」。
+_PRICE_IN_TEXT_RE = re.compile(
+    r"[¥￥]\s*\d|(?:价格|售价|定价|定金|尾款|预约价|现货价|全款)\s*[:：]?\s*\d{2,5}"
+)
+_SIZE_IN_TEXT_RE = re.compile(
+    r"(?:尺码|码数|胸围|腰围|肩宽|袖长|裙长|衣长)\s*[:：]?\s*\d{1,3}"
+)
+
+
+def _image_hint_kind(question: str) -> str:
+    text = question or ""
+    price = any(marker in text for marker in _IMAGE_HINT_PRICE)
+    size = any(marker in text for marker in _IMAGE_HINT_SIZE)
+    if price and size:
+        return "both"
+    if price:
+        return "price"
+    if size:
+        return "size"
+    return ""
+
+
+def _image_hint_target(evidence: list[dict]) -> dict | None:
+    """挑一条带图证据来承载提示。
+
+    同一个问题常有多条带图笔记，提示指向哪条很重要：标题写了「价格表/尺码表」
+    的那条才值得让用户去点。没有这类标题时退回第一条带图的。
+    """
+    candidates = [item for item in evidence if int(item.get("image_count") or 0) > 0]
+    if not candidates:
+        return None
+
+    def rank(item: dict) -> int:
+        title = str(item.get("title") or "")
+        if any(key in title for key in ("价格表", "价目表", "尺码表", "参数表")):
+            return 2
+        if any(key in title for key in ("价格", "尺码", "定金", "尾款", "预约")):
+            return 1
+        return 0
+
+    return max(candidates, key=rank)
+
+
+def image_hint(question: str, evidence: list[dict]) -> str:
+    """价格/尺码图上才有的提示；三条同时满足才给，全答案最多一条。
+
+    1. 问题问的是价格或尺码；
+    2. 证据里至少一条带图（``image_count > 0``）；
+    3. 证据正文没给出对应数字。
+
+    返回空串表示不加。句子里的「可能含」是刻意的：有图不等于有价格表，
+    没有 OCR 就不该断言图里写了什么。
+    """
+    kind = _image_hint_kind(question)
+    if not kind or not evidence:
+        return ""
+    item = _image_hint_target(evidence)
+    if item is None:
+        return ""
+
+    haystack = "\n".join(str(entry.get("text") or "") for entry in evidence)
+    wanted: list[str] = []
+    if kind in ("price", "both") and not _PRICE_IN_TEXT_RE.search(haystack):
+        wanted.append("价格")
+    if kind in ("size", "both") and not _SIZE_IN_TEXT_RE.search(haystack):
+        wanted.append("尺码")
+    if not wanted:
+        return ""
+
+    if wanted == ["价格"]:
+        label, target = "价格表", "价格"
+    elif wanted == ["尺码"]:
+        label, target = "尺码表", "尺码"
+    else:
+        label, target = "价格表/尺码表", "价格和尺码"
+    count = int(item.get("image_count") or 0)
+    number = item.get("n")
+    subject = f"[{number}] 那条笔记" if number else "该帖"
+    return (
+        f"\n\n另外，{subject}含 {count} 张图，可能含{label}；"
+        f"图片里的文字没有被解析，{target}请以原帖图片为准。"
+    )
+
+
 def sanitize_history(raw) -> list[dict]:
     """只留最近若干轮，截断过长内容，丢掉角色不对的项。
 
@@ -486,6 +587,7 @@ class DeepSeekWriter:
         self._record(getattr(response, "usage", None), picked)
         text = (response.choices[0].message.content or "").strip()
         text, fixes = fix_source_attribution(text, evidence)
+        text += image_hint(question, evidence)
         self.usage["diagnostics"] = _diagnostics_block(
             text, evidence, fixes, streamed=False
         )
@@ -526,6 +628,11 @@ class DeepSeekWriter:
             if delta:
                 seen.append(delta)
                 yield delta
+        # 提示放在流末尾一次给出：先让模型把能说的话说完，再补「图里可能有」。
+        hint = image_hint(question, evidence)
+        if hint:
+            seen.append(hint)
+            yield hint
         self.usage["diagnostics"] = _diagnostics_block(
             "".join(seen), evidence, [], streamed=True
         )

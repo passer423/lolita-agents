@@ -303,3 +303,84 @@ def test_shop_domain_wins_even_for_ugc_kind(url, expected):
 def test_writer_modules_exports_are_importable():
     """防止以后重构把公共入口改名却不更新调用方。"""
     assert writer_mod.APPELLATION_SHOP == APPELLATION_SHOP
+
+
+# ---------------------------------------------------------------- 图片兜底提示
+
+
+def _image_evidence(**overrides) -> list[dict]:
+    return evidence(image_count=18, image_urls=["https://img/1", "https://img/2"], **overrides)
+
+
+def test_evidence_without_image_gets_no_hint():
+    """微博/网页证据没有 image_count，一个字的提示都不该多。"""
+    writer = make_writer(content="[1] 这条要等再贩。")
+
+    assert writer.write("多少钱", evidence()) == "[1] 这条要等再贩。"
+
+
+def test_hint_only_for_price_or_size_questions():
+    writer = make_writer(content="[1] 这条很受欢迎。")
+
+    assert writer.write("这条好看吗", _image_evidence()) == "[1] 这条很受欢迎。"
+
+
+def test_hint_skipped_when_text_already_has_price():
+    """正文已经给出价格数字时不必再说「图里可能有」。"""
+    ev = _image_evidence(text="预约价 578，定金 188")
+    writer = make_writer(content="[1] 预约价 578。")
+
+    assert writer.write("四时花价格", ev) == "[1] 预约价 578。"
+
+
+def test_price_question_with_images_appends_fixed_template_once():
+    ev = [
+        {"n": 1, **{k: v for k, v in _image_evidence()[0].items() if k != "n"}},
+        {"n": 2, "channel": "xhs", "source_kind": "realtime", "ref": "x",
+         "title": "另一帖", "text": "无正文", "url": "", "image_count": 9, "image_urls": []},
+    ]
+    writer = make_writer(content="[1] 目前没有明确价格。")
+
+    text = writer.write("四时花价格", ev)
+
+    assert text.startswith("[1] 目前没有明确价格。")
+    assert "[1] 那条笔记含 18 张图" in text
+    assert "可能含价格表" in text
+    assert "以原帖图片为准" in text
+    # 全答案最多一条：两条带图证据也只出现一次「为准」
+    assert text.count("为准") == 1
+
+
+def test_hint_points_at_the_price_table_post():
+    """多条带图证据时，提示要挂在标题写了「价格表」的那条，而不是第一条。"""
+    ev = [
+        {"n": 1, "channel": "xhs", "source_kind": "realtime", "ref": "a",
+         "title": "纠结可能再贩", "text": "无正文", "url": "", "image_count": 2, "image_urls": []},
+        {"n": 2, "channel": "xhs", "source_kind": "realtime", "ref": "b",
+         "title": "一人血书求四时花再贩（存档价格表", "text": "无正文", "url": "",
+         "image_count": 2, "image_urls": []},
+    ]
+    writer = make_writer(content="[1] 没查到确切数字。")
+
+    text = writer.write("四时花价格", ev)
+
+    assert "[2] 那条笔记含 2 张图" in text
+    assert "[1] 那条笔记" not in text
+
+
+def test_size_question_uses_size_template():
+    writer = make_writer(content="[1] 资料没写尺码。")
+
+    text = writer.write("M 码胸围多少", _image_evidence())
+
+    assert "可能含尺码表" in text
+    assert "尺码请以原帖图片为准" in text
+
+
+def test_stream_appends_hint_at_end_once():
+    writer = make_writer(chunks=["[1] 没有明确价格。"])
+
+    text = "".join(writer.stream("四时花价格", _image_evidence()))
+
+    assert text.endswith("价格请以原帖图片为准。")
+    assert text.count("为准") == 1

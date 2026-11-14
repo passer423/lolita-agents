@@ -32,6 +32,10 @@ _EXPLORE_URL = (
 # 每条多一次请求，再多就只是拖慢整体预算。
 _DETAIL_LIMIT = 3
 
+# 配图只留前几张 URL：提示语只需要「有没有图、有几张」，原图 URL 给用户点开用。
+# 全量存进缓存没必要，一条笔记 18 张图会把缓存撑大且没人用。
+IMAGE_URL_LIMIT = 2
+
 # 进程 PATH 可能是「装 Node 之前」的快照（服务先于 Node 启动），此时 PyExecJS
 # 会退化到 Windows 的 JScript，签名跑不起来。补上常见安装目录即可。
 _NODE_DIRS = (
@@ -91,6 +95,26 @@ def _load_api(app: AppSettings):
     return XHS_Apis, XHSPcAuth
 
 
+def _image_fields(card: dict) -> dict:
+    """配图数量 + 前几张 URL。搜索卡片本身就带 ``image_list``，不必为图多打详情。
+
+    数量取 ``image_list`` 的长度，不取成功取出 URL 的条数：取不到 URL 时仍要
+    如实告诉上层「这条帖子有图」，只是没有可点开的链接。
+    """
+    images = card.get("image_list") or []
+    urls: list[str] = []
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        for entry in image.get("info_list") or []:
+            if isinstance(entry, dict) and entry.get("url"):
+                urls.append(str(entry["url"]))
+                break
+        if len(urls) >= IMAGE_URL_LIMIT:
+            break
+    return {"image_count": len(images), "images": urls}
+
+
 def _note_to_dict(note: dict) -> dict:
     """把 Spider_XHS 搜索返回的 note item 转成 xhs_search 的 notes 结构。"""
     card = note.get("note_card") or {}
@@ -99,7 +123,13 @@ def _note_to_dict(note: dict) -> dict:
     note_id = str(note.get("id") or note.get("note_id") or card.get("note_id") or "")
     token = str(note.get("xsec_token") or card.get("xsec_token") or "")
     url = _EXPLORE_URL.format(note_id=note_id, token=token) if note_id else ""
-    return {"title": title, "url": url, "content": content, "comments": []}
+    return {
+        "title": title,
+        "url": url,
+        "content": content,
+        "comments": [],
+        **_image_fields(card),
+    }
 
 
 def _fill_detail(api, item: dict) -> None:
@@ -121,6 +151,9 @@ def _fill_detail(api, item: dict) -> None:
     content = str(card.get("desc") or "").strip()
     item["title"] = title or item["title"]
     item["content"] = content or item["content"]
+    if card.get("image_list"):
+        # 详情里的 image_list 更完整；搜索卡片已有就不再覆盖，避免把数量改小。
+        item.update(_image_fields(card))
 
 
 def _fetch_notes(query: str, app: AppSettings, limit: int) -> list[dict]:

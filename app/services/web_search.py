@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -37,6 +37,10 @@ class SearchResult:
     site_name: str = ""
     published_at: str = ""
     provider: str = ""
+    # 小红书笔记的配图：只带数量与前几张 URL，给「图里可能有价格表」的提示用。
+    # 微博 / 网页通道没有这个信息，默认值让它们零改动。
+    image_count: int = 0
+    image_urls: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -47,6 +51,8 @@ class SearchResult:
             "site_name": self.site_name,
             "published_at": self.published_at,
             "provider": self.provider,
+            "image_count": self.image_count,
+            "image_urls": list(self.image_urls),
         }
 
 

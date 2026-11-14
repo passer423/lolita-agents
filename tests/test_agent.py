@@ -1684,3 +1684,59 @@ def test_history_reaches_query_extraction(monkeypatch):
     graph.run("那它多少钱", ctx=ctx(), planner=Recorder(), writer=StubWriter(), history=history)
 
     assert seen["history"] == history
+
+
+# --------------------------------------------------------------------- 配图兜底
+
+
+def test_xhs_note_carries_image_fields():
+    """图片数量与 URL 要穿过适配层：上层只靠这两个字段判断「图里可能有价格表」。"""
+    from app.services import xhs_search
+
+    results = xhs_search._notes_to_results([
+        {
+            "title": "存档价格表",
+            "url": "https://www.xiaohongshu.com/explore/1",
+            "content": "价格表",
+            "image_count": 18,
+            "images": ["https://img/1", "https://img/2"],
+        }
+    ])
+
+    assert results[0].image_count == 18
+    assert results[0].image_urls == ["https://img/1", "https://img/2"]
+
+
+def test_evidence_carries_image_fields():
+    from app.services import web_search
+
+    with_image = web_search.SearchResult(
+        title="t", url="https://x/1", snippet="s", image_count=3, image_urls=["https://img/1"]
+    )
+    ev = channels._search_evidence("xhs", [with_image])
+    assert ev[0]["image_count"] == 3
+    assert ev[0]["image_urls"] == ["https://img/1"]
+
+    plain = web_search.SearchResult(title="t", url="https://x/2", snippet="s")
+    ev = channels._search_evidence("web", [plain])
+    assert ev[0]["image_count"] == 0
+    assert ev[0]["image_urls"] == []
+
+
+def test_old_cache_version_is_skipped(tmp_path):
+    """v1 缓存没有配图字段：版本不匹配要直接跳过并重抓，不能把旧数据当新数据用。"""
+    import json
+    import time
+
+    from app.services import xhs_search
+
+    path = tmp_path / "cache.json"
+    path.write_text(
+        json.dumps({"ts": time.time(), "notes": [{"title": "old"}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    assert xhs_search._read_cache(path) is None
+
+    xhs_search._write_cache(path, [{"title": "new", "image_count": 2}])
+    assert xhs_search._read_cache(path) == [{"title": "new", "image_count": 2}]

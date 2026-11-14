@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 6 * 3600
 
+# 缓存结构版本。v1 的 notes 里没有配图字段，读进来会让「图里可能有价格表」
+# 的提示整整 6 小时不出现，看起来像功能没生效。版本不匹配就跳过并重抓。
+CACHE_VERSION = 2
+
 
 class XhsUnavailable(RuntimeError):
     """小红书搜索不可用（未登录 / 没装 Playwright / 超时）。"""
@@ -101,6 +105,12 @@ def _read_cache(path: Path) -> list[dict] | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    version = payload.get("v")
+    if version != CACHE_VERSION:
+        logger.info(
+            "小红书缓存版本不匹配（v%s != v%s），跳过：%s", version, CACHE_VERSION, path.name
+        )
+        return None
     if time.time() - float(payload.get("ts") or 0) > CACHE_TTL_SECONDS:
         return None
     notes = payload.get("notes")
@@ -111,7 +121,10 @@ def _write_cache(path: Path, notes: list[dict]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"ts": time.time(), "notes": notes}, ensure_ascii=False),
+            json.dumps(
+                {"v": CACHE_VERSION, "ts": time.time(), "notes": notes},
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
     except OSError as exc:
@@ -135,6 +148,7 @@ def _notes_to_results(notes: list[dict]) -> list[web_search.SearchResult]:
         joined = "\n".join(
             [content, *(str(item).strip() for item in comments if str(item).strip())]
         )
+        image_urls = [str(item) for item in (note.get("images") or []) if str(item).strip()]
         results.append(
             web_search.SearchResult(
                 title=title,
@@ -143,6 +157,8 @@ def _notes_to_results(notes: list[dict]) -> list[web_search.SearchResult]:
                 content=joined,
                 site_name="小红书",
                 provider="xiaohongshu",
+                image_count=int(note.get("image_count") or len(image_urls)),
+                image_urls=image_urls,
             )
         )
     return results

@@ -479,6 +479,10 @@ def _search_evidence(channel: str, results: list, limit: int | None = None) -> l
             "title": r.title,
             "text": _clip(r.content or r.snippet, limit),
             "url": r.url,
+            # 只给数量与前几张图：正文里没有的信息，靠它提示「图里可能有价格表」。
+            # 这两个字段不进写作提示词，只有代码侧读它们。
+            "image_count": int(getattr(r, "image_count", 0) or 0),
+            "image_urls": list(getattr(r, "image_urls", None) or []),
         }
         for r in results
     ]
