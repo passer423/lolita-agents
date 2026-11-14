@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__, bridge, db
+from app.agent import channels
 from app.config import settings
 from app.routers import chat, follows, kb
 
@@ -77,6 +78,24 @@ app = FastAPI(
 app.include_router(chat.router)
 app.include_router(follows.router)
 app.include_router(kb.router)
+
+
+@app.get("/api/health", tags=["health"])
+def health() -> dict:
+    """给探针和排查用的汇总：版本 + 两份索引 + 每个召回通道的就绪状态。
+
+    这里**不重新判断**就绪：索引直接取 ``bridge.index_status``，通道直接取
+    ``channels.channel_status``。另写一套判断只会和聊天页显示的状态打架，
+    排查时反而不知道该信哪一个。
+    """
+    return {
+        "version": __version__,
+        "indexes": {
+            "own": bridge.index_status(settings, source="own"),
+            "real": bridge.index_status(settings, source="real"),
+        },
+        "channels": channels.channel_status(settings),
+    }
 
 
 def _asset_version() -> str:

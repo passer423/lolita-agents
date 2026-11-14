@@ -426,6 +426,8 @@
         ui.stop.style.display = 'none';
         ui.stop.disabled = true;
       }
+      // 本轮 trace 已落盘（或失败），刷新面板，不用用户手动点。
+      loadRuns();
       ui.input.focus();
     }
   }
@@ -633,6 +635,63 @@
     }
   }
 
+  // ---------------------------------------------------------------- 运行轨迹（W15）
+  // 排查「它为什么没找到」靠 trace：每次 run 一行，含走了哪些通道、每步耗时。
+  const RUNS_LIMIT = 10;
+
+  function runChannels(run) {
+    const names = [];
+    (run.steps || []).forEach((step) => {
+      if (step.kind !== 'recall' && step.kind !== 'skip') return;
+      if (names.indexOf(step.channel) < 0) names.push(step.channel);
+    });
+    return names;
+  }
+
+  function renderRuns(payload) {
+    const list = document.getElementById('runs-list');
+    const statusNode = document.getElementById('runs-status');
+    if (!list) return;
+
+    const runs = (payload.runs || []).slice().reverse();   // 最近的排最前
+    if (!runs.length) {
+      list.innerHTML = '<div class="hint">还没有运行记录：提一个问题后这里会出现轨迹。</div>';
+    } else {
+      list.innerHTML = runs.map((run) => {
+        const meta = [
+          formatTime(run.ts),
+          typeof run.duration_ms === 'number' ? run.duration_ms + 'ms' : '',
+          typeof run.evidence === 'number' ? run.evidence + ' 条证据' : '',
+          run.refused ? '未作答' : '',
+          run.stopped_reason ? '停止原因：' + run.stopped_reason : '',
+        ].filter(Boolean).join(' · ');
+        const channels = runChannels(run).map((name) =>
+          '<span class="badge gray">' + esc(CHANNEL_LABELS[name] || name) + '</span>').join('');
+        const steps = (run.steps || []).map((step) =>
+          '<div class="run-step">' + stepText(step) +
+            (typeof step.ms === 'number' ? '<span class="run-ms">' + step.ms + 'ms</span>' : '') +
+          '</div>').join('');
+        return '<div class="run-item">' +
+          '<div class="run-q">' + esc(run.question || '（无问题）') + '</div>' +
+          '<div class="run-meta">' + esc(meta) + '</div>' +
+          (channels ? '<div class="run-channels">' + channels + '</div>' : '') +
+          (steps ? '<div class="run-steps">' + steps + '</div>' : '') +
+        '</div>';
+      }).join('');
+    }
+    if (statusNode) statusNode.textContent = payload.count ? '共 ' + payload.count + ' 条' : '';
+  }
+
+  async function loadRuns() {
+    const list = document.getElementById('runs-list');
+    if (list) list.innerHTML = '<div class="hint">载入中…</div>';
+    try {
+      renderRuns(await getJSON('/api/chat/runs?limit=' + RUNS_LIMIT));
+    } catch (error) {
+      if (list) list.innerHTML = '<div class="notice warn">轨迹载入失败：' + esc(error.message) + '</div>';
+    }
+  }
+
   async function render() {
     const root = view();
     let status = null;
@@ -684,6 +743,16 @@
             '<span class="hint" id="follow-status"></span>' +
           '</div>' +
         '</div>' +
+      '</details>' +
+      '<details class="card fold" id="runs-panel">' +
+        '<summary>运行轨迹 <span class="fold-hint">最近 10 次请求 · 通道与每步耗时</span></summary>' +
+        '<div class="fold-body">' +
+          '<div class="runs-list" id="runs-list"><div class="hint">载入中…</div></div>' +
+          '<div class="follow-actions">' +
+            '<button class="ghost sm" id="runs-refresh">刷新</button>' +
+            '<span class="hint" id="runs-status"></span>' +
+          '</div>' +
+        '</div>' +
       '</details>';
 
     state.channels = status.channels;
@@ -727,6 +796,9 @@
 
     // 关注项（形态甲）：打开页面时载入；有历史关注项才显示面板，不提供手动新增
     loadFollows();
+    // 运行轨迹：本地 JSONL，量很小，直接载入；面板默认折叠，不占首屏。
+    loadRuns();
+    document.getElementById('runs-refresh').addEventListener('click', loadRuns);
 
     document.getElementById('follow-check').addEventListener('click', () => checkFollows(false));
     document.getElementById('follow-read').addEventListener('click', async () => {

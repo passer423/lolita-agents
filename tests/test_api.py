@@ -102,6 +102,17 @@ def test_kb_status_reports_both_indexes_even_when_missing(client):
     assert isinstance(body["upstream"]["exists"], bool)
 
 
+def test_health_reuses_index_and_channel_status(client):
+    """健康检查只做汇总：索引与通道状态必须和专门接口逐字一致。"""
+    health = client.get("/api/health")
+    assert health.status_code == 200
+    body = health.json()
+
+    assert body["version"]
+    assert body["indexes"] == client.get("/api/kb/status").json()["sources"]
+    assert body["channels"] == client.get("/api/chat/status").json()["channels"]["status"]
+
+
 def test_upstream_status_reports_bad_path(workdir):
     from app.bridge import upstream_status
     from app.config import AppSettings
@@ -322,6 +333,28 @@ def test_stream_persists_final_answer(client, monkeypatch):
 
 def test_runs_endpoint_returns_list(client):
     assert client.get("/api/chat/runs").json() == {"count": 0, "runs": []}
+
+
+def test_runs_endpoint_returns_latest_records_with_steps(client):
+    """前端轨迹面板依赖的字段：问题、每步通道与耗时。"""
+    from app.agent import trace
+    from app.config import settings
+
+    for index in range(3):
+        trace.append(
+            {
+                "question": f"q{index}",
+                "steps": [{"kind": "recall", "channel": "own", "ms": 5 + index}],
+            },
+            settings,
+        )
+
+    body = client.get("/api/chat/runs?limit=2").json()
+
+    assert body["count"] == 2
+    assert [run["question"] for run in body["runs"]] == ["q1", "q2"]
+    assert body["runs"][0]["steps"][0]["channel"] == "own"
+    assert body["runs"][0]["steps"][0]["ms"] == 6
 
 
 def test_static_shell_served(client):

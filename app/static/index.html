@@ -7,6 +7,20 @@
 <meta name="description" content="Lolita 领域问答助手：多路召回">
 <title>Lolita 问答助手</title>
 <link rel="stylesheet" href="/style.css">
+<style>
+  /* 运行轨迹面板（W15）：页面级样式放这里，避免与其它线正在改的 style.css 冲突。
+     每次请求一块，通道用 badge，每步右侧对齐耗时。 */
+  .runs-list { display: flex; flex-direction: column; gap: 12px; }
+  .run-item { border-top: 1px solid var(--line); padding-top: 12px; }
+  .run-item:first-child { border-top: 0; padding-top: 0; }
+  .run-q { font-size: 13.5px; line-height: 1.5; overflow-wrap: anywhere; }
+  .run-meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  .run-channels { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .run-steps { margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+  .run-step { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0 1px 8px; }
+  .run-step > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+  .run-ms { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--muted); opacity: .8; }
+</style>
 </head>
 <body>
   <header id="topbar">
