@@ -33,13 +33,15 @@ jobs:
     steps:
       - name: 把 Git Bash 加入 PATH（Windows runner）
         if: runner.os == 'Windows'
-        shell: pwsh
+        # 这台 runner 只有 Windows PowerShell 5.1，没有 pwsh。
+        shell: powershell
         run: |
           $gitBash = 'C:\Program Files\Git\bin'
           if (-not (Test-Path "$gitBash\bash.exe")) {
             throw "找不到 Git Bash：$gitBash\bash.exe；self-hosted runner 需要安装 Git for Windows"
           }
-          $gitBash | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # 用 ASCII 追加，避免 PS5 的 utf8 写入 BOM 污染 GITHUB_PATH 第一行。
+          Add-Content -Path $env:GITHUB_PATH -Value $gitBash -Encoding ASCII
 
       - uses: actions/checkout@v4
 
