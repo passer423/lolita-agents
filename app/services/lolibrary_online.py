@@ -38,9 +38,28 @@ _WS = re.compile(r"\s+")
 
 _RELEASE = re.compile(r"Released in\s+((?:19|20)\d{2})", re.I)
 _PRODUCT_NUMBER = re.compile(r"Product number:\s*([A-Za-z0-9-]{3,})", re.I)
-_PRICE = re.compile(r"Originally listed for\s*([¥￥]\s*[\d,]+(?:\s*[A-Z]{3})?)", re.I)
+# 币种写法不统一：站内是 `CN¥598`，日牌是 `¥12000 JPY`，也可能写成 `598 CNY` / `RMB598`。
+_CURRENCY = r"(?:CN¥|CN\$|CNY|RMB|JPY|USD|EUR|GBP|¥|￥|\$)"
+_PRICE = re.compile(
+    r"Originally listed for\s*("
+    rf"{_CURRENCY}\s*[\d,]+(?:\.\d+)?(?:\s*(?:CNY|RMB|JPY|USD|EUR|GBP))?"
+    r"|[\d,]+(?:\.\d+)?\s*(?:CNY|RMB|JPY|USD|EUR|GBP)"
+    r")",
+    re.I,
+)
 _COLORS_START = re.compile(r"Official colors|Colorways", re.I)
 _COLORS_STOP = re.compile(r"Features|Measurements|Product number|Tags|Notes|Images", re.I)
+
+# `[Price note]` 是自由文本，逐档价只认「金额 + (short|long length)」成对出现的写法。
+_PRICE_NOTE = re.compile(r"\[\s*Price note\s*\](.*?)(?:\[|\bRerelease\b|$)", re.I | re.S)
+_TIER = re.compile(
+    r"(?P<amount>\d[\d,]*(?:\.\d+)?)\s*"
+    r"(?P<currency>CN¥|CNY|RMB|JPY|USD|EUR|GBP|¥|￥)?\s*"
+    r"\(\s*(?P<length>short|long)(?:\s+length)?\s*\)",
+    re.I,
+)
+_SENTENCE_SPLIT = re.compile(r"(?<=[.;!?])\s+")
+_AMOUNT = re.compile(r"(\d[\d,]*(?:\.\d+)?)")
 
 # 颜色词表：只认封闭词，避免把面料/工艺词当颜色。长词优先（sax blue 先于 blue）。
 _COLOR_WORDS = (
@@ -73,6 +92,16 @@ class SearchCard:
 
 
 @dataclass(frozen=True, slots=True)
+class PriceTier:
+    """一档价格：`stage`（normal / preorder / ready_stock）× `length`（short / long）。"""
+
+    stage: str
+    length: str
+    amount: str
+    currency: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class ArchiveDetail:
     url: str
     title: str
@@ -83,6 +112,7 @@ class ArchiveDetail:
     original_price: str = ""
     colors: tuple[str, ...] = ()
     alias: str = ""
+    price_tiers: tuple[PriceTier, ...] = ()
 
 
 def _text(raw: str) -> str:
@@ -153,6 +183,64 @@ def _extract_colors(text: str) -> tuple[str, ...]:
     return tuple(colors[:8])
 
 
+def _amount(value: str) -> tuple[str, str]:
+    """把 `CN¥598` / `558 CNY` / `¥12000 JPY` 拆成 ``(数字, 币种)``。"""
+    match = _AMOUNT.search(value or "")
+    if not match:
+        return "", ""
+    prefix = value[: match.start()]
+    currency = ""
+    for token in ("CN¥", "CN$", "CNY", "RMB", "JPY", "USD", "EUR", "GBP", "¥", "￥", "$"):
+        if token in prefix:
+            currency = token
+            break
+    if not currency:
+        suffix = value[match.end():]
+        for token in ("CNY", "RMB", "JPY", "USD", "EUR", "GBP"):
+            if token.lower() in suffix.lower():
+                currency = token
+                break
+    if currency in ("CN¥", "CNY", "RMB"):
+        currency = "CNY"
+    return match.group(1).replace(",", ""), currency
+
+
+def _tier_stage(sentence: str) -> str:
+    lowered = (sentence or "").lower()
+    if "preorder" in lowered or "pre-order" in lowered:
+        return "preorder"
+    if "ready stock" in lowered or "in stock" in lowered:
+        return "ready_stock"
+    return "normal"
+
+
+def _parse_price_tiers(text: str) -> tuple[PriceTier, ...]:
+    """解析 `[Price note]` 里的逐档价（预约价/现货价 × 短款/长款）。
+
+    只认「金额 + (short length) / (long length)」成对出现的写法；某个配色单独加价这类
+    没有长短款成对标注的句子直接跳过——宁可留空，也不把数字硬填到某一档上。
+    """
+    note = _PRICE_NOTE.search(text or "")
+    if not note:
+        return ()
+    tiers: list[PriceTier] = []
+    for sentence in _SENTENCE_SPLIT.split(note.group(1)):
+        stage = _tier_stage(sentence)
+        for match in _TIER.finditer(sentence):
+            amount, currency = _amount(match.group(0))
+            if not amount:
+                continue
+            tiers.append(
+                PriceTier(
+                    stage=stage,
+                    length=match.group("length").lower(),
+                    amount=amount,
+                    currency=currency,
+                )
+            )
+    return tuple(tiers)
+
+
 def parse_item(html: str, card: SearchCard) -> ArchiveDetail:
     """解析条目页字段；拿不到就留空，不猜。"""
     text = _plain(html)
@@ -160,6 +248,11 @@ def parse_item(html: str, card: SearchCard) -> ArchiveDetail:
     number = _PRODUCT_NUMBER.search(text)
     price = _PRICE.search(text)
     colors = _extract_colors(text)
+    original_price = _text(price.group(1)) if price else ""
+    tiers = _parse_price_tiers(text)
+    amount, currency = _amount(original_price)
+    if amount and not any(tier.stage == "normal" for tier in tiers):
+        tiers = (PriceTier(stage="normal", length="", amount=amount, currency=currency), *tiers)
     return ArchiveDetail(
         url=card.url,
         title=card.title,
@@ -167,9 +260,10 @@ def parse_item(html: str, card: SearchCard) -> ArchiveDetail:
         category=card.category,
         product_number=_text(number.group(1)) if number else card.product_number,
         release_year=release.group(1) if release else "",
-        original_price=_text(price.group(1)) if price else "",
+        original_price=original_price,
         colors=colors,
         alias=card.alias,
+        price_tiers=tiers,
     )
 
 
