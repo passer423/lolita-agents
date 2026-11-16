@@ -1,0 +1,164 @@
+{
+  "version": 1,
+  "updated": "2026-11-16",
+  "note": "Lolita 术语词典：只做查询侧归一/扩展与术语门禁，不承载规范答案。规范定义仍以 content/kb 为准，kb_ref 指向对应词条。",
+  "terms": [
+    {
+      "id": "tonglo",
+      "term": "痛lo",
+      "match": ["痛lo", "痛 lo", "痛LO", "痛Lo"],
+      "aliases": ["轻装lo", "日常痛lo"],
+      "kb_ref": "term-tonglo#0",
+      "related": ["fullset", "tongbao", "tongyi"],
+      "definition_oneline": "只穿裙子本体、配基础款配饰的轻装日常穿法，不追求 fullset",
+      "common_misuse": ["把痛包/痛衣的堆周边穿法当成痛lo"]
+    },
+    {
+      "id": "tongbao",
+      "term": "痛包",
+      "match": ["痛包", "痛 包"],
+      "aliases": [],
+      "kb_ref": "term-tongbao#0",
+      "related": ["tonglo", "guzi"],
+      "definition_oneline": "挂满角色徽章、吧唧、挂件等周边的包"
+    },
+    {
+      "id": "tongyi",
+      "term": "痛衣",
+      "match": ["痛衣", "痛 衣"],
+      "aliases": [],
+      "kb_ref": "term-tongyi#0",
+      "related": ["tonglo", "tongbao"],
+      "definition_oneline": "印着角色图案或把周边别满的衣服"
+    },
+    {
+      "id": "fullset",
+      "term": "fullset",
+      "match": ["fullset", "full set", "fs"],
+      "aliases": ["大全套"],
+      "kb_ref": "term-fullset#0",
+      "related": ["tonglo"],
+      "definition_oneline": "裙子与同系列头饰、手袖、袜子、鞋成套配齐的穿法"
+    },
+    {
+      "id": "jsk",
+      "term": "JSK",
+      "match": ["JSK", "jumper skirt"],
+      "aliases": ["吊带裙", "背心裙"],
+      "kb_ref": "term-jsk-op#0",
+      "related": ["op", "sk"],
+      "definition_oneline": "Jumper Skirt，无袖吊带连衣裙，需要配内搭"
+    },
+    {
+      "id": "op",
+      "term": "OP",
+      "match": ["OP", "one-piece", "one piece"],
+      "aliases": ["连体裙", "连衣裙"],
+      "kb_ref": "term-jsk-op#0",
+      "related": ["jsk"],
+      "definition_oneline": "One-Piece，带袖连体连衣裙，一件上身"
+    },
+    {
+      "id": "sk",
+      "term": "SK",
+      "match": ["SK", "skirt"],
+      "aliases": ["半身裙"],
+      "kb_ref": "term-sk#0",
+      "related": ["jsk"],
+      "definition_oneline": "Skirt，半身裙，上身需要另配"
+    },
+    {
+      "id": "kc",
+      "term": "KC",
+      "match": ["KC", "katyusha"],
+      "aliases": ["发箍"],
+      "kb_ref": "term-kc#0",
+      "definition_oneline": "Katyusha，发箍式头饰"
+    },
+    {
+      "id": "bingtu",
+      "term": "柄图",
+      "match": ["柄图", "柄 图"],
+      "aliases": [],
+      "kb_ref": "term-bingtu#0",
+      "definition_oneline": "裙子面料上的主图案/印花设计"
+    },
+    {
+      "id": "shanzheng",
+      "term": "山正",
+      "match": ["山正", "山 正"],
+      "aliases": ["山寨正版"],
+      "kb_ref": "term-shanzheng#0",
+      "definition_oneline": "山寨与正版的区分与判断"
+    },
+    {
+      "id": "chahui",
+      "term": "茶会",
+      "match": ["茶会", "茶 会"],
+      "aliases": [],
+      "kb_ref": "term-chahui#0",
+      "definition_oneline": "lo 圈常见的线下聚会形式"
+    },
+    {
+      "id": "chuwu",
+      "term": "出物",
+      "match": ["出物", "出 物"],
+      "aliases": ["出二手"],
+      "kb_ref": "term-chuwu#0",
+      "related": ["zaifan"],
+      "definition_oneline": "出二手，把自己不穿的裙子或小物转卖"
+    },
+    {
+      "id": "guzi",
+      "term": "谷子",
+      "match": ["谷子", "谷 子"],
+      "aliases": ["吃谷", "出谷"],
+      "kb_ref": "term-guzi#0",
+      "related": ["tongbao"],
+      "definition_oneline": "goods，角色周边商品"
+    },
+    {
+      "id": "zaifan",
+      "term": "再贩",
+      "match": ["再贩", "再 贩"],
+      "aliases": ["再版", "复刻"],
+      "kb_ref": "term-zaifan#0",
+      "related": ["chuwu"],
+      "definition_oneline": "品牌把售罄或下架款式重新生产发售"
+    },
+    {
+      "id": "yuding",
+      "term": "定金和尾款",
+      "match": ["定金", "尾款", "补款"],
+      "aliases": ["出定金", "尾款你付"],
+      "kb_ref": "term-yuding#0",
+      "definition_oneline": "预约制购买先付定金、后补尾款的流程"
+    },
+    {
+      "id": "tiankongshu",
+      "term": "天空树",
+      "match": ["天空树", "天空 树"],
+      "aliases": [],
+      "kb_ref": "term-tiankongshu#0",
+      "related": ["goudan"],
+      "definition_oneline": "圈内对个子偏高的 lo 娘的称呼"
+    },
+    {
+      "id": "diqiuren",
+      "term": "地球人",
+      "match": ["地球人", "地球 人"],
+      "aliases": ["地球人女装"],
+      "kb_ref": "term-diqiuren#0",
+      "definition_oneline": "不穿 lo、只穿普通常服的人或衣服"
+    },
+    {
+      "id": "goudan",
+      "term": "狗短",
+      "match": ["狗短", "狗 短"],
+      "aliases": [],
+      "kb_ref": "term-goudan#0",
+      "related": ["tiankongshu"],
+      "definition_oneline": "圈内对裙长特别短的说法"
+    }
+  ]
+}

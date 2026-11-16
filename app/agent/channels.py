@@ -41,6 +41,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app import bridge
+from app.agent import terms
 from app.config import AppSettings
 from app.config import settings as default_settings
 
@@ -223,10 +224,65 @@ def _search_with_boundary_retry(
     return search(variant, ctx.settings, top_k=ctx.settings.top_k)
 
 
+def _dedupe_queries(queries: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in queries:
+        query = (raw or "").strip()
+        if query and query not in seen:
+            seen.add(query)
+            ordered.append(query)
+    return ordered
+
+
+def _own_queries(text: str, ctx: RecallContext, *, definition: bool) -> list[str]:
+    """own 通道的检索顺序：定义题先走术语规范写法，再退回原写法/边界/别名。
+
+    为什么规范写法排在最前：KB 里同一个术语可能有多种写法（``痛lo`` / ``痛 lo``），
+    而上游分词把「痛lo」当一个整词、把「痛 lo」切成两个词，BM25 结果会随写法
+    漂移。词典把查询统一成词条使用的写法，等于把「召回碰运气」变成确定性行为。
+    非定义题不做这一步：普通洗护/搭配题的查询不该被词典改写。
+    """
+    queries: list[str] = []
+    if definition:
+        canonical = terms.canonical_query(text, ctx.settings)
+        if canonical:
+            queries.append(canonical)
+    queries.append(text)
+    variant = _latin_cjk_variant(text)
+    if variant:
+        queries.append(variant)
+    if definition:
+        queries.extend(terms.alias_queries(text, ctx.settings))
+    return _dedupe_queries(queries)
+
+
+def _search_own(text: str, ctx: RecallContext, *, gate_text: str = "") -> list[dict]:
+    """own 检索 + 定义题术语门禁。
+
+    门禁放在**每个候选查询之后**：如果规范写法召回的是别的术语词条，先被门禁
+    丢掉，再继续尝试下一个写法；这样「问 A 命中 B 词条」不会被当成结果返回。
+    """
+    gate_text = gate_text or text
+    definition = question_intent(gate_text) == INTENT_DEFINITION
+    if definition and not terms.matched_terms(text, ctx.settings):
+        # 规划器可能把问题压短到不含术语；这时以原问题为准做规范改写与门禁。
+        text = gate_text
+    for query in _own_queries(text, ctx, definition=definition):
+        hits = bridge.search_kb(query, ctx.settings, top_k=ctx.settings.top_k)
+        if not hits:
+            continue
+        if definition:
+            hits = terms.filter_own_hits(gate_text, hits, ctx.settings)
+        if hits:
+            return hits
+    return []
+
+
 def _recall_own(
     question: str, ctx: RecallContext, query: str = "", limit: int | None = None
 ) -> list[dict]:
-    hits = _search_with_boundary_retry(bridge.search_kb, query or question, ctx)
+    hits = _search_own(query or question, ctx, gate_text=question or query)
     return _kb_evidence("own", hits, limit)
 
 

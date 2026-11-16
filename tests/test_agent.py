@@ -1078,6 +1078,43 @@ def test_own_channel_does_not_retry_without_latin_cjk_boundary(monkeypatch):
     assert calls == ["红烧肉怎么做"]
 
 
+def test_own_channel_rewrites_spaced_term_to_canonical(monkeypatch):
+    """定义题先用词典的规范写法（痛lo），不靠「首轮空 + 补空格」碰运气。"""
+    calls: list[str] = []
+
+    def search_kb(text, app, *, top_k=None):
+        calls.append(text)
+        return [_hit("bm25+vector", "term-tonglo#0")] if "痛lo" in text else []
+
+    monkeypatch.setattr(channels.bridge, "search_kb", search_kb)
+
+    result = channels.recall("own", "痛 lo 是什么意思", ctx())
+
+    assert [item["ref"] for item in result] == ["term-tonglo#0"]
+    assert calls == ["痛lo 是什么意思"]
+
+
+def test_own_channel_drops_cross_term_hit(monkeypatch):
+    """问痛包时命中痛 lo 的词条：这是错条，宁可空也不能当答案。"""
+    monkeypatch.setattr(
+        channels.bridge, "search_kb",
+        lambda *a, **k: [_hit("bm25+vector", "term-tonglo#0")],
+    )
+
+    assert channels.recall("own", "痛包是什么", ctx()) == []
+
+
+def test_own_channel_keeps_matching_term_hit(monkeypatch):
+    monkeypatch.setattr(
+        channels.bridge, "search_kb",
+        lambda *a, **k: [_hit("bm25+vector", "term-tongbao#0")],
+    )
+
+    result = channels.recall("own", "痛包是什么", ctx())
+
+    assert [item["ref"] for item in result] == ["term-tongbao#0"]
+
+
 def test_lolibrary_keyword_match(workdir):
     from app.config import AppSettings
 
