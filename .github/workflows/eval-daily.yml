@@ -31,6 +31,16 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: 把 Git Bash 加入 PATH（Windows runner）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $gitBash = 'C:\Program Files\Git\bin'
+          if (-not (Test-Path "$gitBash\bash.exe")) {
+            throw "找不到 Git Bash：$gitBash\bash.exe；self-hosted runner 需要安装 Git for Windows"
+          }
+          $gitBash | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
