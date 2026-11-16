@@ -345,6 +345,42 @@ def test_price_extraction_does_not_swallow_years(workdir):
     assert "398" in profile["price"]
 
 
+def test_price_extraction_ignores_giveaway_and_shipping_mentions(workdir):
+    """「现金100元/人」这类抽奖/运费旁述不是裙子价格，不能占掉唯一的价格位。"""
+    app = make_app(workdir)
+    ctx = RecallContext(settings=app)
+    query = dress.resolve_dress("四时花 预约价是多少", ctx)
+    evidence = [{
+        "channel": "weibo",
+        "title": "四时花 转发抽奖",
+        "text": "转发抽奖，现金100元/人，运费15元自理，红包50元",
+        "url": "https://weibo/2",
+    }]
+
+    profile = dress.build_profile(query.to_dict(), evidence, ctx, online=False)["profile"]
+
+    assert profile["price"] == ""
+    assert "价格" in profile["missing"]
+
+
+def test_price_extraction_keeps_preorder_and_deposit_next_to_noise(workdir):
+    """同一分句才算旁述：前面一句提到运费，不影响后一句的预约价/定金。"""
+    app = make_app(workdir)
+    ctx = RecallContext(settings=app)
+    query = dress.resolve_dress("四时花 预约价是多少", ctx)
+    evidence = [{
+        "channel": "weibo",
+        "title": "四时花",
+        "text": "运费自理，预约价578元，定金188元",
+        "url": "https://weibo/3",
+    }]
+
+    profile = dress.build_profile(query.to_dict(), evidence, ctx, online=False)["profile"]
+
+    assert "578" in profile["price"]
+    assert profile["price_conflict"] is False
+
+
 def test_model_hint_fills_missing_series(workdir):
     app = make_app(workdir)
     ctx = RecallContext(settings=app)
@@ -674,3 +710,4 @@ def test_online_lookup_degrades_on_network_error():
 
     assert items == []
     assert "Lolibrary 搜索失败" in error
+
