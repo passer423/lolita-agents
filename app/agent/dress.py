@@ -71,6 +71,11 @@ class Brand:
     name: str
     region: str
     aliases: tuple[str, ...] = ()
+    # 已人工核对过的小红书官方账号（`content/brands.json` 的 ``xhs_account``）。
+    # 只登记实测 ``red_official_verified`` 为真的账号；没登记的不代表品牌没有账号，
+    # 只代表我们没确认，运行时再去搜一次并缓存结果。
+    xhs_account_id: str = ""
+    xhs_account_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,12 +178,16 @@ def load_brands(app: AppSettings | None = None) -> list[Brand]:
         aliases = tuple(
             str(alias).strip() for alias in (item.get("aliases") or []) if str(alias).strip()
         )
+        account = item.get("xhs_account")
+        account = account if isinstance(account, dict) else {}
         brands.append(
             Brand(
                 id=str(item.get("id") or name).strip(),
                 name=name,
                 region=str(item.get("region") or "UNKNOWN").strip().upper(),
                 aliases=aliases,
+                xhs_account_id=str(account.get("user_id") or "").strip(),
+                xhs_account_name=str(account.get("nickname") or "").strip(),
             )
         )
     return brands
@@ -1202,6 +1211,12 @@ _PRICE_PATTERNS = (
     re.compile(r"([\d,]{2,6}(?:\.\d+)?)\s*元"),
     re.compile(r"(定金|订金|全款|尾款|预约价|现货价|到手价)\s*[:：]?\s*[¥￥]?\s*([\d,]{2,6})"),
 )
+# 「现金100元/人」「运费15元」这类旁述不是裙子价格：同一分句里带这些词就不认。
+_PRICE_NOISE_WORDS = (
+    "现金", "红包", "抽奖", "中奖", "运费", "邮费", "工资", "押金",
+    "优惠券", "返现", "报销", "补贴",
+)
+_CLAUSE_BREAK = re.compile(r"[，,。；;！!？?\n|]")
 _DATE_CN = re.compile(r"((?:19|20)\d{2})\s*年(?:\s*(\d{1,2})\s*月)?")
 _DATE_ISO = re.compile(r"((?:19|20)\d{2})[-/.](\d{1,2})(?:[-/.](\d{1,2}))?")
 _DATE_CONTEXT = ("发售", "开团", "预约", "再贩", "出荷", "上架", "尾款", "定金")
@@ -1229,6 +1244,23 @@ def _value(candidate: dict) -> str:
     return str(candidate.get("value") or "")
 
 
+def _is_price_noise(text: str, start: int, end: int) -> bool:
+    """命中「抽奖/现金/运费」等旁述的同一个分句：这个数字不是裙子价格。
+
+    只看同一分句，避免「运费自理，预约价578元」这类前半句提到运费、后半句是
+    真价格的写法被整条丢掉。
+    """
+    left = 0
+    for match in _CLAUSE_BREAK.finditer(text, 0, start):
+        left = match.end()
+    right = len(text)
+    match = _CLAUSE_BREAK.search(text, end)
+    if match:
+        right = match.start()
+    clause = text[left:right]
+    return any(word in clause for word in _PRICE_NOISE_WORDS)
+
+
 def _candidates_from_evidence(
     evidence: list[dict],
     pattern: re.Pattern,
@@ -1244,6 +1276,8 @@ def _candidates_from_evidence(
         text = f"{item.get('title') or ''} {item.get('text') or ''}"
         masked = _MASK.sub(" ", text)
         for match in pattern.finditer(masked):
+            if _is_price_noise(masked, match.start(), match.end()):
+                continue
             raw = match.group(0)
             try:
                 number = int(str(match.group(group)).replace(",", ""))
@@ -1276,6 +1310,8 @@ def _deposit_roles(evidence: list[dict]) -> list[dict]:
         text = f"{item.get('title') or ''} {item.get('text') or ''}"
         masked = _MASK.sub(" ", text)
         for match in pattern.finditer(masked):
+            if _is_price_noise(masked, match.start(), match.end()):
+                continue
             label = match.group(1)
             try:
                 number = int(str(match.group(2)).replace(",", ""))

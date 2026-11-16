@@ -13,7 +13,8 @@
 * ``own_content``  自己整理的知识库，可作规范；
 * ``third_party``  官方/档案馆数据，可作事实（但不含现价）；
 * ``realtime``     网页搜索/小红书的结果摘要，时效信息可用，来源需标注；
-* ``upstream_ugc`` 他人微博发言，**只能写成「有网友提到」，不得当规范**。
+* ``upstream_ugc`` 他人微博发言，**只能写成「有网友提到」，不得当规范**；
+* ``image_text``   原帖配图的机器识别文字，**未校验**，只能写成「图上标着…」。
 
 六通道：
 
@@ -40,6 +41,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app import bridge
+from app.agent import terms
 from app.config import AppSettings
 from app.config import settings as default_settings
 
@@ -222,10 +224,65 @@ def _search_with_boundary_retry(
     return search(variant, ctx.settings, top_k=ctx.settings.top_k)
 
 
+def _dedupe_queries(queries: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in queries:
+        query = (raw or "").strip()
+        if query and query not in seen:
+            seen.add(query)
+            ordered.append(query)
+    return ordered
+
+
+def _own_queries(text: str, ctx: RecallContext, *, definition: bool) -> list[str]:
+    """own 通道的检索顺序：定义题先走术语规范写法，再退回原写法/边界/别名。
+
+    为什么规范写法排在最前：KB 里同一个术语可能有多种写法（``痛lo`` / ``痛 lo``），
+    而上游分词把「痛lo」当一个整词、把「痛 lo」切成两个词，BM25 结果会随写法
+    漂移。词典把查询统一成词条使用的写法，等于把「召回碰运气」变成确定性行为。
+    非定义题不做这一步：普通洗护/搭配题的查询不该被词典改写。
+    """
+    queries: list[str] = []
+    if definition:
+        canonical = terms.canonical_query(text, ctx.settings)
+        if canonical:
+            queries.append(canonical)
+    queries.append(text)
+    variant = _latin_cjk_variant(text)
+    if variant:
+        queries.append(variant)
+    if definition:
+        queries.extend(terms.alias_queries(text, ctx.settings))
+    return _dedupe_queries(queries)
+
+
+def _search_own(text: str, ctx: RecallContext, *, gate_text: str = "") -> list[dict]:
+    """own 检索 + 定义题术语门禁。
+
+    门禁放在**每个候选查询之后**：如果规范写法召回的是别的术语词条，先被门禁
+    丢掉，再继续尝试下一个写法；这样「问 A 命中 B 词条」不会被当成结果返回。
+    """
+    gate_text = gate_text or text
+    definition = question_intent(gate_text) == INTENT_DEFINITION
+    if definition and not terms.matched_terms(text, ctx.settings):
+        # 规划器可能把问题压短到不含术语；这时以原问题为准做规范改写与门禁。
+        text = gate_text
+    for query in _own_queries(text, ctx, definition=definition):
+        hits = bridge.search_kb(query, ctx.settings, top_k=ctx.settings.top_k)
+        if not hits:
+            continue
+        if definition:
+            hits = terms.filter_own_hits(gate_text, hits, ctx.settings)
+        if hits:
+            return hits
+    return []
+
+
 def _recall_own(
     question: str, ctx: RecallContext, query: str = "", limit: int | None = None
 ) -> list[dict]:
-    hits = _search_with_boundary_retry(bridge.search_kb, query or question, ctx)
+    hits = _search_own(query or question, ctx, gate_text=question or query)
     return _kb_evidence("own", hits, limit)
 
 
@@ -483,14 +540,79 @@ def _search_evidence(channel: str, results: list, limit: int | None = None) -> l
             # 这两个字段不进写作提示词，只有代码侧读它们。
             "image_count": int(getattr(r, "image_count", 0) or 0),
             "image_urls": list(getattr(r, "image_urls", None) or []),
+            # 作者只用于判断「是不是品牌官方账号发的」，不进提示词。
+            "author_id": str(getattr(r, "author_id", "") or ""),
+            "author_name": str(getattr(r, "author_name", "") or ""),
         }
         for r in results
     ]
 
 
+# 会去读官方账号主页的问题类型：定价与开团/再贩时间。洗护、尺码、搭配不在此列，
+# 那些问题看官方上新帖也用不上，不该为它多等。
+_OFFICIAL_INTENT_MARKERS = (
+    "价格", "多少钱", "定价", "定金", "尾款", "预约", "现货", "再贩", "开团",
+    "上新", "发售", "开售", "排期", "截止", "活动价", "优惠", "什么时候",
+)
+
+
+def _mark_official(items: list[dict], account: dict) -> bool:
+    """把官方账号发的证据标出来；返回是否有命中。
+
+    比对用 ``author_id``：约 10% 的笔记没有作者字段，这些会漏判——已知且接受，
+    不为了补作者再打一次接口。
+    """
+    user_id = str((account or {}).get("user_id") or "")
+    if not user_id:
+        return False
+    hit = False
+    for item in items:
+        if str(item.get("author_id") or "") == user_id:
+            item["official"] = True
+            hit = True
+    return hit
+
+
+def _official_evidence(
+    question: str, ctx: RecallContext, items: list[dict], limit: int | None
+) -> list[dict]:
+    """品牌官方账号的补充证据：现有召回里没有官方帖时，才去账号主页拿。
+
+    顺序固定：品牌 → 官方账号（白名单/缓存/搜一次）→ 已有结果里标记 → 还不够
+    才读账号主页一页。任何一步失败都返回空表，调用方照旧用现有 UGC 召回。
+    """
+    from app.services import xhs_accounts
+
+    brand, series = xhs_accounts.brand_for_question(question, ctx.settings)
+    if brand is None:
+        return []
+    account = xhs_accounts.resolve(brand, ctx.settings)
+    if not account:
+        return []
+    # 标记是免费的（只是比对已有结果的 author_id），所以先做。
+    if _mark_official(items, account):
+        return []
+    # 读主页要花请求，只为「定价/开团/再贩时间」这类问题花——洗护、尺码、搭配
+    # 问了也用不上官方上新帖，不该让它们多等一两秒。
+    if not any(marker in question for marker in _OFFICIAL_INTENT_MARKERS):
+        return []
+    notes = xhs_accounts.official_notes(account, ctx.settings, series=series)
+    if not notes:
+        return []
+    from app.services import xhs_search
+
+    extra = _search_evidence("xhs", xhs_search._notes_to_results(notes), limit)
+    nickname = str(account.get("nickname") or "")
+    for item in extra:
+        item["official"] = True
+        item["official_account"] = nickname
+    return extra
+
+
 def _recall_xhs(
     question: str, ctx: RecallContext, query: str = "", limit: int | None = None
 ) -> list[dict]:
+    from app.agent import image_evidence
     from app.services import xhs_search
 
     results = xhs_search.search(
@@ -498,7 +620,18 @@ def _recall_xhs(
         ctx.settings,
         max_results=ctx.settings.xhs_max_results,
     )
-    return _search_evidence("xhs", results, limit)
+    items = _search_evidence("xhs", results, limit)
+    # 官方账号是增强：查不到就什么也不加，现有召回与排序不受影响。
+    try:
+        items.extend(_official_evidence(question, ctx, items, limit))
+    except Exception as exc:  # noqa: BLE001 - 账号链路失败不能拖垮召回
+        logger.warning("官方账号链路失败，跳过：%s: %s", type(exc).__name__, exc)
+    # 图里的字是**另一条证据**：不拼进原帖正文。识别失败只缺这一条，不影响召回。
+    try:
+        items.extend(image_evidence.collect(question, items, ctx))
+    except Exception as exc:  # noqa: BLE001 - 图片识别属于增强，不能拖垮整路召回
+        logger.warning("图片文字识别失败，跳过：%s: %s", type(exc).__name__, exc)
+    return items
 
 
 def _host(url: str) -> str:

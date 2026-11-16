@@ -32,9 +32,10 @@ _EXPLORE_URL = (
 # 每条多一次请求，再多就只是拖慢整体预算。
 _DETAIL_LIMIT = 3
 
-# 配图只留前几张 URL：提示语只需要「有没有图、有几张」，原图 URL 给用户点开用。
+# 配图只留前几张 URL：提示语和按需 OCR 只需要少量图，原图 URL 给用户点开用。
 # 全量存进缓存没必要，一条笔记 18 张图会把缓存撑大且没人用。
-IMAGE_URL_LIMIT = 2
+# OCR 单条证据最多读 3 张，所以这里留 3；缓存结构不变，旧的 2 张缓存仍可用。
+IMAGE_URL_LIMIT = 3
 
 # 进程 PATH 可能是「装 Node 之前」的快照（服务先于 Node 启动），此时 PyExecJS
 # 会退化到 Windows 的 JScript，签名跑不起来。补上常见安装目录即可。
@@ -115,6 +116,22 @@ def _image_fields(card: dict) -> dict:
     return {"image_count": len(images), "images": urls}
 
 
+def _author_fields(note: dict, card: dict) -> dict:
+    """作者信息：搜索卡片 / 详情卡片都在 ``user`` 里，约 10% 的笔记没有。
+
+    没有就留空——为了补作者再打一次用户接口不划算，也不该为它加超时。
+    """
+    user = card.get("user") or note.get("user") or {}
+    if not isinstance(user, dict):
+        return {"author": {}}
+    return {
+        "author": {
+            "user_id": str(user.get("user_id") or "").strip(),
+            "nickname": str(user.get("nickname") or user.get("nick_name") or "").strip(),
+        }
+    }
+
+
 def _note_to_dict(note: dict) -> dict:
     """把 Spider_XHS 搜索返回的 note item 转成 xhs_search 的 notes 结构。"""
     card = note.get("note_card") or {}
@@ -129,6 +146,7 @@ def _note_to_dict(note: dict) -> dict:
         "content": content,
         "comments": [],
         **_image_fields(card),
+        **_author_fields(note, card),
     }
 
 
@@ -217,3 +235,84 @@ def fetch_notes(
         raise error
     value = box.get("value")
     return value if isinstance(value, list) else []
+
+
+# 官方账号主页的「情报帖」标题特征：正文往往也要靠详情才看得到价格，
+# 但标题先说清楚这条是不是上新/再贩/开团，用来挑要先取详情的那几条。
+_ACCOUNT_INTENT_MARKERS = (
+    "上新", "再贩", "开团", "预约", "现货", "活动", "权益卡", "排期", "掉落", "开售",
+)
+
+
+def _account_note_to_dict(card: dict) -> dict:
+    """账号主页卡片是扁平的（没有 ``note_card``，也没有 image_list/desc）。"""
+    title = str(card.get("display_title") or card.get("title") or "").strip()
+    note_id = str(card.get("note_id") or card.get("id") or "")
+    token = str(card.get("xsec_token") or "")
+    url = _EXPLORE_URL.format(note_id=note_id, token=token) if note_id else ""
+    return {
+        "title": title,
+        "url": url,
+        "content": "",
+        "comments": [],
+        "image_count": 0,
+        "images": [],
+        **_author_fields({}, card),
+    }
+
+
+def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
+    lowered = (text or "").lower()
+    return any(term and term.lower() in lowered for term in terms)
+
+
+def fetch_account_notes(
+    user_id: str,
+    app: AppSettings,
+    *,
+    series: tuple[str, ...] = (),
+    limit: int = 2,
+    probe: int = 3,
+) -> list[dict]:
+    """读官方账号主页第一页，挑几条取详情，返回可当证据的 notes。
+
+    账号主页只有标题、没有正文（2233 条的账号也不会翻历史），所以：
+
+    * 只读一页（32 条），标题命中系列名的排前面，其次「上新/再贩/现货」这类情报帖；
+    * 至多取 ``probe`` 条详情（每条一次请求），取完再按系列名过滤——系列名常常
+      只写在正文里，光看标题会漏；
+    * 过完滤是空就返回空，调用方照旧走现有召回，不因为找不到而换答案。
+    """
+    XHS_Apis, XHSPcAuth = _load_api(app)
+    try:
+        api = XHS_Apis(XHSPcAuth.from_cookie(str(app.xhs_cookie).strip()))
+        success, msg, payload = api.get_user_note_info(user_id, "", "", "pc_search")
+    except Exception as exc:  # noqa: BLE001 - 账号链路整体是增强，失败一律回退
+        raise XhsUnavailable(f"Spider_XHS 账号主页失败：{exc}") from exc
+    if not success:
+        raise XhsUnavailable(f"Spider_XHS 账号主页失败：{msg}")
+
+    cards = ((payload or {}).get("data") or {}).get("notes") or []
+    if not isinstance(cards, list):
+        return []
+    titles = [_account_note_to_dict(card) for card in cards if isinstance(card, dict)]
+
+    def rank(item: dict) -> tuple[int, int]:
+        title = item["title"]
+        series_hit = 1 if _contains_any(title, series) else 0
+        intent_hit = 1 if any(marker in title for marker in _ACCOUNT_INTENT_MARKERS) else 0
+        return (-series_hit, -intent_hit)
+
+    picked = [item for item in sorted(titles, key=rank) if item["url"]][: max(0, probe)]
+
+    details: list[dict] = []
+    for item in picked:
+        _fill_detail(api, item)
+        if not item["content"]:
+            continue
+        if series and not (_contains_any(item["title"], series) or _contains_any(item["content"], series)):
+            continue
+        details.append(item)
+        if len(details) >= max(0, limit):
+            break
+    return details

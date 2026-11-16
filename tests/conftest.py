@@ -32,6 +32,8 @@ def _prepare() -> None:
     os.environ["LLM_API_KEY"] = ""
     os.environ["SEARCH_ENABLED"] = "false"
     os.environ["XHS_ENABLED"] = "false"
+    # 图片识别会真下载 / 真跑 OCR：测试默认关掉，需要它的用例显式打开。
+    os.environ["OCR_ENABLED"] = "false"
 
 
 _prepare()

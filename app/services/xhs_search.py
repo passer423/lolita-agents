@@ -31,7 +31,11 @@ CACHE_TTL_SECONDS = 6 * 3600
 
 # 缓存结构版本。v1 的 notes 里没有配图字段，读进来会让「图里可能有价格表」
 # 的提示整整 6 小时不出现，看起来像功能没生效。版本不匹配就跳过并重抓。
-CACHE_VERSION = 2
+# v2 已含 image_count / images；之后只把保留的图片 URL 上限从 2 提到 3，
+# 结构没变，旧 v2 缓存继续可用（只是少一张图），所以不升版本。
+# v3 起 notes 带 author：旧缓存读进来会让「是不是官方账号发的」一直判不出来，
+# 而这类判断错了会直接影响价格该信谁，所以版本不匹配就重抓。
+CACHE_VERSION = 3
 
 
 class XhsUnavailable(RuntimeError):
@@ -149,6 +153,7 @@ def _notes_to_results(notes: list[dict]) -> list[web_search.SearchResult]:
             [content, *(str(item).strip() for item in comments if str(item).strip())]
         )
         image_urls = [str(item) for item in (note.get("images") or []) if str(item).strip()]
+        author = note.get("author") if isinstance(note.get("author"), dict) else {}
         results.append(
             web_search.SearchResult(
                 title=title,
@@ -159,6 +164,8 @@ def _notes_to_results(notes: list[dict]) -> list[web_search.SearchResult]:
                 provider="xiaohongshu",
                 image_count=int(note.get("image_count") or len(image_urls)),
                 image_urls=image_urls,
+                author_id=str(author.get("user_id") or "").strip(),
+                author_name=str(author.get("nickname") or "").strip(),
             )
         )
     return results

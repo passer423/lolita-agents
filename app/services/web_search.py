@@ -41,6 +41,10 @@ class SearchResult:
     # 微博 / 网页通道没有这个信息，默认值让它们零改动。
     image_count: int = 0
     image_urls: list[str] = field(default_factory=list)
+    # 小红书笔记作者。用来判断这条是不是品牌官方账号发的：官方帖的定价/开团/再贩
+    # 时间可以直接采信。约 10% 的搜索卡片没有作者字段，取不到就留空，不做额外请求。
+    author_id: str = ""
+    author_name: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -53,6 +57,8 @@ class SearchResult:
             "provider": self.provider,
             "image_count": self.image_count,
             "image_urls": list(self.image_urls),
+            "author_id": self.author_id,
+            "author_name": self.author_name,
         }
 
 

@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from app.agent import graph, trace
@@ -467,9 +469,9 @@ def test_price_question_with_images_appends_fixed_template_once():
     assert text.startswith("[1] 目前没有明确价格。")
     assert "[1] 那条笔记含 18 张图" in text
     assert "可能含价格表" in text
-    assert "以原帖图片为准" in text
-    # 全答案最多一条：两条带图证据也只出现一次「为准」
-    assert text.count("为准") == 1
+    # 自查引导最多一次，且不再反复说「以原图为准」。
+    assert text.count(writer_mod.SOURCE_GUIDE) == 1
+    assert "以原图为准" not in text and "未校验" not in text
 
 
 def test_hint_points_at_the_price_table_post():
@@ -495,7 +497,7 @@ def test_size_question_uses_size_template():
     text = writer.write("M 码胸围多少", _image_evidence())
 
     assert "可能含尺码表" in text
-    assert "尺码请以原帖图片为准" in text
+    assert writer_mod.SOURCE_GUIDE in text
 
 
 def test_stream_appends_hint_at_end_once():
@@ -503,5 +505,349 @@ def test_stream_appends_hint_at_end_once():
 
     text = "".join(writer.stream("四时花价格", _image_evidence()))
 
-    assert text.endswith("价格请以原帖图片为准。")
-    assert text.count("为准") == 1
+    assert text.endswith("价格" + writer_mod.SOURCE_GUIDE + "。")
+    assert text.count(writer_mod.SOURCE_GUIDE) == 1
+
+
+# ---------------------------------------------------------------- 多帖数值比对
+
+
+def _claim(n: int, text: str, *, source_kind: str = "upstream_ugc", title: str = "四时花 讨论"):
+    return {
+        "n": n,
+        "channel": "xhs",
+        "source_kind": source_kind,
+        "ref": f"x{n}",
+        "title": title,
+        "text": text,
+        "url": f"https://example.com/{n}",
+    }
+
+
+def test_number_consensus_three_posts_agree():
+    ev = [
+        _claim(1, "长款预约价 578 元"),
+        _claim(3, "长款预约价 578"),
+        _claim(4, "长款预约价 578"),
+    ]
+    result = writer_mod.number_consensus("四时花价格", ev)
+
+    assert result["triggered"] is True
+    assert result["groups"][0]["high"] is True
+    assert "长款预约价" in result["text"]
+    assert "多帖一致（[1][3][4]）" in result["text"]
+    # 数字在正文里已经带 [n] 给过，归因段不再列一遍
+    assert "578" not in result["text"]
+    assert "已验证" not in result["text"] and "已校验" not in result["text"]
+
+
+def test_number_consensus_five_posts_three_agree():
+    ev = [
+        _claim(1, "长款预约价 578 元"),
+        _claim(2, "长款预约价 598 元"),
+        _claim(3, "长款预约价 578"),
+        _claim(4, "长款预约价 588 元"),
+        _claim(5, "长款预约价 578"),
+    ]
+    result = writer_mod.number_consensus("四时花价格", ev)
+    group = result["groups"][0]
+
+    assert group["high"] is True
+    assert group["value"] == "578"
+    assert group["refs"] == [1, 3, 5]
+    assert "多帖一致（[1][3][5]）" in result["text"]
+
+
+def test_number_consensus_two_posts_conflict():
+    ev = [_claim(1, "长款预约价 578 元"), _claim(3, "长款预约价 598 元")]
+    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+
+    assert "对不上" in out
+    assert "长款预约价 [1][3] 对不上" in out
+    assert "578" not in out and "598" not in out
+    assert "都没写团次或日期" in out
+    assert "无法判断哪个更新" in out
+    assert "下单前按卖家当前页面或最新一帖确认" in out
+
+
+def test_attribution_by_style_when_one_post_lists_two_skus():
+    """同一条帖子把长款/短款写成两个价：这是款式差异，不是同档位改价。"""
+    ev = [
+        {
+            "n": 6,
+            "channel": "image_text",
+            "source_kind": "image_text",
+            "ref": "x6#image_text",
+            "title": "四时花｜图上文字（OCR，未校验）",
+            "text": "图 1：长款本体：预约价 578 元。\n图 2：短款本体：预约价 568 元。",
+            "url": "",
+        }
+    ]
+    result = writer_mod.number_consensus("四时花价格", ev)
+    out = result["text"]
+    attrs = "".join(result["attributions"])
+
+    assert "不同款式" in attrs
+    # 归因只讲理由，不再把上一句已经带 [6] 给过的数字复述一遍
+    assert "578" not in attrs and "568" not in attrs
+    assert "长款" in attrs and "短款" in attrs
+    assert "不是同一档位改价" in attrs
+    assert "无法判断" not in out
+
+
+def test_attribution_by_time_when_posts_carry_dates():
+    ev = [
+        _claim(1, "2024 年 10 月 四时花 长款预约价 578 元"),
+        _claim(3, "2025 年 3 月 四时花 长款预约价 568 元"),
+    ]
+    result = writer_mod.number_consensus("四时花价格", ev)
+    attrs = "".join(result["attributions"])
+
+    assert "[1] 提到 2024年10月" in attrs
+    assert "[3] 提到 2025年3月" in attrs
+    assert "换批改价" in attrs
+    assert "无法确定哪个是当前价格" in attrs
+    # 时间要留（那是判断新旧的理由），价格数字不复述
+    assert "578" not in attrs and "568" not in attrs
+
+
+def test_attribution_says_what_is_missing_instead_of_inventing():
+    ev = [_claim(1, "长款预约价 578 元"), _claim(3, "长款预约价 568 元")]
+    result = writer_mod.number_consensus("四时花价格", ev)
+    attrs = "".join(result["attributions"])
+
+    assert "都没写团次或日期" in attrs
+    assert "[1]" in attrs and "[3]" in attrs
+    # 不能凭空造批次/日期。
+    assert not re.search(r"20\d{2}", attrs)
+    assert "团次" not in attrs.replace("都没写团次或日期", "")
+    assert "无法判断哪个更新" in attrs
+    # 归因不复述价格数字
+    assert "578" not in attrs and "568" not in attrs
+
+
+def test_attribution_merges_dimensions_with_the_same_missing_reason():
+    """多个维度同证据、同原因时并成一句，不再按维度重复"来自不同帖子"。"""
+    ev = [
+        _claim(6, "长款尾款 390 元，现货价 598 元"),
+        _claim(8, "长款尾款 380 元，现货价 588 元"),
+    ]
+    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+
+    assert out.count("来自不同帖子") == 1
+    assert "这几条帖子在现货价、尾款上对不上" in out
+    assert "[6][8]" in out
+    assert "都没写团次或日期" in out
+    assert "无法判断哪个更新" in out
+    assert out.count("下单前") == 1
+    # 数字仍只靠上一句带 [n]，合并句里不复述
+    for value in ("390", "380", "598", "588"):
+        assert value not in out
+    # 合并后不再先按维度列一遍
+    assert "关于价格，几条帖子对不上" not in out
+
+
+def test_attribution_keeps_dimensions_apart_when_evidence_differs():
+    """证据不是同一组，就不能合并——否则会把两组不同来源说成一件事。"""
+    ev = [
+        _claim(1, "长款尾款 390 元"),
+        _claim(3, "长款尾款 380 元"),
+        _claim(2, "长款现货价 598 元"),
+        _claim(4, "长款现货价 588 元"),
+    ]
+    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+
+    assert "这几条帖子" not in out
+    assert out.count("来自不同帖子") == 2
+    assert "[1][3]" in out and "[2][4]" in out
+
+
+def test_attribution_explains_two_images_in_the_same_post():
+    """同帖两张图给出两个数（实测 578 / 568）：说清帖子里没交代哪个是新价。"""
+    ev = [
+        {
+            "n": 6,
+            "channel": "image_text",
+            "source_kind": "image_text",
+            "ref": "x6#image_text",
+            "title": "四时花｜图上文字（OCR，未校验）",
+            "text": "图 2：长款本体：预约价 578 元。\n图 3：长款本体：预约价 568 元。",
+            "url": "",
+        }
+    ]
+    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+
+    assert "同一条帖子（[6]）" in out
+    # 数字在上一句已经带 [6] 给过，归因只讲「帖子里没交代哪个是新价」
+    assert "578" not in out and "568" not in out
+    assert "数字对不上" in out
+    assert "长款预约价" in out
+    assert "无法判断哪个是当前价格" in out
+    assert "下单前按卖家当前页面或最新一帖确认" in out
+
+
+def test_number_consensus_two_equal_posts_are_listed_not_called_consistent():
+    ev = [_claim(1, "长款预约价 578 元"), _claim(3, "长款预约价 578 元")]
+    result = writer_mod.number_consensus("四时花价格", ev)
+
+    assert "多帖一致" not in result["text"]
+    assert "对不上" not in result["text"]
+    assert "[1][3] 说法一致" in result["text"]
+    assert "578" not in result["text"]
+
+
+def test_number_consensus_two_vs_two_is_not_high_confidence():
+    ev = [
+        _claim(1, "长款预约价 578 元"),
+        _claim(2, "长款预约价 578 元"),
+        _claim(3, "长款预约价 598 元"),
+        _claim(4, "长款预约价 598 元"),
+    ]
+    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+
+    assert "多帖一致" not in out
+    assert "对不上" in out
+    assert "[1][2][3][4]" in out
+    assert "578" not in out and "598" not in out
+
+
+def test_number_consensus_does_not_cross_sku():
+    ev = [_claim(1, "长款预约价 578 元"), _claim(3, "短款预约价 598 元")]
+
+    assert writer_mod.number_consensus("四时花价格", ev)["text"] == ""
+
+
+def test_number_consensus_needs_two_items():
+    assert writer_mod.number_consensus("四时花价格", [_claim(1, "长款预约价 578 元")])["text"] == ""
+
+
+def test_number_consensus_skips_non_numeric_question():
+    ev = [_claim(1, "长款预约价 578 元"), _claim(3, "长款预约价 598 元")]
+
+    assert writer_mod.number_consensus("四时花怎么洗", ev)["text"] == ""
+
+
+def test_number_consensus_keeps_ocr_refs_without_restating_values():
+    ocr_text = (
+        "天丝 OP 长款本体：预约价 578 元，由定金 188 元加尾款 390 元组成；"
+        "现货价 598 元。"
+    )
+    ev = [
+        _claim(1, "长款预约价 598 元"),
+        {
+            "n": 4,
+            "channel": "image_text",
+            "source_kind": "image_text",
+            "ref": "x4#image_text",
+            "title": "四时花｜图上文字（OCR，未校验）",
+            "text": "（OCR，未校验）\n图 1：" + ocr_text,
+            "url": "https://example.com/4",
+        },
+    ]
+    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+
+    # 只交代哪几条对不上，OCR 那串数字不在归因段重复
+    assert "长款预约价 [1][4] 对不上" in out
+    for value in ("188", "390", "578", "598"):
+        assert value not in out
+    assert "未校验" not in out and "原图" not in out
+    assert "已验证" not in out and "已校验" not in out
+
+
+def test_number_consensus_never_invents_numbers():
+    ev = [_claim(1, "长款预约价 578 元"), _claim(3, "长款预约价 598 元")]
+    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+
+    assert "999" not in out
+    assert "188" not in out and "390" not in out
+
+
+def test_number_consensus_size_values():
+    ev = [_claim(1, "长款尺码 M"), _claim(2, "长款尺码 L")]
+    out = writer_mod.number_consensus("四时花尺码", ev)["text"]
+
+    assert "长款尺码" in out
+    assert "[1] 写 M" in out and "[2] 写 L" in out
+
+
+def test_write_appends_number_consensus_and_diagnostics():
+    ev = [_claim(1, "长款预约价 578 元"), _claim(3, "长款预约价 598 元")]
+    writer = make_writer(content="[1] 长款预约价 578 元。[3]")
+
+    text = writer.write("四时花价格", ev)
+
+    assert "几条帖子对不上" in text
+    assert writer.usage["diagnostics"]["number_consensus"]["triggered"] is True
+
+
+def test_stream_appends_number_consensus_after_answer():
+    ev = [_claim(1, "长款预约价 578 元"), _claim(3, "长款预约价 598 元")]
+    writer = make_writer(chunks=["[1] 长款预约价 578 元。"])
+
+    text = "".join(writer.stream("四时花价格", ev))
+
+    assert "几条帖子对不上" in text
+    assert text.index("几条帖子对不上") > text.index("[1] 长款预约价 578 元")
+
+
+def _sentences_with_digits(text: str) -> list[str]:
+    # 分号是句内停顿，编号常挂在整句末尾，不能把前半截当成独立一句。
+    return [part for part in re.split(r"[。\n]", text) if re.search(r"\d", part)]
+
+
+def test_write_ocr_price_answer_has_no_annotations_and_one_guide():
+    """句末不再出现「未校验 / 原图」，引导最多一次，数字旁仍有 [n]。"""
+    ocr_text = (
+        "天丝 OP 长款本体：预约价 578 元，由定金 188 元加尾款 390 元组成；"
+        "现货价 598 元。"
+    )
+    ev = [
+        _claim(1, "长款预约价 598 元"),
+        {
+            "n": 4,
+            "channel": "image_text",
+            "source_kind": "image_text",
+            "ref": "x4#image_text",
+            "title": "四时花｜图上文字（OCR，未校验）",
+            "text": "图 1：" + ocr_text,
+            "url": "https://example.com/4",
+        },
+    ]
+    writer = make_writer(
+        content="预约价 578 元，由定金 188 元加尾款 390 元组成；现货价 598 元[4]。"
+    )
+
+    text = writer.write("四时花价格", ev)
+
+    for marker in ("未校验", "原图", "已验证", "已校验"):
+        assert marker not in text
+    assert text.count(writer_mod.SOURCE_GUIDE) == 1
+    assert "[4]" in text
+    for sentence in _sentences_with_digits(text):
+        assert re.search(r"\[\d+\]", sentence), sentence
+
+
+def test_stream_ocr_price_answer_keeps_one_guide_and_citations():
+    ocr_text = "天丝 OP 长款本体：预约价 578 元，由定金 188 元加尾款 390 元组成；现货价 598 元。"
+    ev = [
+        _claim(1, "长款预约价 598 元"),
+        {
+            "n": 4,
+            "channel": "image_text",
+            "source_kind": "image_text",
+            "ref": "x4#image_text",
+            "title": "四时花｜图上文字（OCR，未校验）",
+            "text": "图 1：" + ocr_text,
+            "url": "https://example.com/4",
+        },
+    ]
+    writer = make_writer(
+        chunks=["预约价 578 元，由定金 188 元加尾款 390 元组成；现货价 598 元[4]。"]
+    )
+
+    text = "".join(writer.stream("四时花价格", ev))
+
+    assert text.count(writer_mod.SOURCE_GUIDE) == 1
+    assert "[4]" in text
+    for sentence in _sentences_with_digits(text):
+        assert re.search(r"\[\d+\]", sentence), sentence

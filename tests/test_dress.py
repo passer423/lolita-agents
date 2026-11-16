@@ -345,6 +345,42 @@ def test_price_extraction_does_not_swallow_years(workdir):
     assert "398" in profile["price"]
 
 
+def test_price_extraction_ignores_giveaway_and_shipping_mentions(workdir):
+    """「现金100元/人」这类抽奖/运费旁述不是裙子价格，不能占掉唯一的价格位。"""
+    app = make_app(workdir)
+    ctx = RecallContext(settings=app)
+    query = dress.resolve_dress("四时花 预约价是多少", ctx)
+    evidence = [{
+        "channel": "weibo",
+        "title": "四时花 转发抽奖",
+        "text": "转发抽奖，现金100元/人，运费15元自理，红包50元",
+        "url": "https://weibo/2",
+    }]
+
+    profile = dress.build_profile(query.to_dict(), evidence, ctx, online=False)["profile"]
+
+    assert profile["price"] == ""
+    assert "价格" in profile["missing"]
+
+
+def test_price_extraction_keeps_preorder_and_deposit_next_to_noise(workdir):
+    """同一分句才算旁述：前面一句提到运费，不影响后一句的预约价/定金。"""
+    app = make_app(workdir)
+    ctx = RecallContext(settings=app)
+    query = dress.resolve_dress("四时花 预约价是多少", ctx)
+    evidence = [{
+        "channel": "weibo",
+        "title": "四时花",
+        "text": "运费自理，预约价578元，定金188元",
+        "url": "https://weibo/3",
+    }]
+
+    profile = dress.build_profile(query.to_dict(), evidence, ctx, online=False)["profile"]
+
+    assert "578" in profile["price"]
+    assert profile["price_conflict"] is False
+
+
 def test_model_hint_fills_missing_series(workdir):
     app = make_app(workdir)
     ctx = RecallContext(settings=app)
@@ -674,3 +710,64 @@ def test_online_lookup_degrades_on_network_error():
 
     assert items == []
     assert "Lolibrary 搜索失败" in error
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("Originally listed for CN¥598", "CN¥598"),
+    ("Originally listed for CNY598", "CNY598"),
+    ("Originally listed for RMB 598", "RMB 598"),
+    ("Originally listed for 598 CNY", "598 CNY"),
+    ("Originally listed for ¥12000 JPY", "¥12000 JPY"),
+])
+def test_online_price_accepts_currency_variants(raw, expected):
+    card = lolibrary_online.SearchCard(url="https://lolibrary.org/items/x", title="X")
+
+    detail = lolibrary_online.parse_item(f"<div><p>{raw}</p></div>", card)
+
+    assert detail.original_price == expected
+
+
+CN_ITEM_HTML = """
+<div>
+  <p>Released in <span class="text-regular">2025</span></p>
+  <p>No product number recorded. Originally listed for CN¥598</p>
+  <div>Notes [Price note] Available for 558 CNY (short length) or 578 CNY (long length)
+  if bought during the preorder period. Ready stock price is 578 CNY (short length)
+  or 598 CNY (long length). Gray floral print colorway was slightly more expensive
+  (588 CNY preorder/608 CNY ready stock for short length). Rerelease of an item from 2023.</div>
+</div>
+"""
+
+
+def test_online_parses_price_note_tiers():
+    """逐档价要落成 normal / preorder / ready_stock × short / long，认不出就留空。"""
+    card = lolibrary_online.SearchCard(
+        url="https://lolibrary.org/items/cn-four-seasons-flower-op",
+        title="Four Seasons Flower OP",
+    )
+
+    detail = lolibrary_online.parse_item(CN_ITEM_HTML, card)
+
+    assert detail.original_price == "CN¥598"
+    tiers = {(tier.stage, tier.length): tier.amount for tier in detail.price_tiers}
+    assert tiers == {
+        ("normal", ""): "598",
+        ("preorder", "short"): "558",
+        ("preorder", "long"): "578",
+        ("ready_stock", "short"): "578",
+        ("ready_stock", "long"): "598",
+    }
+    # 某个配色单独加价的那句没有长短款成对标注，不能被硬填进任何一档
+    assert "588" not in {tier.amount for tier in detail.price_tiers}
+    assert {tier.currency for tier in detail.price_tiers} == {"CNY"}
+
+
+def test_online_without_price_note_only_has_normal_tier():
+    card = lolibrary_online.SearchCard(url="https://lolibrary.org/items/y", title="Y")
+
+    detail = lolibrary_online.parse_item(ITEM_HTML, card)
+
+    assert detail.price_tiers[0].stage == "normal"
+    assert detail.price_tiers[0].amount == "12000"
+    assert all(tier.stage == "normal" for tier in detail.price_tiers)
+

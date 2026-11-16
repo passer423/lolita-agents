@@ -19,6 +19,9 @@ pytest-cache-files-*/
 .ruff_cache/
 tests/.data/
 tests/.tmp/
+# 本地评测报告（含题目、回答与本机路径）与自定义 pytest 临时目录
+eval/reports/
+.pytest_tmp_*/
 .screenshots/
 __pycache__/
 *.py[cod]
