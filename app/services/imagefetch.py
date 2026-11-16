@@ -9,10 +9,27 @@ from __future__ import annotations
 
 import ssl
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 FETCH_TIMEOUT = 8.0
 FETCH_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) lolita-agents/0.1"
+
+
+def referer_for(url: str) -> str:
+    """图床防盗链需要的 Referer；不需要时返回空串。
+
+    实测新浪图床（``*.sinaimg.cn``，微博配图）不带 Referer 一律 403，
+    带上微博来源就能正常下载。其他图床不加，避免无谓地伪造来源。
+    """
+    host = (urlparse(url).hostname or "").lower()
+    if (
+        host.endswith("sinaimg.cn")
+        or host.endswith("weibo.com")
+        or host.endswith("weibo.cn")
+    ):
+        return "https://m.weibo.cn/"
+    return ""
 
 
 class FetchError(RuntimeError):

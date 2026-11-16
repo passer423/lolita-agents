@@ -5,7 +5,7 @@
 必须同时满足：
 
 1. 问题是价格 / 尺码 / 预约这类**要具体数值**的问法；
-2. 至少一条带图的小红书证据满足下列之一：
+2. 至少一条带图的小红书 / 微博证据满足下列之一：
    * 正文有「标在图上 / 见图 / 价格表 / 尺码表 / 看图」这类线索；
    * 正文过短（≤40 字）且带图，价格表只能是图；
    * **兜底**：所有证据正文里都没有价格形态的数字（¥ / 元 / 「价格：数字」），
@@ -71,7 +71,8 @@ def numeric_intent(question: str) -> bool:
 
 
 def _has_images(item: dict) -> bool:
-    if item.get("channel") != "xhs":
+    # 只有带配图的社交证据才可能把价格藏在图里；微博应急直抓同样能拿到 pics。
+    if item.get("channel") not in {"xhs", "weibo"}:
         return False
     urls = [str(url) for url in (item.get("image_urls") or []) if str(url).strip()]
     return int(item.get("image_count") or 0) > 0 and bool(urls)

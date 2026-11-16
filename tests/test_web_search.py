@@ -6,6 +6,10 @@
 
 from __future__ import annotations
 
+import email.message
+import io
+from urllib.error import HTTPError, URLError
+
 import pytest
 
 from app.config import AppSettings
@@ -152,3 +156,106 @@ def test_search_parses_and_dedupes_by_url(monkeypatch):
         "https://example.com/2",
     ]
     assert results[0].provider == "zhipu"
+
+
+# --------------------------------------------------------------------- 重试与配额
+
+
+class _FakeResponse:
+    headers = email.message.Message()
+
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def _http_error(url: str, code: int, body: str) -> HTTPError:
+    return HTTPError(url, code, "error", None, io.BytesIO(body.encode("utf-8")))
+
+
+def test_quota_1113_is_not_retried_and_blocks_next_call(monkeypatch, workdir):
+    """1113 是账号级资源包耗尽：不重试，并在 TTL 内直接降级。"""
+    web_search._QUOTA_BLOCKED_UNTIL.clear()
+    calls: list[int] = []
+
+    def fake_urlopen(*_args, **_kwargs):
+        calls.append(1)
+        raise _http_error(
+            web_search.ZHIPU_URL,
+            429,
+            '{"error":{"code":"1113","message":"余额不足或无可用资源包,请充值"}}',
+        )
+
+    monkeypatch.setattr(web_search, "urlopen", fake_urlopen)
+    app = AppSettings(
+        data_dir=workdir,
+        search_enabled=True,
+        search_api_key="k",
+        search_provider="zhipu",
+        search_quota_ttl=900,
+    )
+
+    with pytest.raises(web_search.SearchQuotaExhausted, match="1113"):
+        web_search.search("Baby", app)
+
+    assert len(calls) == 1
+    assert web_search.quota_blocked(app)
+
+    # 进程重启会丢内存标记，但磁盘上的 TTL 还在：状态接口不能重新报就绪。
+    web_search._QUOTA_BLOCKED_UNTIL.clear()
+    assert web_search.quota_blocked(app)
+
+    # TTL 内不再打接口：下一次召回直接按失效处理。
+    with pytest.raises(web_search.SearchQuotaExhausted):
+        web_search.search("Baby", app)
+    assert len(calls) == 1
+
+    web_search._QUOTA_BLOCKED_UNTIL.clear()
+
+
+def test_server_error_retries_once(monkeypatch):
+    web_search._QUOTA_BLOCKED_UNTIL.clear()
+    monkeypatch.setattr(web_search.time, "sleep", lambda _seconds: None)
+    calls: list[int] = []
+
+    def fake_urlopen(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise _http_error(web_search.ZHIPU_URL, 503, "upstream")
+        return _FakeResponse(
+            b'{"search_result":[{"title":"A","link":"https://example.com/1","content":"a"}]}'
+        )
+
+    monkeypatch.setattr(web_search, "urlopen", fake_urlopen)
+    app = AppSettings(search_enabled=True, search_api_key="k", search_provider="zhipu")
+
+    results = web_search.search("Baby", app)
+
+    assert len(calls) == 2
+    assert [item.url for item in results] == ["https://example.com/1"]
+
+
+def test_network_error_retries_once_then_reports(monkeypatch):
+    web_search._QUOTA_BLOCKED_UNTIL.clear()
+    monkeypatch.setattr(web_search.time, "sleep", lambda _seconds: None)
+    calls: list[int] = []
+
+    def fake_urlopen(*_args, **_kwargs):
+        calls.append(1)
+        raise URLError("timed out")
+
+    monkeypatch.setattr(web_search, "urlopen", fake_urlopen)
+    app = AppSettings(search_enabled=True, search_api_key="k", search_provider="zhipu")
+
+    with pytest.raises(web_search.SearchUnavailable, match="连不上"):
+        web_search.search("Baby", app)
+
+    assert len(calls) == 2

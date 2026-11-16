@@ -700,6 +700,40 @@ def _weibo_relevant(result, text: str) -> bool:
     return True
 
 
+def _with_image_text(question: str, items: list[dict], ctx: RecallContext) -> list[dict]:
+    """配图里的字是另一条证据；识别失败只缺这一条，不影响召回。"""
+    from app.agent import image_evidence
+
+    try:
+        items.extend(image_evidence.collect(question, items, ctx))
+    except Exception as exc:  # noqa: BLE001 - 图片识别属于增强，不能拖垮整路召回
+        logger.warning("图片文字识别失败，跳过：%s: %s", type(exc).__name__, exc)
+    return items
+
+
+def _weibo_direct_fallback(
+    question: str, text: str, ctx: RecallContext, limit: int | None
+) -> list[dict]:
+    """搜索引擎配额耗尽时的兜底：直抓微博站内第一页。
+
+    直抓失败（登录墙 / 超时 / 没装 Playwright）按通道 skip 上报，不冒充
+    「微博上没有」，也不拖累其他通道。
+    """
+    from app.services import weibo_direct
+
+    try:
+        results = weibo_direct.search(
+            text, ctx.settings, max_results=ctx.settings.weibo_direct_max_results
+        )
+    except weibo_direct.WeiboDirectUnavailable as exc:
+        raise ChannelUnavailable(f"微博直抓不可用：{exc}") from exc
+    if not results:
+        raise ChannelUnavailable("微博直抓第一页没有与查询词相关的帖子")
+    items = _search_evidence("weibo", results[:WEIBO_MAX_EVIDENCE], limit)
+    # 直抓能拿到配图，价格往往就在图里：让 OCR 有机会补一条 image_text 证据。
+    return _with_image_text(question, items, ctx)
+
+
 def _recall_weibo(
     question: str, ctx: RecallContext, query: str = "", limit: int | None = None
 ) -> list[dict]:
@@ -708,6 +742,12 @@ def _recall_weibo(
     # 这是「经搜索引擎找微博页面」，不是微博站内搜索。query 构造直接决定命中率，
     # 先用 scripts/probe_search.py 实测再改，别凭感觉调。
     text = (query or question).strip()
+
+    # 配额已失效时不必再打一次注定失败的接口，直接换直抓。
+    if web_search.quota_blocked(ctx.settings):
+        logger.warning("微博搜索配额失效中，改用直抓")
+        return _weibo_direct_fallback(question, text, ctx, limit)
+
     candidates = min(50, max(ctx.settings.search_max_results * 2, WEIBO_CANDIDATES))
     seen: set[str] = set()
     found: list[web_search.SearchResult] = []
@@ -718,6 +758,10 @@ def _recall_weibo(
     for index, attempt in enumerate(_weibo_queries(text)):
         try:
             results = web_search.search(attempt, ctx.settings, max_results=candidates)
+        except web_search.SearchQuotaExhausted as exc:
+            # 1113 是账号级资源包耗尽：不重试、不做第二次查询，直接换直抓。
+            logger.warning("微博搜索配额耗尽（1113），改用直抓：%s", exc)
+            return _weibo_direct_fallback(question, text, ctx, limit)
         except Exception as exc:  # noqa: BLE001
             if index == 0:
                 # 连第一次都失败（缺 key / 网络）时交给 recall() 统一转 ChannelUnavailable，
@@ -750,7 +794,8 @@ def _recall_weibo(
         if fallback_error:
             detail += f"；关键词兜底失败（{fallback_error}）"
         raise ChannelUnavailable(f"微博通道未取到页面：{detail}")
-    return _search_evidence("weibo", found[:WEIBO_MAX_EVIDENCE], limit)
+    items = _search_evidence("weibo", found[:WEIBO_MAX_EVIDENCE], limit)
+    return _with_image_text(question, items, ctx)
 
 
 def _recall_web(
@@ -772,6 +817,8 @@ _SEARCH_PROVIDERS = ("bocha", "zhipu")
 
 def _search_status(app: AppSettings) -> dict[str, Any]:
     """网页搜索的就绪状态（weibo / web 共用同一套 key 与 provider）。"""
+    from app.services import web_search
+
     if not app.search_enabled:
         return {
             "enabled": False,
@@ -787,7 +834,33 @@ def _search_status(app: AppSettings) -> dict[str, Any]:
             "ready": False,
             "reason": f"不支持的 SEARCH_PROVIDER：{provider}（只支持 bocha / zhipu）",
         }
+    if web_search.quota_blocked(app, provider):
+        # 不能只按「key 还在」报 ready：账号资源包耗尽时接口 0.17s 就失败，
+        # 界面还显示就绪，用户会以为微博通道正常。
+        return {
+            "enabled": True,
+            "ready": False,
+            "reason": "搜索配额失效（code=1113 余额/资源包耗尽），暂按不可用降级",
+        }
     return {"enabled": True, "ready": True, "reason": ""}
+
+
+def _weibo_status(search: dict[str, Any], app: AppSettings) -> dict[str, Any]:
+    """微博通道状态：搜索配额失效时，直抓可用才算就绪。"""
+    from app.services import web_search, weibo_direct
+
+    if not (search["enabled"] and not search["ready"] and web_search.quota_blocked(app)):
+        return dict(search)
+    ready, reason = weibo_direct.readiness(app)
+    if ready:
+        return {
+            "enabled": True,
+            "ready": True,
+            "reason": "搜索引擎配额失效，改用微博直抓（站内第一页）",
+        }
+    status = dict(search)
+    status["reason"] = f"{search['reason']}；微博直抓不可用（{reason}）"
+    return status
 
 
 def _xhs_status(app: AppSettings) -> dict[str, Any]:
@@ -828,7 +901,7 @@ def channel_status(app: AppSettings | None = None) -> dict[str, dict[str, Any]]:
 
     result["xhs"] = _xhs_status(app)
     search = _search_status(app)
-    result["weibo"] = dict(search)
+    result["weibo"] = _weibo_status(search, app)
     result["web"] = dict(search)
     return result
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -26,6 +27,75 @@ ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/web_search"
 
 class SearchUnavailable(RuntimeError):
     """没有搜索 key / provider 不支持 / 网络失败。带可读原因给通道层。"""
+
+
+class SearchQuotaExhausted(SearchUnavailable):
+    """provider 配额耗尽（智谱 code=1113）：不重试，按 TTL 降级。"""
+
+
+# 超时 / 5xx / 网络错误允许一次短重试；配额耗尽（1113）不在此列。
+_RETRY_ATTEMPTS = 2
+_RETRY_DELAY = 0.6
+
+# 配额失效窗口：按 provider 记一个到期时间。账号资源包耗尽不会秒级恢复，
+# 每次都真打接口只会让每个通道都白等一轮 0.17s + 失败。
+_QUOTA_BLOCKED_UNTIL: dict[str, float] = {}
+
+# 内存标记活不过进程重启；落一份小文件，重启后状态接口也不会继续报 ready。
+_QUOTA_STATE_FILE = "search_quota.json"
+
+
+def _quota_provider(app: AppSettings, provider: str = "") -> str:
+    return (provider or app.search_provider or "bocha").strip().lower() or "bocha"
+
+
+def _load_quota_state(app: AppSettings) -> dict[str, float]:
+    try:
+        raw = json.loads((app.data_dir / _QUOTA_STATE_FILE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    state: dict[str, float] = {}
+    for name, value in raw.items():
+        try:
+            state[str(name)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return state
+
+
+def _save_quota_state(app: AppSettings, state: dict[str, float]) -> None:
+    path = app.data_dir / _QUOTA_STATE_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        logger.info("搜索配额状态写入失败：%s", exc)
+
+
+def quota_blocked(app: AppSettings, provider: str = "") -> bool:
+    """配额是否仍在失效窗口内（窗口长度取 ``SEARCH_QUOTA_TTL``）。"""
+    name = _quota_provider(app, provider)
+    now = time.time()
+    until = _QUOTA_BLOCKED_UNTIL.get(name, 0.0)
+    if until <= now:
+        until = _load_quota_state(app).get(name, 0.0)
+        if until > now:
+            _QUOTA_BLOCKED_UNTIL[name] = until
+    return until > now
+
+
+def mark_quota_exhausted(app: AppSettings, provider: str = "") -> None:
+    ttl = float(app.search_quota_ttl or 0)
+    if ttl <= 0:
+        return
+    name = _quota_provider(app, provider)
+    until = time.time() + ttl
+    _QUOTA_BLOCKED_UNTIL[name] = until
+    state = _load_quota_state(app)
+    state[name] = until
+    _save_quota_state(app, state)
 
 
 @dataclass(slots=True)
@@ -62,6 +132,11 @@ class SearchResult:
         }
 
 
+def _quota_exhausted(detail: str) -> bool:
+    """智谱资源包耗尽固定返回 ``code=1113``（HTTP 429）。"""
+    return "1113" in (detail or "")
+
+
 def _post_json(url: str, payload: dict, *, key: str, timeout: float) -> dict:
     request = Request(
         url,
@@ -72,15 +147,31 @@ def _post_json(url: str, payload: dict, *, key: str, timeout: float) -> dict:
         },
         method="POST",
     )
-    try:
-        with urlopen(request, timeout=timeout, context=imagefetch.ssl_context()) as response:  # noqa: S310
-            charset = response.headers.get_content_charset() or "utf-8"
-            raw = response.read().decode(charset, errors="replace")
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:200]
-        raise SearchUnavailable(f"搜索 HTTP {exc.code}：{detail}") from exc
-    except URLError as exc:
-        raise SearchUnavailable(f"搜索连不上：{exc.reason}") from exc
+    raw = ""
+    for attempt in range(_RETRY_ATTEMPTS):
+        retryable = attempt + 1 < _RETRY_ATTEMPTS
+        try:
+            with urlopen(request, timeout=timeout, context=imagefetch.ssl_context()) as response:  # noqa: S310
+                charset = response.headers.get_content_charset() or "utf-8"
+                raw = response.read().decode(charset, errors="replace")
+            break
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:200]
+            if _quota_exhausted(detail):
+                # 余额/资源包耗尽：重试只会再白等一次，直接交给上层降级。
+                raise SearchQuotaExhausted(
+                    f"搜索配额耗尽（code=1113）：{detail or '余额不足或无可用资源包'}"
+                ) from exc
+            if exc.code >= 500 and retryable:
+                time.sleep(_RETRY_DELAY)
+                continue
+            raise SearchUnavailable(f"搜索 HTTP {exc.code}：{detail}") from exc
+        except (URLError, TimeoutError) as exc:
+            if retryable:
+                time.sleep(_RETRY_DELAY)
+                continue
+            reason = getattr(exc, "reason", exc)
+            raise SearchUnavailable(f"搜索连不上：{reason}") from exc
 
     try:
         data = json.loads(raw)
@@ -180,33 +271,42 @@ def search(
     provider = (provider or app.search_provider).strip().lower() or "bocha"
     count = max(1, min(50, max_results or app.search_max_results))
 
-    if provider == "bocha":
-        url = app.search_base_url.strip() or BOCHA_URL
-        data = _post_json(
-            url,
-            {"query": text, "freshness": "noLimit", "summary": True, "count": count},
-            key=app.search_api_key.strip(),
-            timeout=app.search_timeout,
+    if quota_blocked(app, provider):
+        raise SearchQuotaExhausted(
+            "搜索配额失效中（上次返回 code=1113），等 TTL 到期再试"
         )
-        results = _parse_bocha(data)
-    elif provider == "zhipu":
-        url = app.search_base_url.strip() or ZHIPU_URL
-        data = _post_json(
-            url,
-            {
-                "search_query": text,
-                "search_engine": app.search_engine.strip() or "search_std",
-                "search_intent": False,
-                "count": count,
-                "search_recency_filter": "noLimit",
-                "content_size": "high",
-            },
-            key=app.search_api_key.strip(),
-            timeout=app.search_timeout,
-        )
-        results = _parse_zhipu(data)
-    else:
-        raise SearchUnavailable(f"不支持的 SEARCH_PROVIDER：{provider}（只支持 bocha / zhipu）")
+
+    try:
+        if provider == "bocha":
+            url = app.search_base_url.strip() or BOCHA_URL
+            data = _post_json(
+                url,
+                {"query": text, "freshness": "noLimit", "summary": True, "count": count},
+                key=app.search_api_key.strip(),
+                timeout=app.search_timeout,
+            )
+            results = _parse_bocha(data)
+        elif provider == "zhipu":
+            url = app.search_base_url.strip() or ZHIPU_URL
+            data = _post_json(
+                url,
+                {
+                    "search_query": text,
+                    "search_engine": app.search_engine.strip() or "search_std",
+                    "search_intent": False,
+                    "count": count,
+                    "search_recency_filter": "noLimit",
+                    "content_size": "high",
+                },
+                key=app.search_api_key.strip(),
+                timeout=app.search_timeout,
+            )
+            results = _parse_zhipu(data)
+        else:
+            raise SearchUnavailable(f"不支持的 SEARCH_PROVIDER：{provider}（只支持 bocha / zhipu）")
+    except SearchQuotaExhausted:
+        mark_quota_exhausted(app, provider)
+        raise
 
     results = _dedupe(results)
     logger.info("搜索 %s：%s 条（%s）", text, len(results), provider)

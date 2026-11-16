@@ -154,6 +154,16 @@ class AppSettings(BaseSettings):
     search_engine: str = "search_std"
     search_max_results: int = 5
     search_timeout: float = 20.0
+    # 配额失效（智谱 code=1113）后多久内直接按不可用降级，不再反复打接口。
+    # 账号资源包耗尽不会秒级恢复；等 TTL 到期再试一次就够，重试只会白等。
+    search_quota_ttl: float = 900.0
+
+    # 微博应急直抓：只在上面那套搜索返回 1113 时启用（不替换 provider）。
+    # 走 Playwright 打开 m.weibo.cn 搜索，只读第一页；翻页会跳登录，不做。
+    weibo_direct_enabled: bool = True
+    # 浏览器启动 + 首屏的总预算（秒）。超时按通道 skip 降级，不拖累其他通道。
+    weibo_direct_timeout: float = 25.0
+    weibo_direct_max_results: int = 5
 
     # ---------- 关注项扫描 ----------
     # 单个关注项的超时与整轮扫描的总预算（秒）。xhs 最坏要「搜索 + 3 次详情」
@@ -263,6 +273,11 @@ class AppSettings(BaseSettings):
         return self.data_dir / "xhs" / "cache"
 
     @property
+    def weibo_cache_dir(self) -> Path:
+        """微博直抓结果的 6 小时缓存目录。"""
+        return self.data_dir / "weibo" / "cache"
+
+    @property
     def ocr_cache_dir(self) -> Path:
         """图片文字识别结果缓存（按图片 URL + 引擎版本）。"""
         return self.data_dir / "ocr" / "cache"
@@ -279,6 +294,7 @@ class AppSettings(BaseSettings):
             self.lolibrary_dir,
             self.learned_aliases_path.parent,
             self.xhs_cache_dir,
+            self.weibo_cache_dir,
             self.ocr_cache_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)

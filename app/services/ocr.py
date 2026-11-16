@@ -111,7 +111,12 @@ def _write_cache(path: Path, url: str, text: str) -> None:
 
 def _download(url: str, *, max_bytes: int, timeout: float) -> bytes:
     """下载一张图。超过 ``max_bytes`` 或超时都抛 :class:`OcrError`。"""
-    request = Request(url, headers={"User-Agent": imagefetch.FETCH_UA})
+    headers = {"User-Agent": imagefetch.FETCH_UA}
+    referer = imagefetch.referer_for(url)
+    if referer:
+        # 微博图床防盗链：不带 Referer 会 403，图片永远进不了 OCR。
+        headers["Referer"] = referer
+    request = Request(url, headers=headers)
     try:
         with urlopen(request, timeout=timeout, context=imagefetch.ssl_context()) as response:  # noqa: S310 - 只读 GET
             length = response.headers.get("Content-Length")
