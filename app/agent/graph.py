@@ -89,17 +89,21 @@ _REFUSAL_MARKERS = (
 )
 
 _CHANNEL_ORDER = {name: index for index, name in enumerate(ALL_CHANNELS)}
+# 图上文字不是独立召回通道，只跟在它派生的 xhs 旁边，不改变其它通道的定序。
+_CHANNEL_ORDER["image_text"] = _CHANNEL_ORDER["xhs"]
 
-# 证据效力等级 → 排序权重。自有内容在前，网友发言在后。
-_KIND_ORDER = {"own_content": 0, "third_party": 1, "realtime": 2, "upstream_ugc": 3}
+# 证据效力等级 → 排序权重。自有内容在前，网友发言在后。图上文字是从实时帖子里
+# 派生的，和 realtime 同档：它只是一条未校验的线索，但比泛化网友发言更贴题。
+_KIND_ORDER = {"own_content": 0, "third_party": 1, "realtime": 2, "image_text": 2, "upstream_ugc": 3}
 
 # 操作型问题（怎么洗 / 要不要细节图 / 闲鱼收）要的是踩过坑的人怎么说，
 # 不是规范词条怎么定义。此时把 UGC 整体提到自有内容与档案前面。
 _KIND_ORDER_OPERATIONAL = {
     "realtime": 0,
-    "upstream_ugc": 1,
-    "own_content": 2,
-    "third_party": 3,
+    "image_text": 1,
+    "upstream_ugc": 2,
+    "own_content": 3,
+    "third_party": 4,
 }
 
 # 意图标签由 ``channels.recall`` 打在证据上：意图是问题级属性，但合并层只拿到
@@ -134,8 +138,14 @@ def _evidence_key(item: dict) -> str:
     URL 去掉锚点与末尾斜杠——同一篇文章被不同通道抓到时常只差这两处。
     两个字段都没有（例如 Lolibrary 档案里的聚合条目）就不去重：没有稳定
     标识时强行合并会误删不同条目。
+
+    图上文字证据的 URL 指回原帖，不能按 URL 和原帖合并：它们来源不同，
+    合并会把「帖主正文」和「机器识别的图上文字」混成一条。
     """
     url = str(item.get("url") or "").strip()
+    if item.get("source_kind") == "image_text":
+        body = url.split("#", 1)[0].rstrip("/")
+        return f"image_text::{body}" if body else f"image_text::{item.get('ref') or ''}"
     if url:
         return url.split("#", 1)[0].rstrip("/")
     return str(item.get("ref") or "").strip()
@@ -149,11 +159,22 @@ def _intent_of(evidence: list[dict]) -> str:
     return ""
 
 
+def _in_extra(item: dict, extra: set[str]) -> bool:
+    """这条证据是否属于「本次补查才去查的」。
+
+    图上文字没有独立通道，它派生自 xhs 帖子：xhs 被补查时，派生证据也要
+    跟原帖一起排到前面，否则会出现「原帖第 1 条、它的图上文字掉到第 8 条」。
+    """
+    if item.get("channel") in extra:
+        return True
+    return item.get("source_kind") == "image_text" and "xhs" in extra
+
+
 def _rank(
     item: dict, extra: set[str], kind_order: dict[str, int]
 ) -> tuple[int, int, int]:
     return (
-        0 if item.get("channel") in extra else 1,
+        0 if _in_extra(item, extra) else 1,
         kind_order.get(item.get("source_kind"), 9),
         _CHANNEL_ORDER.get(item.get("channel"), 99),
     )
@@ -208,8 +229,8 @@ def _normalize(
     if limit <= 0 or len(ordered) <= limit:
         return ordered
 
-    head = [item for item in ordered if item.get("channel") in extra]
-    rest = [item for item in ordered if item.get("channel") not in extra]
+    head = [item for item in ordered if _in_extra(item, extra)]
+    rest = [item for item in ordered if not _in_extra(item, extra)]
     return head + rest[: max(limit - len(head), 0)]
 
 

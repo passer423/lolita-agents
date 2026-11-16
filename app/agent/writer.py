@@ -47,6 +47,7 @@ SOURCE_KIND_LABELS = {
     "third_party": "档案",
     "realtime": "网络实时内容",
     "upstream_ugc": "网友发言",
+    "image_text": "图上文字（OCR，未校验）",
 }
 
 # 能当规范的来源。其余一律只作线索——这是「一源一通道」在提示词层的落地：
@@ -78,6 +79,8 @@ APPELLATION_COMMUNITY_ARCHIVE = "档案（社区整理）"
 APPELLATION_SHOP = "店家/商家"
 APPELLATION_UGC = "网友发言"
 APPELLATION_WEB = "网络内容"
+# 标签故意不带「（OCR，未校验）」：标题里已经写了完整标注，标签只说明「是谁说的」。
+APPELLATION_IMAGE_TEXT = "图上文字"
 
 
 def _host_of(url: str) -> str:
@@ -117,6 +120,10 @@ def source_appellation(item: dict) -> str:
         return APPELLATION_OWN
     if kind == "third_party":
         return APPELLATION_ARCHIVE if _is_lolibrary(item) else APPELLATION_COMMUNITY_ARCHIVE
+    # 必须排在店家伙官方判断之前：识别文本里可能恰好出现「店铺」「官方」字样，
+    # 那只是图上的字，不能因此把这条证据改称店家或官方。
+    if kind == "image_text":
+        return APPELLATION_IMAGE_TEXT
     if _looks_like_shop(item):
         return APPELLATION_SHOP
     if _looks_like_official(item):
@@ -130,12 +137,16 @@ def source_appellation(item: dict) -> str:
 
 _CLUE_HEADER = (
     "【仅作线索·不得当作规范】\n"
-    "以下是网友发言、店家页面或网络实时内容。称呼要跟每条开头的标签走：\n"
+    "以下是网友发言、店家页面、网络实时内容，以及原帖配图的机器识别文字。"
+    "称呼要跟每条开头的标签走：\n"
     "「网友发言」→ 写「有网友提到」「出物的人说」；\n"
     "「店家/商家」→ 写「店家提到」「店铺页面写着」，绝不能写成「网友」；\n"
     "「档案（Lolibrary）」→ 社区整理的发售资料库，可能有错漏，写「档案记录」"
     "「Lolibrary 上记录」，不能写「官方」，也不能写「网友」；\n"
-    "「官方」→ 品牌自有渠道，写「官方公告」「品牌官方说明」。\n"
+    "「官方」→ 品牌自有渠道，写「官方公告」「品牌官方说明」；\n"
+    "「图上文字」→ 原帖配图的机器识别结果（OCR，未校验），可能有错、可能漏字。"
+    "只能写「图上标着…（OCR，未校验）[n]」，数字照识别结果原样说，"
+    "不得改写成表格、不得写成「某款 578 元」这种确定断言，并提醒以原图为准。\n"
     "这些内容不得作为洗护方式、尺码、材质、工艺的规范结论；"
     "与【可作依据】冲突时，以后者为准。"
 )
@@ -171,6 +182,9 @@ SYNTH_SYSTEM = """你是 Lolita 领域的问答助手，像微信里一个懂 Lo
    「Lolibrary 上记录」，并说明它是社区整理。
 8. 禁止用「网友说」指代店家、官方或档案——把店家的话说成网友反馈，比不引用更危险；
    反过来也不能把社区档案抬成「官方」，那会让用户以为品牌确认过。
+9. 「图上文字（OCR，未校验）」是机器识别原帖配图得到的内容，可能有错、可能漏字。
+   引用时只能写「图上标着…（OCR，未校验）」，并挂该条编号；数字照识别结果原样说，
+   不得换算、不得整理成表格、不得写成「某款 578 元」这种确定断言，并提醒以原图为准。
 """
 
 
@@ -473,6 +487,8 @@ def fix_source_attribution(
             label = "档案记录里"
         elif labels == {APPELLATION_OWN}:
             label = "自有资料里"
+        elif labels == {APPELLATION_IMAGE_TEXT}:
+            label = "图上文字"
         else:
             parts.append(sentence)
             continue
@@ -601,15 +617,19 @@ def _image_hint_target(evidence: list[dict]) -> dict | None:
 
 
 def image_hint(question: str, evidence: list[dict]) -> str:
-    """价格/尺码图上才有的提示；三条同时满足才给，全答案最多一条。
+    """价格/尺码图上才有的提示；四条同时满足才给，全答案最多一条。
 
     1. 问题问的是价格或尺码；
     2. 证据里至少一条带图（``image_count > 0``）；
-    3. 证据正文没给出对应数字。
+    3. 证据正文没给出对应数字；
+    4. **没有** ``image_text`` 证据——已经读到图上文字时，不能再补一句
+       「图片里的文字没有被解析」，两句同时出现会自相矛盾。
 
     返回空串表示不加。句子里的「可能含」是刻意的：有图不等于有价格表，
     没有 OCR 就不该断言图里写了什么。
     """
+    if any(item.get("source_kind") == "image_text" for item in evidence):
+        return ""
     kind = _image_hint_kind(question)
     if not kind or not evidence:
         return ""

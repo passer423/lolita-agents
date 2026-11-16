@@ -131,6 +131,21 @@ class AppSettings(BaseSettings):
     # 小红书登录 Cookie（需含 a1 + web_session；运行时注入，不进 git）。
     xhs_cookie: str = ""
 
+    # ---------- 图片文字识别（可选，按需触发） ----------
+    # 只在「价格/尺码/预约这类要具体数值」且「正文提示价格标在图上 / 正文过短
+    # 带图 / 全篇没有价格数字」时才识别，最多 2 条证据 × 3 张图；其余问题完全
+    # 走原路径。依赖 rapidocr-onnxruntime 是可选包，没装时自动跳过（OCR_ENABLED
+    # 打开也只在装了依赖后才生效）。
+    ocr_enabled: bool = True
+    # 单图下载 / 识别的超时（秒）与体积上限；超限只丢这一张图。
+    ocr_image_timeout: float = 8.0
+    ocr_image_max_bytes: int = 5 * 1024 * 1024
+    # 单次召回最多识别几条证据、每条最多几张图。
+    ocr_max_items: int = 2
+    ocr_images_per_item: int = 3
+    # 整段图片识别的总预算（秒）。超了放弃剩余图片，已识别到的照常进证据。
+    ocr_total_budget: float = 12.0
+
     # ---------- 召回通道：网页/微博（博查 / 智谱） ----------
     search_enabled: bool = False
     search_api_key: str = ""
@@ -248,6 +263,11 @@ class AppSettings(BaseSettings):
         return self.data_dir / "xhs" / "cache"
 
     @property
+    def ocr_cache_dir(self) -> Path:
+        """图片文字识别结果缓存（按图片 URL + 引擎版本）。"""
+        return self.data_dir / "ocr" / "cache"
+
+    @property
     def llm_enabled(self) -> bool:
         return bool(self.llm_api_key.strip())
 
@@ -259,6 +279,7 @@ class AppSettings(BaseSettings):
             self.lolibrary_dir,
             self.learned_aliases_path.parent,
             self.xhs_cache_dir,
+            self.ocr_cache_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 

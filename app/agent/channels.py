@@ -13,7 +13,8 @@
 * ``own_content``  自己整理的知识库，可作规范；
 * ``third_party``  官方/档案馆数据，可作事实（但不含现价）；
 * ``realtime``     网页搜索/小红书的结果摘要，时效信息可用，来源需标注；
-* ``upstream_ugc`` 他人微博发言，**只能写成「有网友提到」，不得当规范**。
+* ``upstream_ugc`` 他人微博发言，**只能写成「有网友提到」，不得当规范**；
+* ``image_text``   原帖配图的机器识别文字，**未校验**，只能写成「图上标着…」。
 
 六通道：
 
@@ -491,6 +492,7 @@ def _search_evidence(channel: str, results: list, limit: int | None = None) -> l
 def _recall_xhs(
     question: str, ctx: RecallContext, query: str = "", limit: int | None = None
 ) -> list[dict]:
+    from app.agent import image_evidence
     from app.services import xhs_search
 
     results = xhs_search.search(
@@ -498,7 +500,13 @@ def _recall_xhs(
         ctx.settings,
         max_results=ctx.settings.xhs_max_results,
     )
-    return _search_evidence("xhs", results, limit)
+    items = _search_evidence("xhs", results, limit)
+    # 图里的字是**另一条证据**：不拼进原帖正文。识别失败只缺这一条，不影响召回。
+    try:
+        items.extend(image_evidence.collect(question, items, ctx))
+    except Exception as exc:  # noqa: BLE001 - 图片识别属于增强，不能拖垮整路召回
+        logger.warning("图片文字识别失败，跳过：%s: %s", type(exc).__name__, exc)
+    return items
 
 
 def _host(url: str) -> str:
