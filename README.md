@@ -294,6 +294,33 @@ curl http://127.0.0.1:8787/api/health
   ```
 - **端口**：默认只发布到 `127.0.0.1:8787`。要给手机/局域网访问，把 compose 里 ports 的 `127.0.0.1:` 去掉，并自行加访问控制。
 
+### 验证状态（未实测）
+
+**本节所有命令都没有在本机执行过**：开发机是 Windows，没有任何容器运行时（`docker` / `podman` /
+`nerdctl` 均未安装，WSL2 没有发行版，`DOCKER_HOST` 为空）。按约定不擅自安装 Docker Desktop，
+所以下面这些只能算“静态核对”，**不等于构建或启动通过**。
+
+已静态核对：探活打 `GET /api/health`、容器内端口 8787、`stop_grace_period: 30s` 大于
+`--timeout-graceful-shutdown 20`、`data` / `.env` / 上游 checkout 均为挂载而非烤进镜像、
+`.env` 缺失时 `create_host_path: false` 会直接报错。
+
+首次在装有 Docker 的机器上，需要按顺序验完这些（任一失败都说明本节还不能当部署承诺）：
+
+1. `docker compose build`：上游 `requirements.txt` 里 `chroma-hnswlib` 等只有 sdist 的包，
+   能否在 `python:3.11-slim` + `build-essential` 下编过。
+2. `docker compose up -d`：容器内 `import torch` / `sentence-transformers` 是否缺系统库
+   （已补 `libgomp1`，但只有真启动才暴露其余隐式依赖）。
+3. `docker compose ps` 与 `docker inspect --format '{{.State.Health.Status}}'`：
+   注意首次加载/下载 BGE 模型可能超过 `start_period: 30s`，容器会先被判 unhealthy 甚至重启。
+4. `docker compose exec app id -u` 应为 1000（非 root）；Linux 宿主机还要确认 `./data`
+   属主与 `APP_UID` 对齐。**Windows/WSL2 的绑定挂载权限语义与生产 Linux 不同**，
+   即使在这里通过也只算部分验证。
+5. `curl http://127.0.0.1:8787/api/health` 从宿主机可访问。
+6. `docker compose stop`：日志应出现 uvicorn 的 graceful shutdown，实测耗时须小于 30 秒；
+   顺带确认后台队列把进行中的任务置为 `interrupted` 而不是留下 running。
+
+另外 `additional_contexts` 需要 Compose **v2.17+**，更老的版本会在解析 compose 文件时直接报错。
+
 ### 停止与优雅停机
 
 `docker compose stop` / `down` 发送 SIGTERM。镜像以 `uvicorn --timeout-graceful-shutdown 20` 启动：先停止接新连接，再最多等 20 秒让进行中的请求（含 SSE 问答）收尾；Compose 的 `stop_grace_period` 是 30 秒，留出余量。应用 lifespan 没有需要额外关闭的全局资源（SQLite 每次请求开关连接），所以不需要自己写信号处理。
