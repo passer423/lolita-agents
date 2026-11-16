@@ -56,7 +56,7 @@ python -m eval.run --subset quick --min-recall1 0.66 --min-cite1 0.75
 
 12 条金标子集（own 4 / real 5 / lolibrary 3），本机 14–18 秒（含模型装载）。退出码非 0 就别提交：报告会直接列出排名掉的条目，在 `eval/reports/<时间戳>/report.md`。只想看数字、不判红绿时去掉 `--min-*`。
 
-PR CI 里的 `offline-eval-gate` **只做结构性冒烟，不代表检索质量**：托管 runner 没有 real / lolibrary 两份不进 git 的索引，这一步用 hash 向量现场重建 own 索引，只跑 quick 里 4 条 own（`--subset quick-offline`），守的是金标格式、索引能建、own 管线不断。真实检索质量由本机 quick / terms 门禁保证，并由每日 workflow `.github/workflows/eval-daily.yml` 在有数据、能下载模型的 runner 上用真实 BGE 重跑 quick + terms 留痕；模型不可用时它直接失败，不会降级成 hash 凑数。手工触发用 `.github/workflows/eval-gate.yml`。
+PR CI 里的 `offline-eval-gate` **只做结构性冒烟，不代表检索质量**：托管 runner 没有 real / lolibrary 两份不进 git 的索引，这一步用 hash 向量现场重建 own 索引，只跑 quick 里 4 条 own（`--subset quick-offline`），守的是金标格式、索引能建、own 管线不断。真实检索质量由本机 quick / terms 门禁保证；另有 `.github/workflows/eval-daily.yml` 可在有数据、能下载模型的 self-hosted runner 上用真实 BGE 重跑 quick + terms 留痕，但它**不再定时触发**，只能在 runner 在线时手动 `gh workflow run eval-daily.yml`：runner 不常驻（跑之前自己起 `F:\actions-runner\run.cmd`），离线时 dispatch 出去的 job 会一直停在 queued，不会自动开跑。模型不可用时该 workflow 直接失败，不会降级成 hash 凑数。手工触发的离线门禁用 `.github/workflows/eval-gate.yml`。
 
 可选——端到端冒烟，需要服务在跑（另开一个终端 `python -m app.main`，默认 http://127.0.0.1:8787）：
 

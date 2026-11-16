@@ -222,10 +222,12 @@ HTTP 序列化。真实 uvicorn 下用正确的 UTF-8 请求，召回与答案�
 **CI 绿不代表检索质量。** PR 里的 `offline-eval-gate` 只是结构性冒烟：托管 runner
 没有 real / lolibrary 两份不进 git 的索引，这一步用 hash 向量重建 own 索引，只跑
 quick 里 4 条 own，验证金标格式、索引可建、own 管线不断。真实检索质量由本机
-quick / terms 门禁（本节上面的命令）保证，并由 `.github/workflows/eval-daily.yml`
-每天在有数据、能下载模型的 runner 上用真实 BGE 重跑 quick + terms，报告只作为
-Artifacts 留痕（`eval/reports/` 已被 `.gitignore` 忽略）。模型下载不可用时该
-workflow 会明确失败并打印原因，不会静默降级成 hash。
+quick / terms 门禁（本节上面的命令）保证；`.github/workflows/eval-daily.yml` 可以在
+有数据、能下载模型的 self-hosted runner 上用真实 BGE 重跑 quick + terms，报告只
+作为 Artifacts 留痕（`eval/reports/` 已被 `.gitignore` 忽略）。它**没有定时触发**，
+只能手动 `gh workflow run eval-daily.yml`，且 runner 要在线（本机用
+`F:\actions-runner\run.cmd` 手动起，不常驻；离线时 job 只会停在 queued）。
+模型下载不可用时该 workflow 会明确失败并打印原因，不会静默降级成 hash。
 
 ## 后台任务队列
 
