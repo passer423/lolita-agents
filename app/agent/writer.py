@@ -124,6 +124,10 @@ def source_appellation(item: dict) -> str:
     # 那只是图上的字，不能因此把这条证据改称店家或官方。
     if kind == "image_text":
         return APPELLATION_IMAGE_TEXT
+    # 官方账号是结构化判定（账号认证），优先于按标题猜店铺：官方帖正文里常提到
+    # 「淘宝」「店铺」，按关键词判会被误叫成店家，价格该信谁也就跟着错了。
+    if item.get("official"):
+        return APPELLATION_OFFICIAL
     if _looks_like_shop(item):
         return APPELLATION_SHOP
     if _looks_like_official(item):
@@ -143,7 +147,9 @@ _CLUE_HEADER = (
     "「店家/商家」→ 写「店家提到」「店铺页面写着」，绝不能写成「网友」；\n"
     "「档案（Lolibrary）」→ 社区整理的发售资料库，可能有错漏，写「档案记录」"
     "「Lolibrary 上记录」，不能写「官方」，也不能写「网友」；\n"
-    "「官方」→ 品牌自有渠道，写「官方公告」「品牌官方说明」；\n"
+    "「官方」→ 品牌自有渠道，写「官方公告」「品牌官方说明」；"
+    "同一件事官方帖和网友帖说法不一致时，官方定价、开团与再贩时间、兑换规则"
+    "以「官方」为准并说明是官方说法；二手成交价、到手价、翻车反馈仍然看网友帖；\n"
     "「图上文字」→ 原帖配图的机器识别结果（OCR），只保证字符、不保证列对齐。"
     "lolita 价格口径：预约价 = 定金 + 尾款，二者是同一件裙子的两个付款阶段，现货价是另一回事；"
     "证据里出现「预约价 578 元，由定金 188 元加尾款 390 元组成；现货价 598 元」这种整理句时，"
@@ -187,6 +193,8 @@ SYNTH_SYSTEM = """你是 Lolita 领域的问答助手，像微信里一个懂 Lo
    「店家/商家」写「店家提到」「店铺页面写着」；「官方」只给品牌自有渠道，写「官方公告」；
    「档案（Lolibrary）」是社区整理的发售资料库，不是品牌官方、可能有错漏，写「档案记录」
    「Lolibrary 上记录」，并说明它是社区整理。
+   官方定价、开团与再贩时间、兑换规则和网友帖不一致时以「官方」为准，并说明是官方说法；
+   二手成交价、到手价、翻车反馈仍然看网友帖。
 8. 禁止用「网友说」指代店家、官方或档案——把店家的话说成网友反馈，比不引用更危险；
    反过来也不能把社区档案抬成「官方」，那会让用户以为品牌确认过。
 9. 「图上文字」是原帖配图的机器识别结果，只保证字符、不保证列对齐。lolita 价格口径：
@@ -1026,6 +1034,18 @@ def _consensus_group_name(group: dict) -> str:
 
 def _consensus_group_sentence(group: dict) -> str:
     name = _consensus_group_name(group)
+    if group["kind"] in _PRICE_KINDS:
+        # 价格只交代"谁一致、谁对不上"。具体金额在正文里已经带 [n] 给过，
+        # 这里再按维度整串列一遍（实测同一串数字会被重复三次），只会让答案变吵。
+        if group["high"]:
+            refs = "".join(f"[{n}]" for n in group["refs"])
+            return f"{name} 多帖一致（{refs}）"
+        refs = "".join(f"[{entry['n']}]" for entry in group["items"])
+        if len(group["items"]) == 1:
+            return f"{name} 只有 {refs} 提到"
+        if group["consistent"]:
+            return f"{name} {refs} 说法一致"
+        return f"{name} {refs} 对不上"
     if group["high"]:
         refs = "".join(f"[{n}]" for n in group["refs"])
         return f"多帖一致（{refs}）：{name} {group['value']}"
@@ -1073,9 +1093,68 @@ def _tier_in_question(question: str) -> str:
     return ""
 
 
+def _cross_note(name: str, reason: str, shown: str) -> str:
+    if reason == "date":
+        return (
+            f"{name}这两条来自不同帖子，能读到的时间是 {shown}，"
+            "可能是换批改价；只凭帖子里的信息无法确定哪个是当前价格。"
+        )
+    if reason == "basis":
+        return (
+            f"{name}这两条来自不同帖子，{shown}，"
+            "计价口径不同，不能直接当同一个价。"
+        )
+    return (
+        f"{name}这两条来自不同帖子（{shown}），都没写团次或日期，"
+        "无法判断哪个更新、哪个是当前价格。"
+    )
+
+
+def _merged_cross_note(dims: str, reason: str, shown: str) -> str:
+    if reason == "date":
+        return (
+            f"这几条帖子在{dims}上对不上，能读到的时间是 {shown}，"
+            "可能是换批改价；只凭帖子里的信息无法确定哪个是当前价格。"
+        )
+    if reason == "basis":
+        return (
+            f"这几条帖子在{dims}上对不上，{shown}，"
+            "计价口径不同，不能直接当同一个价。"
+        )
+    return (
+        f"这几条帖子在{dims}上对不上，且都来自不同帖子（{shown}），"
+        "都没写团次或日期，无法判断哪个更新、哪个是当前价格。"
+    )
+
+
+def _merge_cross_notes(entries: list[dict]) -> tuple[list[str], bool]:
+    """同组证据、同样原因的跨帖分歧并成一句，避免按维度重复同一段理由。
+
+    返回 (说明句, 是否发生过合并)。只合并条件完全相同的项：证据编号与
+    读得到的时间/口径都一样才算同一件事；有一条不同就分开说。
+    """
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for entry in entries:
+        grouped.setdefault((entry["reason"], entry["shown"]), []).append(entry)
+    notes: list[str] = []
+    merged = False
+    for (reason, shown), group in grouped.items():
+        if len(group) == 1:
+            notes.append(_cross_note(group[0]["name"], reason, shown))
+            continue
+        merged = True
+        skus = {entry["sku"] for entry in group}
+        labels = sorted(
+            (entry["kind"] if len(skus) == 1 else entry["name"] for entry in group),
+            key=lambda label: (_kind_priority(label), label),
+        )
+        notes.append(_merged_cross_note("、".join(labels), reason, shown))
+    return notes, merged
+
+
 def _explain_price_differences(
     question: str, evidence: list[dict], collected: dict
-) -> list[str]:
+) -> dict:
     """同一维度出现两个以上不同数值时，说明差异来自款式、时效还是计价口径。"""
     hints = {
         int(item["n"]): _evidence_hints(item)
@@ -1084,7 +1163,7 @@ def _explain_price_differences(
     }
     focus = _tier_in_question(question)
     same_post: dict[int, list[tuple[str, list[str]]]] = {}
-    cross_notes: list[str] = []
+    cross_entries: list[dict] = []
     ordered = sorted(
         collected.items(), key=lambda kv: (_kind_priority(kv[0][1]), kv[0][0])
     )
@@ -1122,29 +1201,24 @@ def _explain_price_differences(
         ]
         if len({date for _n, date in dated}) >= 2:
             shown = "、".join(f"[{n}] 提到 {d}" for n, d in dated[:3])
-            cross_notes.append(
-                f"{name}这两条来自不同帖子，能读到的时间是 {shown}，"
-                "可能是换批改价；只凭帖子里的信息无法确定哪个是当前价格。"
-            )
+            reason = "date"
         elif len({base for _n, base in bases}) >= 2:
             shown = "、".join(f"[{n}] 写 {b}" for n, b in bases[:3])
-            cross_notes.append(
-                f"{name}这两条来自不同帖子，{shown}，计价口径不同，不能直接当同一个价。"
-            )
+            reason = "basis"
         else:
-            cross_notes.append(
-                f"{name}这两条来自不同帖子，都没写团次或日期，"
-                "无法判断哪个更新、哪个是当前价格。"
-            )
+            shown = "".join(f"[{number}]" for number in sorted(by_number)[:3])
+            reason = "missing"
+        cross_entries.append(
+            {"name": name, "sku": sku, "kind": kind, "reason": reason, "shown": shown}
+        )
+
+    cross_notes, merged = _merge_cross_notes(cross_entries)
 
     notes: list[str] = []
     for number, entries in same_post.items():
-        shown = "；".join(
-            f"{name} " + " 与 ".join(f"{value} 元" for value in values)
-            for name, values in entries[:2]
-        )
+        names = "、".join(name for name, _values in entries[:2])
         notes.append(
-            f"同一条帖子（[{number}]）里，{shown}，"
+            f"同一条帖子（[{number}]）里，{names}的数字对不上，"
             "帖子里没写哪个是改价后的，无法判断哪个是当前价格。"
         )
     notes.extend(cross_notes)
@@ -1158,22 +1232,23 @@ def _explain_price_differences(
             for number, entry in by_number.items():
                 for value in entry["values"]:
                     per_post.setdefault((number, kind), []).append((sku, value))
-        for (number, kind), pairs in per_post.items():
+        for (_number, _kind), pairs in per_post.items():
             if len({sku for sku, _v in pairs}) < 2 or len({v for _s, v in pairs}) < 2:
                 continue
-            shown = "、".join(
-                f"{sku}{kind} {value} 元[{number}]" for sku, value in pairs[:3]
-            )
+            skus: list[str] = []
+            for sku, _value in pairs:
+                if sku not in skus:
+                    skus.append(sku)
             notes.append(
-                f"同一条帖子里，{shown}——这是不同款式，价格本来就不同，"
-                "不是同一档位改价；按你要的款式对号入座。"
+                f"同一条帖子里，{'、'.join(skus[:3])}的价格不同——这是不同款式，"
+                "价格本来就不同，不是同一档位改价；按你要的款式对号入座。"
             )
             break
 
     if notes:
         notes = notes[:2]
         notes.append("下单前按卖家当前页面或最新一帖确认。")
-    return notes
+    return {"notes": notes, "merged": merged}
 
 
 def number_consensus(question: str, evidence: list[dict]) -> dict:
@@ -1255,11 +1330,12 @@ def number_consensus(question: str, evidence: list[dict]) -> dict:
             }
         )
 
-    attributions = (
+    price_notes = (
         _explain_price_differences(question, evidence, collected)
         if "price" in topics
-        else []
+        else {"notes": [], "merged": False}
     )
+    attributions = price_notes["notes"]
     if not groups and not attributions:
         return result
     groups.sort(key=lambda group: (not group["high"], group["sku"], group["kind"]))
@@ -1270,14 +1346,22 @@ def number_consensus(question: str, evidence: list[dict]) -> dict:
         else "尺码" if topics == ["size"]
         else "价格和尺码"
     )
-    sentences = [_consensus_group_sentence(group) for group in groups]
     all_high = bool(groups) and all(group["high"] for group in groups)
     conflict = any(len(group["counts"]) > 1 for group in groups)
+    # 有分歧时只列对不上的维度：开头已经说"对不上"，再把一致的维度列进去
+    # 既自相矛盾也不紧凑。
+    shown = [group for group in groups if not conflict or len(group["counts"]) > 1]
+    sentences = [_consensus_group_sentence(group) for group in shown]
     if all_high:
         text = f"关于{label}，" + "；".join(sentences) + "。"
     elif conflict:
-        text = f"关于{label}，几条帖子对不上：" + "；".join(sentences) + "。"
-        text += "".join(attributions) or "分歧可能来自型号、时效、是否二手或是否含税。"
+        if price_notes["merged"]:
+            # 多个维度的分歧条件完全相同，已经并成一句：不再按维度列一遍，
+            # 否则同一层意思会说三遍（实测四时花就是这样）。
+            text = "".join(attributions)
+        else:
+            text = f"关于{label}，几条帖子对不上：" + "；".join(sentences) + "。"
+            text += "".join(attributions) or "分歧可能来自型号、时效、是否二手或是否含税。"
     elif groups:
         text = f"关于{label}，几条帖子的说法：" + "；".join(sentences) + "。"
     else:

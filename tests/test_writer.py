@@ -534,8 +534,10 @@ def test_number_consensus_three_posts_agree():
 
     assert result["triggered"] is True
     assert result["groups"][0]["high"] is True
+    assert "长款预约价" in result["text"]
     assert "多帖一致（[1][3][4]）" in result["text"]
-    assert "长款预约价 578" in result["text"]
+    # 数字在正文里已经带 [n] 给过，归因段不再列一遍
+    assert "578" not in result["text"]
     assert "已验证" not in result["text"] and "已校验" not in result["text"]
 
 
@@ -561,8 +563,8 @@ def test_number_consensus_two_posts_conflict():
     out = writer_mod.number_consensus("四时花价格", ev)["text"]
 
     assert "对不上" in out
-    assert "[1] 写 578" in out
-    assert "[3] 写 598" in out
+    assert "长款预约价 [1][3] 对不上" in out
+    assert "578" not in out and "598" not in out
     assert "都没写团次或日期" in out
     assert "无法判断哪个更新" in out
     assert "下单前按卖家当前页面或最新一帖确认" in out
@@ -581,12 +583,15 @@ def test_attribution_by_style_when_one_post_lists_two_skus():
             "url": "",
         }
     ]
-    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+    result = writer_mod.number_consensus("四时花价格", ev)
+    out = result["text"]
+    attrs = "".join(result["attributions"])
 
-    assert "不同款式" in out
-    assert "长款预约价 578 元[6]" in out
-    assert "短款预约价 568 元[6]" in out
-    assert "不是同一档位改价" in out
+    assert "不同款式" in attrs
+    # 归因只讲理由，不再把上一句已经带 [6] 给过的数字复述一遍
+    assert "578" not in attrs and "568" not in attrs
+    assert "长款" in attrs and "短款" in attrs
+    assert "不是同一档位改价" in attrs
     assert "无法判断" not in out
 
 
@@ -595,23 +600,66 @@ def test_attribution_by_time_when_posts_carry_dates():
         _claim(1, "2024 年 10 月 四时花 长款预约价 578 元"),
         _claim(3, "2025 年 3 月 四时花 长款预约价 568 元"),
     ]
-    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+    result = writer_mod.number_consensus("四时花价格", ev)
+    attrs = "".join(result["attributions"])
 
-    assert "[1] 提到 2024年10月" in out
-    assert "[3] 提到 2025年3月" in out
-    assert "换批改价" in out
-    assert "无法确定哪个是当前价格" in out
+    assert "[1] 提到 2024年10月" in attrs
+    assert "[3] 提到 2025年3月" in attrs
+    assert "换批改价" in attrs
+    assert "无法确定哪个是当前价格" in attrs
+    # 时间要留（那是判断新旧的理由），价格数字不复述
+    assert "578" not in attrs and "568" not in attrs
 
 
 def test_attribution_says_what_is_missing_instead_of_inventing():
     ev = [_claim(1, "长款预约价 578 元"), _claim(3, "长款预约价 568 元")]
+    result = writer_mod.number_consensus("四时花价格", ev)
+    attrs = "".join(result["attributions"])
+
+    assert "都没写团次或日期" in attrs
+    assert "[1]" in attrs and "[3]" in attrs
+    # 不能凭空造批次/日期。
+    assert not re.search(r"20\d{2}", attrs)
+    assert "团次" not in attrs.replace("都没写团次或日期", "")
+    assert "无法判断哪个更新" in attrs
+    # 归因不复述价格数字
+    assert "578" not in attrs and "568" not in attrs
+
+
+def test_attribution_merges_dimensions_with_the_same_missing_reason():
+    """多个维度同证据、同原因时并成一句，不再按维度重复"来自不同帖子"。"""
+    ev = [
+        _claim(6, "长款尾款 390 元，现货价 598 元"),
+        _claim(8, "长款尾款 380 元，现货价 588 元"),
+    ]
     out = writer_mod.number_consensus("四时花价格", ev)["text"]
 
+    assert out.count("来自不同帖子") == 1
+    assert "这几条帖子在现货价、尾款上对不上" in out
+    assert "[6][8]" in out
     assert "都没写团次或日期" in out
-    # 不能凭空造批次/日期。
-    assert not re.search(r"20\d{2}", out)
-    assert "团次" not in out.replace("都没写团次或日期", "")
     assert "无法判断哪个更新" in out
+    assert out.count("下单前") == 1
+    # 数字仍只靠上一句带 [n]，合并句里不复述
+    for value in ("390", "380", "598", "588"):
+        assert value not in out
+    # 合并后不再先按维度列一遍
+    assert "关于价格，几条帖子对不上" not in out
+
+
+def test_attribution_keeps_dimensions_apart_when_evidence_differs():
+    """证据不是同一组，就不能合并——否则会把两组不同来源说成一件事。"""
+    ev = [
+        _claim(1, "长款尾款 390 元"),
+        _claim(3, "长款尾款 380 元"),
+        _claim(2, "长款现货价 598 元"),
+        _claim(4, "长款现货价 588 元"),
+    ]
+    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+
+    assert "这几条帖子" not in out
+    assert out.count("来自不同帖子") == 2
+    assert "[1][3]" in out and "[2][4]" in out
 
 
 def test_attribution_explains_two_images_in_the_same_post():
@@ -630,7 +678,10 @@ def test_attribution_explains_two_images_in_the_same_post():
     out = writer_mod.number_consensus("四时花价格", ev)["text"]
 
     assert "同一条帖子（[6]）" in out
-    assert "578 元" in out and "568 元" in out
+    # 数字在上一句已经带 [6] 给过，归因只讲「帖子里没交代哪个是新价」
+    assert "578" not in out and "568" not in out
+    assert "数字对不上" in out
+    assert "长款预约价" in out
     assert "无法判断哪个是当前价格" in out
     assert "下单前按卖家当前页面或最新一帖确认" in out
 
@@ -641,8 +692,8 @@ def test_number_consensus_two_equal_posts_are_listed_not_called_consistent():
 
     assert "多帖一致" not in result["text"]
     assert "对不上" not in result["text"]
-    assert "[1] 写 578" in result["text"]
-    assert "[3] 写 578" in result["text"]
+    assert "[1][3] 说法一致" in result["text"]
+    assert "578" not in result["text"]
 
 
 def test_number_consensus_two_vs_two_is_not_high_confidence():
@@ -656,7 +707,8 @@ def test_number_consensus_two_vs_two_is_not_high_confidence():
 
     assert "多帖一致" not in out
     assert "对不上" in out
-    assert "[1] 写 578" in out and "[3] 写 598" in out
+    assert "[1][2][3][4]" in out
+    assert "578" not in out and "598" not in out
 
 
 def test_number_consensus_does_not_cross_sku():
@@ -675,7 +727,7 @@ def test_number_consensus_skips_non_numeric_question():
     assert writer_mod.number_consensus("四时花怎么洗", ev)["text"] == ""
 
 
-def test_number_consensus_lists_ocr_values_without_unverified_marker():
+def test_number_consensus_keeps_ocr_refs_without_restating_values():
     ocr_text = (
         "天丝 OP 长款本体：预约价 578 元，由定金 188 元加尾款 390 元组成；"
         "现货价 598 元。"
@@ -694,9 +746,10 @@ def test_number_consensus_lists_ocr_values_without_unverified_marker():
     ]
     out = writer_mod.number_consensus("四时花价格", ev)["text"]
 
-    # 数字必须字面来自 OCR 行；标注不进答案，每个数字都带编号。
-    assert "[4] 写 188/390/578/598" in out
-    assert "[1] 写 598" in out
+    # 只交代哪几条对不上，OCR 那串数字不在归因段重复
+    assert "长款预约价 [1][4] 对不上" in out
+    for value in ("188", "390", "578", "598"):
+        assert value not in out
     assert "未校验" not in out and "原图" not in out
     assert "已验证" not in out and "已校验" not in out
 

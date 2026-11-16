@@ -540,9 +540,73 @@ def _search_evidence(channel: str, results: list, limit: int | None = None) -> l
             # 这两个字段不进写作提示词，只有代码侧读它们。
             "image_count": int(getattr(r, "image_count", 0) or 0),
             "image_urls": list(getattr(r, "image_urls", None) or []),
+            # 作者只用于判断「是不是品牌官方账号发的」，不进提示词。
+            "author_id": str(getattr(r, "author_id", "") or ""),
+            "author_name": str(getattr(r, "author_name", "") or ""),
         }
         for r in results
     ]
+
+
+# 会去读官方账号主页的问题类型：定价与开团/再贩时间。洗护、尺码、搭配不在此列，
+# 那些问题看官方上新帖也用不上，不该为它多等。
+_OFFICIAL_INTENT_MARKERS = (
+    "价格", "多少钱", "定价", "定金", "尾款", "预约", "现货", "再贩", "开团",
+    "上新", "发售", "开售", "排期", "截止", "活动价", "优惠", "什么时候",
+)
+
+
+def _mark_official(items: list[dict], account: dict) -> bool:
+    """把官方账号发的证据标出来；返回是否有命中。
+
+    比对用 ``author_id``：约 10% 的笔记没有作者字段，这些会漏判——已知且接受，
+    不为了补作者再打一次接口。
+    """
+    user_id = str((account or {}).get("user_id") or "")
+    if not user_id:
+        return False
+    hit = False
+    for item in items:
+        if str(item.get("author_id") or "") == user_id:
+            item["official"] = True
+            hit = True
+    return hit
+
+
+def _official_evidence(
+    question: str, ctx: RecallContext, items: list[dict], limit: int | None
+) -> list[dict]:
+    """品牌官方账号的补充证据：现有召回里没有官方帖时，才去账号主页拿。
+
+    顺序固定：品牌 → 官方账号（白名单/缓存/搜一次）→ 已有结果里标记 → 还不够
+    才读账号主页一页。任何一步失败都返回空表，调用方照旧用现有 UGC 召回。
+    """
+    from app.services import xhs_accounts
+
+    brand, series = xhs_accounts.brand_for_question(question, ctx.settings)
+    if brand is None:
+        return []
+    account = xhs_accounts.resolve(brand, ctx.settings)
+    if not account:
+        return []
+    # 标记是免费的（只是比对已有结果的 author_id），所以先做。
+    if _mark_official(items, account):
+        return []
+    # 读主页要花请求，只为「定价/开团/再贩时间」这类问题花——洗护、尺码、搭配
+    # 问了也用不上官方上新帖，不该让它们多等一两秒。
+    if not any(marker in question for marker in _OFFICIAL_INTENT_MARKERS):
+        return []
+    notes = xhs_accounts.official_notes(account, ctx.settings, series=series)
+    if not notes:
+        return []
+    from app.services import xhs_search
+
+    extra = _search_evidence("xhs", xhs_search._notes_to_results(notes), limit)
+    nickname = str(account.get("nickname") or "")
+    for item in extra:
+        item["official"] = True
+        item["official_account"] = nickname
+    return extra
 
 
 def _recall_xhs(
@@ -557,6 +621,11 @@ def _recall_xhs(
         max_results=ctx.settings.xhs_max_results,
     )
     items = _search_evidence("xhs", results, limit)
+    # 官方账号是增强：查不到就什么也不加，现有召回与排序不受影响。
+    try:
+        items.extend(_official_evidence(question, ctx, items, limit))
+    except Exception as exc:  # noqa: BLE001 - 账号链路失败不能拖垮召回
+        logger.warning("官方账号链路失败，跳过：%s: %s", type(exc).__name__, exc)
     # 图里的字是**另一条证据**：不拼进原帖正文。识别失败只缺这一条，不影响召回。
     try:
         items.extend(image_evidence.collect(question, items, ctx))

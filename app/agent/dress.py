@@ -71,6 +71,11 @@ class Brand:
     name: str
     region: str
     aliases: tuple[str, ...] = ()
+    # 已人工核对过的小红书官方账号（`content/brands.json` 的 ``xhs_account``）。
+    # 只登记实测 ``red_official_verified`` 为真的账号；没登记的不代表品牌没有账号，
+    # 只代表我们没确认，运行时再去搜一次并缓存结果。
+    xhs_account_id: str = ""
+    xhs_account_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,12 +178,16 @@ def load_brands(app: AppSettings | None = None) -> list[Brand]:
         aliases = tuple(
             str(alias).strip() for alias in (item.get("aliases") or []) if str(alias).strip()
         )
+        account = item.get("xhs_account")
+        account = account if isinstance(account, dict) else {}
         brands.append(
             Brand(
                 id=str(item.get("id") or name).strip(),
                 name=name,
                 region=str(item.get("region") or "UNKNOWN").strip().upper(),
                 aliases=aliases,
+                xhs_account_id=str(account.get("user_id") or "").strip(),
+                xhs_account_name=str(account.get("nickname") or "").strip(),
             )
         )
     return brands
