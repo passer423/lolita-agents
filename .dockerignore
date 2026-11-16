@@ -1,0 +1,44 @@
+# 镜像只该有：app/、content/、scripts/、requirements.txt。
+# 其余一律不进构建上下文——尤其是密钥与运行时数据。
+
+# 密钥（永远不进镜像，运行时由 compose 只读挂载）
+.env
+.env.*
+!.env.example
+
+# 运行时数据与索引（挂载进容器，不烤进镜像）
+data/
+tests/.data/
+tests/.tmp/
+lolita-rag/
+Spider_XHS/
+
+# 测试、评测与开发工具
+tests/
+eval/
+docs/
+.github/
+.git/
+.pytest_cache/
+.pytest-tmp/
+.ruff_cache/
+.screenshots/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.log
+stderr.log
+
+# 文档与仓库元数据（运行不需要）
+*.md
+.gitignore
+
+# 部署文件自身（由 Docker/Compose 读取，不需要 COPY 进镜像）
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# 系统垃圾
+.DS_Store
+Thumbs.db

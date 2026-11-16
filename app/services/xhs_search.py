@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 6 * 3600
 
+# 缓存结构版本。v1 的 notes 里没有配图字段，读进来会让「图里可能有价格表」
+# 的提示整整 6 小时不出现，看起来像功能没生效。版本不匹配就跳过并重抓。
+CACHE_VERSION = 2
+
 
 class XhsUnavailable(RuntimeError):
     """小红书搜索不可用（未登录 / 没装 Playwright / 超时）。"""
@@ -38,32 +42,61 @@ def script_path() -> Path:
     return APP_ROOT / "scripts" / "xhs_search.py"
 
 
+_PROVIDERS = ("playwright", "spider_xhs")
+
+
 def _provider(app: AppSettings) -> str:
-    return (app.xhs_provider or "playwright").strip().lower()
+    value = (app.xhs_provider or "playwright").strip().lower()
+    if value not in _PROVIDERS:
+        raise XhsUnavailable(
+            f"未知的 XHS_PROVIDER：{value}（只支持 {' / '.join(_PROVIDERS)}）"
+        )
+    return value
 
 
-def _playwright_available(app: AppSettings) -> bool:
-    """Playwright 方案：脚本存在 + playwright 可导入 + 已登录标记。"""
+def _playwright_readiness(app: AppSettings) -> tuple[bool, str]:
+    """Playwright 方案的就绪原因：脚本 / 依赖 / 登录态三者缺一不可。"""
     if not script_path().exists():
-        return False
+        return False, f"找不到搜索脚本：{script_path()}"
     if importlib.util.find_spec("playwright") is None:
-        return False
-    return (app.xhs_profile_dir / ".logged_in").exists()
+        return False, "未安装 playwright（pip install playwright 后再装浏览器）"
+    if not (app.xhs_profile_dir / ".logged_in").exists():
+        return False, "未登录（先运行 python scripts/xhs_search.py --login 扫码）"
+    return True, ""
+
+
+def readiness(app: AppSettings) -> tuple[bool, str]:
+    """是否可搜，并给出具体原因。
+
+    状态接口与 ``available()`` 共用这一份判断，避免「界面说可用、召回时说
+    未登录」这种两边各写一遍导致的漂移。
+    """
+    if not app.xhs_enabled:
+        return False, "未启用（XHS_ENABLED=false）"
+    try:
+        provider = _provider(app)
+    except XhsUnavailable as exc:
+        return False, str(exc)
+    if provider == "spider_xhs":
+        from app.services import xhs_spider
+
+        return xhs_spider.readiness(app)
+    return _playwright_readiness(app)
 
 
 def available(app: AppSettings) -> bool:
     """只有“启用 + 对应 provider 就绪”才认为能搜。"""
-    if not app.xhs_enabled:
-        return False
-    if _provider(app) == "spider_xhs":
-        from app.services import xhs_spider
-
-        return xhs_spider.available(app)
-    return _playwright_available(app)
+    return readiness(app)[0]
 
 
-def _cache_path(app: AppSettings, query: str) -> Path:
-    digest = hashlib.sha1(query.encode("utf-8")).hexdigest()[:16]
+def _cache_path(app: AppSettings, query: str, *, provider: str, limit: int) -> Path:
+    """缓存键要带 provider 与 limit。
+
+    只按 query 哈希时，换 provider 会继续返回旧 provider 抓的结果，调大条数
+    也永远只见旧的那几条——看起来像「抓不到新笔记」，其实是缓存命中。
+    """
+    raw = f"{provider}|{limit}|{query}"
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
     return app.xhs_cache_dir / f"{digest}.json"
 
 
@@ -71,6 +104,12 @@ def _read_cache(path: Path) -> list[dict] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return None
+    version = payload.get("v")
+    if version != CACHE_VERSION:
+        logger.info(
+            "小红书缓存版本不匹配（v%s != v%s），跳过：%s", version, CACHE_VERSION, path.name
+        )
         return None
     if time.time() - float(payload.get("ts") or 0) > CACHE_TTL_SECONDS:
         return None
@@ -82,7 +121,10 @@ def _write_cache(path: Path, notes: list[dict]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"ts": time.time(), "notes": notes}, ensure_ascii=False),
+            json.dumps(
+                {"v": CACHE_VERSION, "ts": time.time(), "notes": notes},
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
     except OSError as exc:
@@ -98,11 +140,15 @@ def _notes_to_results(notes: list[dict]) -> list[web_search.SearchResult]:
         url = str(note.get("url") or "").strip()
         content = str(note.get("content") or "").strip()
         comments = note.get("comments") or []
+        # 正文可以退化成标题，但标题和链接不能缺：没有链接就不是可引用的线索。
+        # 搜索卡片常常只有标题，若这里强求正文，整路结果会被清空。
+        content = content or title
         if not (title and url and content):
             continue
         joined = "\n".join(
             [content, *(str(item).strip() for item in comments if str(item).strip())]
         )
+        image_urls = [str(item) for item in (note.get("images") or []) if str(item).strip()]
         results.append(
             web_search.SearchResult(
                 title=title,
@@ -111,6 +157,8 @@ def _notes_to_results(notes: list[dict]) -> list[web_search.SearchResult]:
                 content=joined,
                 site_name="小红书",
                 provider="xiaohongshu",
+                image_count=int(note.get("image_count") or len(image_urls)),
+                image_urls=image_urls,
             )
         )
     return results
@@ -179,21 +227,22 @@ def search(
     query = (query or "").strip()
     if not query:
         return []
+    # 先解析 provider：配置写错时要报「未知 XHS_PROVIDER」，而不是含糊的「未启用」。
+    provider = _provider(app)
     if not available(app):
         raise XhsUnavailable("小红书未启用或未登录")
 
-    cache = _cache_path(app, query)
+    limit = max(1, min(10, max_results))
+    timeout_seconds = float(timeout or app.xhs_timeout)
+    cache = _cache_path(app, query, provider=provider, limit=limit)
     cached = _read_cache(cache)
     if cached is not None:
         return _notes_to_results(cached)
 
-    limit = max(1, min(10, max_results))
-    timeout_seconds = float(timeout or app.xhs_timeout)
-
-    if _provider(app) == "spider_xhs":
+    if provider == "spider_xhs":
         from app.services import xhs_spider
 
-        notes = xhs_spider.fetch_notes(query, app, limit)
+        notes = xhs_spider.fetch_notes(query, app, limit, timeout=timeout_seconds)
     else:
         notes = _playwright_fetch_notes(query, app, limit, timeout_seconds)
 

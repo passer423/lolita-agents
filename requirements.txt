@@ -4,31 +4,35 @@
 # （那一份包含 jieba / rank-bm25 / numpy / sentence-transformers / chromadb 等；
 #   复制到这里会让"上游更新"和"本仓依赖"分叉，所以只声明本仓**直接 import** 的东西。）
 
-# ---------- Web / 上传 ----------
+# ---------- Web ----------
 fastapi>=0.110,<1.0
 uvicorn>=0.27,<1.0
-python-multipart>=0.0.9
 pydantic>=2.0,<3.0
 pydantic-settings>=2.0,<3.0
 
 # ---------- 模型接入 ----------
-# app/agent/planner.py、writer.py、services/ingest_extract.py 里运行时导入；
+# app/agent/planner.py、app/agent/writer.py 里运行时导入；
 # 不写在这里，首次问答会 503，且没有任何提示指向"缺包"。
 openai>=1.12.0,<3.0
 
 # ---------- agent 编排（LangGraph） ----------
-# 多路召回的编排层用 StateGraph 表达（见 docs/adr/0002）；langchain-core 提供
-# Tool / 消息基础设施，langchain-openai 提供 ChatOpenAI 模型节点。只声明本仓
-# 直接 import 的包，避免与上游 lolita-rag 的依赖分叉。
+# 多路召回的编排层用 StateGraph / Send 表达（见 docs/adr/0002）。只声明本仓
+# 直接 import 的包：langchain-core 与 langchain-openai 不是直接依赖（模型调用
+# 走 openai SDK），由 langgraph 自带一份，显式写会和上游 lolita-rag 分叉。
 langgraph>=0.2,<1.0
-langchain-core>=0.3,<1.0
-langchain-openai>=0.2,<1.0
 
 # ---------- 取图 ----------
 # imagefetch.py 显式用 certifi 的 CA bundle（这台机器的 Anaconda 默认证书路径是坏的）。
 certifi>=2023.7.22
 
-# ---------- 小红书通道（可选）----------
-# 只在启用 XHS_ENABLED 时需要；不装不影响其它通道。
-# 装完还要 python -m playwright install msedge 并跑 scripts/xhs_search.py --login 扫码。
-playwright>=1.40
+# ---------- 鉴权（可选模式） ----------
+# AUTH_MODE=jwt 时校验/签发 HS256 令牌。AUTH_MODE=off/api_key 不 import 它，
+# 但仍是必装：模块顶层导入了 jwt，缺包会让服务直接起不来。
+PyJWT>=2.8,<3.0
+
+# ---------- 小红书通道（可选，默认不装）----------
+# 只服务 XHS_PROVIDER=playwright。代码在缺包时会判该通道 not ready 并跳过，
+# 不影响其它通道，所以不做必装依赖。需要时手动装：
+#   python -m pip install "playwright>=1.40"
+#   python -m playwright install msedge
+#   python scripts/xhs_search.py --login

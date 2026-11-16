@@ -1,0 +1,66 @@
+# 应用服务。镜像里只有依赖 + 代码；data、.env、上游 checkout 全部挂载进来。
+#
+# 用法：
+#   mkdir -p data
+#   docker compose up -d --build
+#   curl http://127.0.0.1:8787/api/health
+#
+# 上游不在默认的 ../lolita-rag 时，构建上下文与运行时挂载分别用：
+#   LOLITA_RAG_CTX=/srv/lolita-rag LOLITA_RAG_ROOT=/srv/lolita-rag \
+#     docker compose up -d --build
+
+services:
+  app:
+    build:
+      context: .
+      # 只读上游的 requirements.txt 来装依赖，不把上游源码烤进镜像。
+      additional_contexts:
+        rag: ${LOLITA_RAG_CTX:-../lolita-rag}
+      args:
+        APP_UID: ${APP_UID:-1000}
+        APP_GID: ${APP_GID:-1000}
+    image: lolita-agents:local
+    # 默认只发布到宿主机回环地址。要给手机/局域网用，去掉前面的 127.0.0.1: 并自行加访问控制。
+    ports:
+      - "127.0.0.1:${BIND_PORT:-8787}:8787"
+    volumes:
+      # 运行时数据：kbindex、app.db、lolibrary 档案、日志。容器重建不丢。
+      - type: bind
+        source: ./data
+        target: /data
+      # 配置只读挂载；缺 .env 时直接报错，而不是让容器以空配置跑起来。
+      - type: bind
+        source: ./.env
+        target: /app/.env
+        read_only: true
+        bind:
+          create_host_path: false
+      # 上游知识管线只读挂载（代码与 real 索引都不进镜像）。
+      - type: bind
+        source: ${LOLITA_RAG_ROOT:-../lolita-rag}
+        target: /opt/lolita-rag
+        read_only: true
+    environment:
+      # 覆盖 .env 里的宿主机路径；容器里只看挂载点。
+      LOLITA_RAG_ROOT: /opt/lolita-rag
+      DATA_DIR: /data
+      # BGE 模型缓存落到数据目录，容器重建后不用重新下载。
+      HF_HOME: /data/hf-cache
+    healthcheck:
+      # 直接打应用自己的 /api/health（版本 + 两份索引 + 六通道状态）。
+      # 它只报状态；索引未建时接口仍返回 200，所以这里是存活检查，不是就绪门槛。
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/api/health', timeout=3).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_signal: SIGTERM
+    # 必须大于 uvicorn 的 --timeout-graceful-shutdown（20s），否则会被 SIGKILL。
+    stop_grace_period: 30s
+    restart: unless-stopped

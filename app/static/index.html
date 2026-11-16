@@ -7,6 +7,20 @@
 <meta name="description" content="Lolita 领域问答助手：多路召回">
 <title>Lolita 问答助手</title>
 <link rel="stylesheet" href="/style.css">
+<style>
+  /* 运行轨迹面板（W15）：页面级样式放这里，避免与其它线正在改的 style.css 冲突。
+     每次请求一块，通道用 badge，每步右侧对齐耗时。 */
+  .runs-list { display: flex; flex-direction: column; gap: 12px; }
+  .run-item { border-top: 1px solid var(--line); padding-top: 12px; }
+  .run-item:first-child { border-top: 0; padding-top: 0; }
+  .run-q { font-size: 13.5px; line-height: 1.5; overflow-wrap: anywhere; }
+  .run-meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  .run-channels { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .run-steps { margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+  .run-step { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0 1px 8px; }
+  .run-step > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+  .run-ms { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--muted); opacity: .8; }
+</style>
 </head>
 <body>
   <header id="topbar">
@@ -17,6 +31,29 @@
   <main id="view"><div class="loading">载入中…</div></main>
 
   <div id="toast" class="toast"></div>
+
+  <script>
+    /* 同端口旧站点（lo-life）留下的 Service Worker 会 cache-first 返回旧外壳。
+       这里只在「确实还有旧注册」时注册一次清理工：它清掉本 origin 的缓存后
+       立即注销自己并刷新，之后页面回到无 SW 的普通网络请求。
+       没有注册时什么都不做——否则每次开页都重装 worker 会变成刷新循环。
+       sessionStorage 是防死循环的保险：万一注销失败，60 秒内不重复尝试。
+       版本号由服务端注入，用于绕过旧 worker 对 sw.js 自身的缓存。 */
+    (function () {
+      if (!('serviceWorker' in navigator)) return;
+      var KEY = 'sw_cleanup_at';
+      try {
+        if (Date.now() - Number(sessionStorage.getItem(KEY) || 0) < 60000) return;
+      } catch (e) { /* 隐私模式禁用 storage：照常尝试一次 */ }
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        if (!regs.length) return;
+        try { sessionStorage.setItem(KEY, String(Date.now())); } catch (e) { /* 同上 */ }
+        navigator.serviceWorker.register('/sw.js?v=__ASSET_VERSION__').catch(function () {
+          /* 注册失败不阻塞首屏：下次打开还会再试 */
+        });
+      }).catch(function () { /* getRegistrations 不可用：交给 HTTP no-store */ });
+    })();
+  </script>
 
   <script src="/chat.js"></script>
 </body>

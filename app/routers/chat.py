@@ -14,22 +14,34 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
+import threading
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from app import db
 from app.agent import channels, graph, trace
-from app.agent.channels import ALL_CHANNELS, RecallContext
+from app.agent.channels import RecallContext
 from app.agent.planner import DeepSeekPlanner, PlannerUnavailable
-from app.agent.writer import DeepSeekWriter, sanitize_history
+from app.agent.writer import MAX_HISTORY_TURNS, DeepSeekWriter, sanitize_history
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+# 召回 / 写作都安静超过这个时长就发一个 SSE 注释帧。
+# 反向代理与手机网络会把长时间无字节的连接掐掉；心跳也让前端知道服务还活着。
+HEARTBEAT_SECONDS = 10.0
+
+
+def _sse(payload: dict) -> str:
+    return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
 
 class ChatTurn(BaseModel):
@@ -39,9 +51,34 @@ class ChatTurn(BaseModel):
 
 class ChatIn(BaseModel):
     message: str = Field(..., min_length=1, max_length=300)
-    # 多轮：客户端带上最近几轮。服务端不存会话——**编号只在单轮内有效**，
-    # 所以历史里只留文字，不再引用上一轮的 [n]。
-    history: list[ChatTurn] = Field(default_factory=list, max_length=16)
+    # 多轮：``None`` = 服务端从会话记忆里补最近几轮；显式 ``[]`` = 开新对话，
+    # 不加载旧上下文（清空请用 DELETE /api/chat/history）。
+    # **编号只在单轮内有效**：落库与回填时都会剥掉 [n]（见 sanitize_history）。
+    history: list[ChatTurn] | None = Field(default=None, max_length=16)
+
+    @field_validator("message")
+    @classmethod
+    def _reject_mojibake(cls, value: str) -> str:
+        """只剩一串问号的消息：几乎一定是请求体的中文在发送前就丢了。
+
+        真事：PowerShell 5 的 ``Invoke-WebRequest`` 用 Content-Type 的默认
+        charset（ISO-8859-1）编码字符串体，``裙撑长度怎么选`` 发出去变成
+        ``???????``。服务端收到的就是七个问号，召回当然是空——但接口回的是
+        「没有检索到能回答这个问题的内容」，把编码问题伪装成知识库问题，
+        排查方向全被带偏。
+
+        阈值故意收窄：只有「连续 3 个以上半角问号、且没有别的字符」才拦。
+        单个 ``?``、两个 ``?``、纯标点、纯 emoji、全角 ``？？？`` 都照常放行
+        ——那些是正常输入，替换后的形态是连续半角问号且长度与原文一致。
+        """
+        if re.fullmatch(r"\?{3,}", value.strip()):
+            raise ValueError(
+                "消息里只有问号，没有可检索的文字。请求体疑似不是 UTF-8 编码："
+                "中文在发送前被替换成了 ?，服务端无法还原。"
+                "请用 UTF-8 发送 JSON（curl 加 --data-binary @body.json；"
+                "PowerShell 先把字符串转成 UTF-8 字节再传给 -Body；浏览器不受影响）。"
+            )
+        return value
 
 
 def _make_planner(app=settings):
@@ -55,12 +92,36 @@ def _make_writer(app=settings):
     return DeepSeekWriter(app)
 
 
-def _history_of(payload: ChatIn) -> list[dict]:
-    return sanitize_history([turn.model_dump() for turn in payload.history])
+def _history_of(payload: ChatIn, app=settings) -> list[dict]:
+    """客户端没传历史（``None``）时从服务端会话记忆补最近几轮。
+
+    显式传空列表是「开新对话」，不是「没传」——否则用户永远摆脱不掉旧上下文。
+    两条路径都要过 ``sanitize_history``：落库的历史同样可能带上一轮的 [n]。
+    """
+    if payload.history is None:
+        raw = db.recent_conversations(app.db_path, limit=MAX_HISTORY_TURNS)
+    else:
+        raw = [turn.model_dump() for turn in payload.history]
+    return sanitize_history(raw)
+
+
+def _remember(question: str, answer: str, app=settings) -> None:
+    """把本轮问答写进会话记忆。失败只 warning：记不住不等于答不了。"""
+    answer = (answer or "").strip()
+    if not answer:
+        return
+    try:
+        db.add_exchange(
+            app.db_path,
+            question,
+            answer,
+            keep=app.conversation_retention_messages,
+        )
+    except Exception as exc:  # noqa: BLE001 - 持久化失败不能影响已经给出的回答
+        logger.warning("会话记忆写入失败（不影响回答）：%s", exc)
 
 
 def _ctx(app=settings) -> RecallContext:
-    # v1 单用户：偏好记忆后续接入 db；召回通道先不依赖偏好。
     return RecallContext(settings=app)
 
 
@@ -77,11 +138,9 @@ def chat_status() -> dict:
         "channels": {
             "core": list(channels.CORE_CHANNELS),
             "supplementary": list(channels.SUPPLEMENTARY_CHANNELS),
-            "enabled": {
-                "xhs": settings.xhs_enabled,
-                "weibo": settings.search_enabled,
-                "web": settings.search_enabled,
-            },
+            # 每通道分开报 enabled（配置开了）与 ready（现在真能召回），
+            # 否则「没填 key」「没登录」都会被压成同一句「不可用」。
+            "status": channels.channel_status(settings),
         },
         "stream": True,
     }
@@ -112,12 +171,21 @@ def chat(payload: ChatIn) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    _remember(payload.message, str(result.get("answer") or ""))
     return result
 
 
 @router.post("/stream")
-def chat_stream(payload: ChatIn):
-    """SSE：先推进度（各通道召回几条、补查决策），再推答案增量，最后推 final。"""
+async def chat_stream(payload: ChatIn, request: Request):
+    """SSE：召回阶段逐通道推进度，再推答案增量，最后推 final。
+
+    图的消费放在后台线程（``graph.stream`` 是同步生成器），事件经
+    ``asyncio.Queue`` 回到事件循环：这样等待期间还能发心跳、还能
+    ``await request.is_disconnected()``，不会把整个事件循环堵住。
+
+    客户端断开（点「停止」或关页面）时置位 ``stop``：graph 在下一个 chunk
+    边界收尾，不再消费上游结果，也不再有线程继续逐字拉模型。
+    """
     try:
         planner = _make_planner(settings)
     except PlannerUnavailable as exc:
@@ -130,21 +198,59 @@ def chat_stream(payload: ChatIn):
 
     history = _history_of(payload)
 
-    def generate():
+    async def generate():
+        loop = asyncio.get_running_loop()
+        events: asyncio.Queue = asyncio.Queue()
+        stop = threading.Event()
+
+        def deliver(item) -> None:
+            loop.call_soon_threadsafe(events.put_nowait, item)
+
+        def pump() -> None:
+            try:
+                for event in graph.stream(
+                    payload.message,
+                    ctx=_ctx(settings),
+                    planner=planner,
+                    writer=writer,
+                    history=history,
+                    stop=stop,
+                ):
+                    # 只在拿到 final 后落库：中途断开的半截回答不该进入下一轮上下文。
+                    if event.get("type") == "final":
+                        _remember(payload.message, str(event.get("answer") or ""))
+                    deliver(("event", event))
+                    if stop.is_set():
+                        break
+            except Exception as exc:  # noqa: BLE001 - 流已经开始，只能以事件形式报错
+                logger.exception("流式回答失败")
+                deliver(("error", f"{type(exc).__name__}: {exc}"))
+            finally:
+                deliver(("done", None))
+
+        threading.Thread(target=pump, name="chat-sse", daemon=True).start()
         try:
-            for event in graph.stream(
-                payload.message,
-                ctx=_ctx(settings),
-                planner=planner,
-                writer=writer,
-                history=history,
-            ):
-                yield "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
-        except Exception as exc:  # noqa: BLE001 - 流已经开始，只能以事件形式报错
-            logger.exception("流式回答失败")
-            yield "data: " + json.dumps(
-                {"type": "error", "detail": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False
-            ) + "\n\n"
+            while True:
+                if await request.is_disconnected():
+                    logger.info("客户端已断开，停止本轮流式回答")
+                    break
+                try:
+                    kind, value = await asyncio.wait_for(
+                        events.get(), timeout=HEARTBEAT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    # SSE 注释帧：浏览器忽略，但连接不会因长时间无字节被中间层掐断。
+                    yield ": keep-alive\n\n"
+                    continue
+
+                if kind == "done":
+                    break
+                if kind == "error":
+                    yield _sse({"type": "error", "detail": value})
+                    break
+                yield _sse(value)
+        finally:
+            stop.set()
 
     return StreamingResponse(
         generate(),
@@ -156,6 +262,25 @@ def chat_stream(payload: ChatIn):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/history")
+def chat_history(
+    limit: int = Query(MAX_HISTORY_TURNS, ge=1, le=MAX_HISTORY_TURNS)
+) -> dict:
+    """最近几轮会话记忆，按时间正序。
+
+    只回 ``role``/``content``：历史消息没有证据与召回过程，前端按普通文本渲染，
+    ``[n]`` 不做成可点角标。上限与模型上下文共用 ``MAX_HISTORY_TURNS``，
+    避免前端看到模型看不到的历史。
+    """
+    return {"messages": db.recent_conversations(settings.db_path, limit=limit)}
+
+
+@router.delete("/history")
+def clear_history() -> dict:
+    """清空服务端会话记忆（= 开新对话）。关注项与排查轨迹不受影响。"""
+    return {"removed": db.clear_conversations(settings.db_path)}
 
 
 @router.get("/runs")
