@@ -8,14 +8,14 @@
 
 ### 适用范围
 
-本仓库默认模式为「分支 + PR」：任何会改变代码或内容的改动，都走特性分支并通过 PR 合并，不直接推送 main。
+本仓库默认**直接在 `main` 上开发**：所有提交直接落 `main`，不再维护长期并行的功能分支。需要试验或大范围改动时，可以开临时分支（`feat/xxx`、`fix/xxx`），但要及时合并回 `main`，不长期保留。
 
 ### 开工前
 
 - 先 `git status` 确认工作区干净，有未提交改动就先说明情况再继续。
 - 确认 `.env` 存在，缺了就从模板复制（Windows `copy .env.example .env`，macOS/Linux `cp .env.example .env`），再把 `LOLITA_RAG_ROOT` 改成上游 lolita-rag 仓库的真实路径。
 - 缺 `LOLITA_RAG_ROOT` 时 `pytest` 会失败（当前是 `tests/test_api.py::test_status_reports_channels_without_key` 1 项），报错形似代码故障，实际是环境没配；`.env` 不进 git（理由见「提交」一节）。
-- `git fetch` 后再开分支，分支名形如 `feat/xxx`、`fix/xxx`。
+- `git fetch` 后直接在 `main` 上工作；确需试验时再开临时分支（`feat/xxx`、`fix/xxx`），完成后立即合并回 `main`。
 - 本仓库同一时刻只跑一个写代码的任务：多个会话共享同一工作目录，并发会互相踩 Git 状态和文件。
 
 ### 提交
@@ -27,8 +27,8 @@
 ### 推送与合并
 
 - 推送前必须跑测试和 lint，全绿才推。
-- 只推 `feat/xxx` 这类特性分支，然后开 PR 交给人审阅合并。
-- 永不 force push；永不直接 push 到 main 或 master。
+- 默认直接提交并推送 `main`；临时分支用完即合并，不长期并行。
+- 永不 force push。
 - 推送或测试失败时停下来报告，不要反复重试硬推。
 
 推送前要跑的命令：
