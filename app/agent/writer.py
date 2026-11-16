@@ -1036,6 +1036,146 @@ def _consensus_group_sentence(group: dict) -> str:
     return f"{name}：" + "，".join(parts)
 
 
+# 归因只能用证据里读得到的东西：帖子正文/标题里的年月、包邮或二手这类口径词、
+# 价格栏位与款式名。读不到就明说「无法判断」，绝不编团次或日期。
+_DATE_RE = re.compile(r"20\d{2}\s*(?:年|[-/.])\s*(?:\d{1,2}\s*月?)?")
+_BASIS_TOKENS = ("包邮", "不包邮", "含运费", "不含运费", "含税", "不含税", "二手", "转单")
+_PRICE_KINDS = frozenset(
+    {
+        "价格", "全款", "售价", "定价", "原价", "现价",
+        "预约", "现货", "定金", "尾款", "预约价", "现货价",
+    }
+)
+
+
+def _evidence_hints(item: dict) -> dict:
+    text = f"{item.get('title') or ''} {item.get('text') or ''}"
+    dates: list[str] = []
+    for match in _DATE_RE.finditer(text):
+        token = re.sub(r"\s+", "", match.group())
+        if token not in dates:
+            dates.append(token)
+    return {"dates": dates, "bases": [t for t in _BASIS_TOKENS if t in text]}
+
+
+def _kind_priority(kind: str) -> int:
+    """预约价是主口径，冲突说明先讲它，再讲现货与分期。"""
+    return {
+        "预约价": 0, "预约": 1, "现货价": 2, "现货": 3, "定金": 4, "尾款": 5,
+    }.get(kind, 9)
+
+
+def _tier_in_question(question: str) -> str:
+    upper = (question or "").upper()
+    for key, name in _CONSENSUS_SKU:
+        if name != UNKNOWN_SKU and key.upper() in upper:
+            return name
+    return ""
+
+
+def _explain_price_differences(
+    question: str, evidence: list[dict], collected: dict
+) -> list[str]:
+    """同一维度出现两个以上不同数值时，说明差异来自款式、时效还是计价口径。"""
+    hints = {
+        int(item["n"]): _evidence_hints(item)
+        for item in evidence
+        if item.get("n") is not None
+    }
+    focus = _tier_in_question(question)
+    same_post: dict[int, list[tuple[str, list[str]]]] = {}
+    cross_notes: list[str] = []
+    ordered = sorted(
+        collected.items(), key=lambda kv: (_kind_priority(kv[0][1]), kv[0][0])
+    )
+
+    for (sku, kind), by_number in ordered:
+        if kind not in _PRICE_KINDS:
+            continue
+        if focus and sku != focus:
+            continue
+        values: list[str] = []
+        for entry in by_number.values():
+            for value in entry["values"]:
+                if value not in values:
+                    values.append(value)
+        if len(values) < 2:
+            continue
+        name = (
+            kind
+            if kind in ("定金", "尾款") or sku == UNKNOWN_SKU
+            else f"{sku}{kind}"
+        )
+        if len(by_number) == 1:
+            number = next(iter(by_number))
+            same_post.setdefault(number, []).append((name, values))
+            continue
+        dated = [
+            (number, date)
+            for number in sorted(by_number)
+            for date in hints.get(number, {}).get("dates", [])
+        ]
+        bases = [
+            (number, base)
+            for number in sorted(by_number)
+            for base in hints.get(number, {}).get("bases", [])
+        ]
+        if len({date for _n, date in dated}) >= 2:
+            shown = "、".join(f"[{n}] 提到 {d}" for n, d in dated[:3])
+            cross_notes.append(
+                f"{name}这两条来自不同帖子，能读到的时间是 {shown}，"
+                "可能是换批改价；只凭帖子里的信息无法确定哪个是当前价格。"
+            )
+        elif len({base for _n, base in bases}) >= 2:
+            shown = "、".join(f"[{n}] 写 {b}" for n, b in bases[:3])
+            cross_notes.append(
+                f"{name}这两条来自不同帖子，{shown}，计价口径不同，不能直接当同一个价。"
+            )
+        else:
+            cross_notes.append(
+                f"{name}这两条来自不同帖子，都没写团次或日期，"
+                "无法判断哪个更新、哪个是当前价格。"
+            )
+
+    notes: list[str] = []
+    for number, entries in same_post.items():
+        shown = "；".join(
+            f"{name} " + " 与 ".join(f"{value} 元" for value in values)
+            for name, values in entries[:2]
+        )
+        notes.append(
+            f"同一条帖子（[{number}]）里，{shown}，"
+            "帖子里没写哪个是改价后的，无法判断哪个是当前价格。"
+        )
+    notes.extend(cross_notes)
+
+    if not focus:
+        # 同一条帖子按款式分了不同价：这不是矛盾，是不同 SKU，得说清楚。
+        per_post: dict[tuple[int, str], list[tuple[str, str]]] = {}
+        for (sku, kind), by_number in collected.items():
+            if kind not in _PRICE_KINDS or sku == UNKNOWN_SKU:
+                continue
+            for number, entry in by_number.items():
+                for value in entry["values"]:
+                    per_post.setdefault((number, kind), []).append((sku, value))
+        for (number, kind), pairs in per_post.items():
+            if len({sku for sku, _v in pairs}) < 2 or len({v for _s, v in pairs}) < 2:
+                continue
+            shown = "、".join(
+                f"{sku}{kind} {value} 元[{number}]" for sku, value in pairs[:3]
+            )
+            notes.append(
+                f"同一条帖子里，{shown}——这是不同款式，价格本来就不同，"
+                "不是同一档位改价；按你要的款式对号入座。"
+            )
+            break
+
+    if notes:
+        notes = notes[:2]
+        notes.append("下单前按卖家当前页面或最新一帖确认。")
+    return notes
+
+
 def number_consensus(question: str, evidence: list[dict]) -> dict:
     """多帖数值比对。没有可比对象时返回空文本，调用方什么都不加。"""
     topics = _consensus_topics(question)
@@ -1115,7 +1255,12 @@ def number_consensus(question: str, evidence: list[dict]) -> dict:
             }
         )
 
-    if not groups:
+    attributions = (
+        _explain_price_differences(question, evidence, collected)
+        if "price" in topics
+        else []
+    )
+    if not groups and not attributions:
         return result
     groups.sort(key=lambda group: (not group["high"], group["sku"], group["kind"]))
     groups = groups[:3]
@@ -1126,18 +1271,21 @@ def number_consensus(question: str, evidence: list[dict]) -> dict:
         else "价格和尺码"
     )
     sentences = [_consensus_group_sentence(group) for group in groups]
-    all_high = all(group["high"] for group in groups)
+    all_high = bool(groups) and all(group["high"] for group in groups)
     conflict = any(len(group["counts"]) > 1 for group in groups)
     if all_high:
         text = f"关于{label}，" + "；".join(sentences) + "。"
     elif conflict:
         text = f"关于{label}，几条帖子对不上：" + "；".join(sentences) + "。"
-        text += "分歧可能来自型号、时效、是否二手或是否含税。"
-    else:
+        text += "".join(attributions) or "分歧可能来自型号、时效、是否二手或是否含税。"
+    elif groups:
         text = f"关于{label}，几条帖子的说法：" + "；".join(sentences) + "。"
+    else:
+        text = "".join(attributions)
 
     result["triggered"] = True
     result["groups"] = groups
+    result["attributions"] = attributions
     result["text"] = text
     return result
 

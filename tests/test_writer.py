@@ -563,7 +563,76 @@ def test_number_consensus_two_posts_conflict():
     assert "对不上" in out
     assert "[1] 写 578" in out
     assert "[3] 写 598" in out
-    assert "分歧可能来自型号、时效、是否二手或是否含税" in out
+    assert "都没写团次或日期" in out
+    assert "无法判断哪个更新" in out
+    assert "下单前按卖家当前页面或最新一帖确认" in out
+
+
+def test_attribution_by_style_when_one_post_lists_two_skus():
+    """同一条帖子把长款/短款写成两个价：这是款式差异，不是同档位改价。"""
+    ev = [
+        {
+            "n": 6,
+            "channel": "image_text",
+            "source_kind": "image_text",
+            "ref": "x6#image_text",
+            "title": "四时花｜图上文字（OCR，未校验）",
+            "text": "图 1：长款本体：预约价 578 元。\n图 2：短款本体：预约价 568 元。",
+            "url": "",
+        }
+    ]
+    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+
+    assert "不同款式" in out
+    assert "长款预约价 578 元[6]" in out
+    assert "短款预约价 568 元[6]" in out
+    assert "不是同一档位改价" in out
+    assert "无法判断" not in out
+
+
+def test_attribution_by_time_when_posts_carry_dates():
+    ev = [
+        _claim(1, "2024 年 10 月 四时花 长款预约价 578 元"),
+        _claim(3, "2025 年 3 月 四时花 长款预约价 568 元"),
+    ]
+    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+
+    assert "[1] 提到 2024年10月" in out
+    assert "[3] 提到 2025年3月" in out
+    assert "换批改价" in out
+    assert "无法确定哪个是当前价格" in out
+
+
+def test_attribution_says_what_is_missing_instead_of_inventing():
+    ev = [_claim(1, "长款预约价 578 元"), _claim(3, "长款预约价 568 元")]
+    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+
+    assert "都没写团次或日期" in out
+    # 不能凭空造批次/日期。
+    assert not re.search(r"20\d{2}", out)
+    assert "团次" not in out.replace("都没写团次或日期", "")
+    assert "无法判断哪个更新" in out
+
+
+def test_attribution_explains_two_images_in_the_same_post():
+    """同帖两张图给出两个数（实测 578 / 568）：说清帖子里没交代哪个是新价。"""
+    ev = [
+        {
+            "n": 6,
+            "channel": "image_text",
+            "source_kind": "image_text",
+            "ref": "x6#image_text",
+            "title": "四时花｜图上文字（OCR，未校验）",
+            "text": "图 2：长款本体：预约价 578 元。\n图 3：长款本体：预约价 568 元。",
+            "url": "",
+        }
+    ]
+    out = writer_mod.number_consensus("四时花价格", ev)["text"]
+
+    assert "同一条帖子（[6]）" in out
+    assert "578 元" in out and "568 元" in out
+    assert "无法判断哪个是当前价格" in out
+    assert "下单前按卖家当前页面或最新一帖确认" in out
 
 
 def test_number_consensus_two_equal_posts_are_listed_not_called_consistent():
