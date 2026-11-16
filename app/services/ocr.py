@@ -39,8 +39,10 @@ from app.services import imagefetch
 logger = logging.getLogger(__name__)
 
 ENGINE = "rapidocr_onnxruntime"
-# 缓存结构版本。识别文本的结构变了就加一；引擎版本另算进缓存键。
-CACHE_VERSION = 1
+# 缓存结构版本。识别文本的形态变了就加一；引擎版本另算进缓存键。
+# v2：改为按检测框 y 中心分组还原行，旧缓存是按引擎返回顺序直接拼接的错位文本，
+# 不兼容——否则修好行序后仍会读到旧的错位结果。
+CACHE_VERSION = 2
 
 _engine_lock = threading.Lock()
 _engine_box: dict[str, object] = {}
@@ -141,8 +143,57 @@ def _engine():
         return engine
 
 
+def _group_lines(output: list) -> str:
+    """按检测框还原行：先按 y 中心聚成行，行内按 x 从左到右拼接。
+
+    为什么不能直接按引擎返回顺序拼：实测同一张价格表，引擎顺序可能是
+    「定金 / 棉OP短袖 / 尾款 / 预约价 / 现货价 / 188 / 长款本体 / 390…」，
+    列头和数据行全错开，模型会把尾款当预约价。这里只做**几何还原**，
+    不判断列含义——列归属仍然由「原样引用整行 + 对照原图」约束。
+    """
+    items: list[dict] = []
+    for box, text, _score in output or []:
+        value = str(text).strip()
+        if not value:
+            continue
+        xs = [float(point[0]) for point in box]
+        ys = [float(point[1]) for point in box]
+        items.append(
+            {
+                "text": value,
+                "cy": sum(ys) / len(ys),
+                "x0": min(xs),
+                "height": max(ys) - min(ys),
+            }
+        )
+    if not items:
+        return ""
+
+    heights = sorted(item["height"] for item in items if item["height"] > 0)
+    median_height = heights[len(heights) // 2] if heights else 10.0
+    # 同一行的框会有几像素的基线差；按中位字高的一半做容差，避免把两行并成一行。
+    tolerance = max(6.0, median_height * 0.6)
+
+    items.sort(key=lambda item: (item["cy"], item["x0"]))
+    rows: list[dict] = []
+    for item in items:
+        if rows and abs(item["cy"] - rows[-1]["cy"]) <= tolerance:
+            rows[-1]["items"].append(item)
+            rows[-1]["cy"] = sum(entry["cy"] for entry in rows[-1]["items"]) / len(
+                rows[-1]["items"]
+            )
+        else:
+            rows.append({"cy": item["cy"], "items": [item]})
+
+    lines = []
+    for row in rows:
+        ordered = sorted(row["items"], key=lambda item: item["x0"])
+        lines.append(" ".join(item["text"] for item in ordered))
+    return "\n".join(lines)
+
+
 def _recognize_bytes(data: bytes) -> str:
-    """把一张图的文字按行读出来；行序保持引擎输出顺序，不做列对齐。"""
+    """把一张图的文字读出来：保持行序，行内保持从左到右，不做列对齐。"""
     engine = _engine()
     # RapidOCR 收路径最稳（内部按内容解码，不依赖扩展名）；临时文件用完即删。
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
@@ -152,12 +203,7 @@ def _recognize_bytes(data: bytes) -> str:
         output, _elapsed = engine(path)
     finally:
         Path(path).unlink(missing_ok=True)
-    lines = [
-        str(text).strip()
-        for _box, text, _score in (output or [])
-        if str(text).strip()
-    ]
-    return "\n".join(lines)
+    return _group_lines(output)
 
 
 def _recognize_with_timeout(data: bytes, timeout: float) -> str | None:

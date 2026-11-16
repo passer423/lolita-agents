@@ -144,9 +144,10 @@ _CLUE_HEADER = (
     "「档案（Lolibrary）」→ 社区整理的发售资料库，可能有错漏，写「档案记录」"
     "「Lolibrary 上记录」，不能写「官方」，也不能写「网友」；\n"
     "「官方」→ 品牌自有渠道，写「官方公告」「品牌官方说明」；\n"
-    "「图上文字」→ 原帖配图的机器识别结果（OCR，未校验），可能有错、可能漏字。"
-    "只能写「图上标着…（OCR，未校验）[n]」，数字照识别结果原样说，"
-    "不得改写成表格、不得写成「某款 578 元」这种确定断言，并提醒以原图为准。\n"
+    "「图上文字」→ 原帖配图的机器识别结果（OCR，未校验），只保证字符、不保证列对齐。"
+    "只能原样引用图上的整行（保留原行顺序，例如「长款 定金188 尾款390 预约价578 现货598」），"
+    "绝不能把数字归纳成「预约价 390、现货价 578」这类带类型标签的断言；"
+    "型号/列名请对照原图，无法确定某数字属于哪一列就不要替它指派类型，并提醒以原图为准。\n"
     "这些内容不得作为洗护方式、尺码、材质、工艺的规范结论；"
     "与【可作依据】冲突时，以后者为准。"
 )
@@ -182,9 +183,10 @@ SYNTH_SYSTEM = """你是 Lolita 领域的问答助手，像微信里一个懂 Lo
    「Lolibrary 上记录」，并说明它是社区整理。
 8. 禁止用「网友说」指代店家、官方或档案——把店家的话说成网友反馈，比不引用更危险；
    反过来也不能把社区档案抬成「官方」，那会让用户以为品牌确认过。
-9. 「图上文字（OCR，未校验）」是机器识别原帖配图得到的内容，可能有错、可能漏字。
-   引用时只能写「图上标着…（OCR，未校验）」，并挂该条编号；数字照识别结果原样说，
-   不得换算、不得整理成表格、不得写成「某款 578 元」这种确定断言，并提醒以原图为准。
+9. 「图上文字（OCR，未校验）」只保证字符、不保证列对齐。只能原样引用图上的整行
+   （保留原行顺序，例如「长款 定金188 尾款390 预约价578 现货598」），并挂该条编号；
+   绝不能把数字归纳成「预约价 390、现货价 578」这类带类型标签的断言；型号/列名无法
+   确定就对照原图，或干脆不替数字指派类型，并提醒以原图为准。
 """
 
 
@@ -506,6 +508,104 @@ def fix_source_attribution(
     return "".join(parts), fixes
 
 
+# --------------------------------------------------------------------- 图上文字后处理
+#
+# OCR 只保证字符，不保证列对齐。实测模型会把「尾款 390」写成「预约价 390」，
+# 后两列直接丢掉。提示词已经禁止这种归纳，这里再兜一层：**只有当某个
+# 「类型 + 数字」在 OCR 原文中不是紧挨着出现时**才动，改成原样引用那一行。
+# 不做数字换算、不补类型，也不碰没有引用图上文字的句子。
+
+_OCR_PRICE_LABEL_RE = re.compile(
+    r"(预约价|现货价|定金|尾款|全款|售价|原价|现价)\s*(?:是|为|约|[:：])?\s*(\d{2,5})"
+)
+
+
+def _ocr_rows(evidence: list[dict], numbers: dict[int, dict]) -> list[tuple[int, str]]:
+    rows: list[tuple[int, str]] = []
+    for number, item in numbers.items():
+        if item.get("source_kind") != "image_text":
+            continue
+        for raw in str(item.get("text") or "").splitlines():
+            line = raw.strip()
+            # 「图 1：」是证据拼装前缀，不是图上原文；去掉后再判断是否空行。
+            line = re.sub(r"^图\s*\d+\s*[：:]\s*", "", line)
+            if not line or line.startswith("（OCR"):
+                continue
+            rows.append((number, line))
+    return rows
+
+
+def demote_ocr_price_labels(
+    answer: str, evidence: list[dict]
+) -> tuple[str, list[dict]]:
+    """把「预约价 390」这类 OCR 归纳换回图上原文行；返回 ``(新文本, 改动记录)``。
+
+    只处理同时满足的句子：出现「类型 + 数字」、该组合在 OCR 原文里并不相邻、
+    且句子引用（或至少没有排除）图上文字证据。找不到对应行时退成一句
+    「不保证列对齐，请对照原图」，绝不保留错误的类型指派。
+    """
+    if not answer or not evidence:
+        return answer, []
+    numbered = _evidence_numbers(evidence)
+    image_numbers = {
+        number
+        for number, item in numbered.items()
+        if item.get("source_kind") == "image_text"
+    }
+    if not image_numbers:
+        return answer, []
+
+    rows = _ocr_rows(evidence, numbered)
+    joined = "".join(line.replace(" ", "").replace("\u3000", "") for _, line in rows)
+    demotions: list[dict] = []
+    parts: list[str] = []
+
+    for match in _SENTENCE_RE.finditer(answer):
+        sentence = match.group()
+        pairs = _OCR_PRICE_LABEL_RE.findall(sentence)
+        if not pairs:
+            parts.append(sentence)
+            continue
+        unsupported = [
+            (label, number) for label, number in pairs if f"{label}{number}" not in joined
+        ]
+        if not unsupported:
+            parts.append(sentence)
+            continue
+        cited = {int(token) for token in _CITATION_RE.findall(sentence)}
+        if cited and not (cited & image_numbers):
+            parts.append(sentence)
+            continue
+
+        ref = min(cited & image_numbers) if cited & image_numbers else min(image_numbers)
+        quotes: list[str] = []
+        for _label, number in unsupported:
+            for _row_number, line in rows:
+                if re.search(rf"(?<!\d){re.escape(number)}(?!\d)", line) and line not in quotes:
+                    quotes.append(line)
+        if quotes:
+            replacement = (
+                "图上标着「" + "」；「".join(quotes[:3]) + f"」（OCR，未校验）[{ref}]。"
+            )
+        else:
+            replacement = (
+                "图上文字是 OCR 识别的，不保证列对齐，具体价格请对照原图"
+                f"（OCR，未校验）[{ref}]。"
+            )
+        demotions.append(
+            {
+                "sentence": sentence[:80],
+                "unsupported": [f"{label}{number}" for label, number in unsupported],
+                "replacement": replacement,
+            }
+        )
+        parts.append(replacement)
+
+    if not demotions:
+        return answer, []
+    return "".join(parts), demotions
+
+
 # --------------------------------------------------------------------- 诊断
 #
 # 诊断挂在 ``writer.usage`` 下：graph 已把 writer.usage 同时写进响应
@@ -521,6 +621,7 @@ def _diagnostics_block(
     streamed: bool,
     filled: list[dict] | None = None,
     narrowed: list[str] | None = None,
+    demotions: list[dict] | None = None,
 ) -> dict:
     flagged = uncited_claim_sentences(answer, evidence)
     return {
@@ -535,6 +636,8 @@ def _diagnostics_block(
         "citation_fills": filled or [],
         "narrowed_sentences": narrowed or [],
         "source_attribution_fixes": fixes,
+        # OCR 归纳被换回原文行的记录：出现过就说明模型试图替数字指派列含义。
+        "ocr_price_demotions": demotions or [],
     }
 
 
@@ -752,11 +855,20 @@ class DeepSeekWriter:
         self._record(getattr(response, "usage", None), picked)
         text = (response.choices[0].message.content or "").strip()
         text, fixes = fix_source_attribution(text, evidence)
+        # OCR 只保证字符、不保证列对齐：模型一旦把数字归纳成「预约价 390」，
+        # 就换回图上原文行，避免把尾款当预约价。
+        text, demotions = demote_ocr_price_labels(text, evidence)
         # 只有非流式能补引用：流式的字已经交付给用户，回头改等于打脸。
         text, filled, narrowed = fill_citations(text, evidence)
         text += image_hint(question, evidence)
         self.usage["diagnostics"] = _diagnostics_block(
-            text, evidence, fixes, streamed=False, filled=filled, narrowed=narrowed
+            text,
+            evidence,
+            fixes,
+            streamed=False,
+            filled=filled,
+            narrowed=narrowed,
+            demotions=demotions,
         )
         return text
 

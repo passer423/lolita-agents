@@ -102,7 +102,10 @@ def _rank(item: dict) -> int:
 
 
 def _build(item: dict, urls: list[str], parts: list[str]) -> dict:
-    header = "（OCR，未校验：以下为图片文字的机器识别结果，可能有误，以原图为准）"
+    header = (
+        "（OCR，未校验：按图上文字的检测框还原行后原样拼接，可能有误、"
+        "不保证列对齐，型号与列名以原图为准）"
+    )
     text = header + "\n" + "\n".join(parts)
     if len(text) > IMAGE_TEXT_LIMIT:
         text = text[:IMAGE_TEXT_LIMIT] + "…"

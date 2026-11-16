@@ -281,3 +281,83 @@ def test_cache_key_includes_engine_version(tmp_path, monkeypatch):
 
 def test_ocr_enabled_by_default():
     assert AppSettings.model_fields["ocr_enabled"].default is True
+
+
+# ---------- 行还原与列错位防护 ----------
+
+
+def _box(x: int, y: int, width: int = 20, height: int = 10) -> list[list[int]]:
+    return [[x, y], [x + width, y], [x + width, y + height], [x, y + height]]
+
+
+def test_group_lines_restores_row_order():
+    """引擎顺序错乱时也要按 y 分行、行内按 x 从左到右。"""
+    output = [
+        (_box(120, 30), "390", 0.9),
+        (_box(120, 0), "尾款", 0.9),
+        (_box(0, 30), "长款本体", 0.9),
+        (_box(0, 0), "定金", 0.9),
+        (_box(60, 30), "188", 0.9),
+    ]
+    assert ocr._group_lines(output) == "定金 尾款\n长款本体 188 390"
+
+
+OCR_TEXT = (
+    "（OCR，未校验：按行拼接）\n"
+    "图 1：定金 尾款 预约价 现货价\n"
+    "长款本体 188 390 578 598\n"
+    "短款本体 178 380 558 578"
+)
+
+
+def _image_item(text: str = OCR_TEXT, n: int = 4) -> dict:
+    return {
+        "n": n,
+        "source_kind": "image_text",
+        "channel": "image_text",
+        "title": "四时花｜图上文字（OCR，未校验）",
+        "text": text,
+        "url": POST_URL,
+    }
+
+
+def test_demote_replaces_wrong_type_assertion_with_rows():
+    answer = "图上标着棉 OP 短款预约价 390、现货价 578（OCR，未校验）[4]。"
+    out, demotions = writer.demote_ocr_price_labels(answer, [_image_item()])
+
+    assert "预约价 390" not in out
+    assert "现货价 578" not in out
+    assert "长款本体 188 390 578 598" in out
+    assert "短款本体 178 380 558 578" in out
+    assert "OCR，未校验" in out and "[4]" in out
+    assert demotions and "预约价390" in demotions[0]["unsupported"]
+
+
+def test_demote_keeps_verbatim_row_quote():
+    answer = "图上标着「长款本体 188 390 578 598」（OCR，未校验）[4]。"
+    out, demotions = writer.demote_ocr_price_labels(answer, [_image_item()])
+    assert out == answer
+    assert demotions == []
+
+
+def test_demote_allows_label_when_it_is_literal_in_ocr():
+    item = _image_item("（OCR，未校验）\n图 1：预约价 578")
+    answer = "图上标着预约价 578（OCR，未校验）[4]。"
+    out, demotions = writer.demote_ocr_price_labels(answer, [item])
+    assert out == answer
+    assert demotions == []
+
+
+def test_demote_skips_sentence_citing_non_image_evidence():
+    other = {"n": 1, "source_kind": "realtime", "channel": "web", "title": "官方", "text": "x"}
+    answer = "官方页面写着预约价 390 [1]。"
+    out, demotions = writer.demote_ocr_price_labels(answer, [_image_item(), other])
+    assert out == answer
+    assert demotions == []
+
+
+def test_prompt_forbids_column_type_induction():
+    for text in (writer._CLUE_HEADER, writer.SYNTH_SYSTEM):
+        assert "不保证列对齐" in text
+    assert "绝不能把数字归纳成" in writer.SYNTH_SYSTEM
+    assert "绝不能把数字归纳成" in writer._CLUE_HEADER
