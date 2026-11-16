@@ -95,11 +95,11 @@ def upstream_settings(app: AppSettings | None = None, *, source: str = "own"):
     ``source`` 决定索引来源（多路召回的一源一通道，见 ADR-0001）：
 
     * ``own`` —— 指向本仓自有知识库索引（``data_dir=kb_index_dir``）；
-    * ``real`` —— 指向上游仓库自带的真实语料索引（**不覆盖 data_dir**，用上游默认）。
+    * ``real`` —— 指向上游仓库自带的真实语料索引（``data_dir=上游 PROJECT_ROOT/data``）。
     """
     app = app or default_settings
     _install_upstream(Path(app.lolita_rag_root))
-    from src.config import Settings  # noqa: PLC0415 - 必须先装 sys.path
+    from src.config import PROJECT_ROOT, Settings  # noqa: PLC0415 - 必须先装 sys.path
 
     app.ensure_dirs()
     common = {
@@ -116,7 +116,11 @@ def upstream_settings(app: AppSettings | None = None, *, source: str = "own"):
         "embedding_allow_download": False,
     }
     if source == "real":
-        return Settings(**common)
+        # 必须显式写上游自带的 data/，不能靠 Settings 的默认值：pydantic-settings
+        # 会读环境变量，而本应用用 DATA_DIR 指向自有数据目录（self-hosted runner
+        # 上尤其如此）。只留默认值的话 real 通道会被拽到本仓 data/，那里没有上游
+        # 真实语料，装载时只会报「索引还没建」，看起来像代码故障。
+        return Settings(data_dir=PROJECT_ROOT / "data", **common)
     return Settings(data_dir=app.kb_index_dir, **common)
 
 
