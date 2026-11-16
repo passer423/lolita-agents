@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
@@ -143,14 +144,15 @@ def test_text_marks_ocr_unverified(tmp_path, ready, monkeypatch):
     assert "以原图为准" in item["text"]
 
 
-def test_budget_two_evidence_three_images(tmp_path, ready, monkeypatch):
+def test_budget_five_evidence_three_images(tmp_path, ready, monkeypatch):
+    """比对要 5 条证据，三条帖子都该被识别；每条仍只认前 3 张图。"""
     calls = _stub_ocr(monkeypatch)
     posts = [
         _xhs(CLUE_TEXT, url=f"{POST_URL}-{index}") for index in range(3)
     ]
     out = image_evidence.collect("四时花价格", posts, _ctx(tmp_path))
-    assert len(out) == 2
-    assert len(calls) == 6
+    assert len(out) == 3
+    assert len(calls) == 9
 
 
 def test_graph_keeps_image_text_next_to_post(tmp_path, ready, monkeypatch):
@@ -329,7 +331,9 @@ def test_demote_replaces_wrong_type_assertion_with_rows():
     assert "现货价 578" not in out
     assert "长款本体 188 390 578 598" in out
     assert "短款本体 178 380 558 578" in out
-    assert "OCR，未校验" in out and "[4]" in out
+    # 整句被换成原行引用后，来源旁注不再保留；编号仍指回图上文字。
+    assert "未校验" not in out and "原图" not in out
+    assert "[4]" in out
     assert demotions and "预约价390" in demotions[0]["unsupported"]
 
 
@@ -359,5 +363,158 @@ def test_demote_skips_sentence_citing_non_image_evidence():
 def test_prompt_forbids_column_type_induction():
     for text in (writer._CLUE_HEADER, writer.SYNTH_SYSTEM):
         assert "不保证列对齐" in text
+        assert "预约价 = 定金 + 尾款" in text
+        assert "只读到现货价" in text
     assert "绝不能把数字归纳成" in writer.SYNTH_SYSTEM
     assert "绝不能把数字归纳成" in writer._CLUE_HEADER
+
+
+# ---------- 价格整理（算术校验后才允许标列） ----------
+
+PRICE_TABLE = (
+    "价格表\n"
+    "定金 尾款 预约价 现货价\n"
+    "天丝 OP 长款本体 188 390 578 598\n"
+    "短款本体 178 380 558 578\n"
+    "1.0长围裙 68 110 178 188"
+)
+
+
+def _organized_item() -> dict:
+    text = image_evidence.format_price_text("四时花价格", "天丝 OP 长款本体 188 390 578 598")
+    return _image_item("（OCR，未校验）\n图 1：" + text)
+
+
+def test_format_validated_row_as_sentence():
+    out = image_evidence.format_price_text("四时花价格", "天丝 OP 长款本体 188 390 578 598")
+    assert out == (
+        "天丝 OP 长款本体：预约价 578 元，由定金 188 元加尾款 390 元组成；现货价 598 元。"
+    )
+    assert "188 390 578 598" not in out, "校验通过后不应再堆一行裸数字"
+
+
+def test_format_skips_row_when_sum_mismatches():
+    text = "天丝 OP 长款本体 188 390 999 998"
+    assert image_evidence.format_price_text("四时花价格", text) == text
+
+
+def test_format_skips_when_only_two_values():
+    text = "长款本体 188 578"
+    assert image_evidence.format_price_text("四时花价格", text) == text
+
+
+def test_format_header_wins_over_arithmetic_order():
+    text = "现货价 预约价 尾款 定金\n长款 598 578 390 188"
+    out = image_evidence.format_price_text("四时花价格", text)
+    assert "预约价 578 元，由定金 188 元加尾款 390 元组成；现货价 598 元" in out
+
+
+def test_format_header_still_requires_arithmetic():
+    text = "定金 尾款 预约价 现货价\n长款 188 390 999 998"
+    assert image_evidence.format_price_text("四时花价格", text) == text, "表头只给列名，等式对不上仍不整理"
+
+
+def test_format_main_tier_only_by_default():
+    out = image_evidence.format_price_text("四时花价格", PRICE_TABLE)
+    assert "天丝 OP 长款本体：预约价 578 元" in out
+    assert "预约价 558" not in out and "预约价 178" not in out
+    assert "178 380 558 578" not in out
+
+
+def test_format_targeted_tier():
+    out = image_evidence.format_price_text("四时花短款价格", PRICE_TABLE)
+    assert "短款本体：预约价 558 元" in out
+    assert "预约价 578" not in out
+
+
+def test_format_full_table_when_asked():
+    out = image_evidence.format_price_text("四时花全表价格", PRICE_TABLE)
+    assert "预约价 578 元" in out
+    assert "预约价 558 元" in out
+    assert "预约价 178 元" in out
+
+
+def test_format_never_emits_bare_number_row():
+    out = image_evidence.format_price_text("四时花价格", PRICE_TABLE)
+    assert not re.search(r"\d{2,5} \d{2,5} \d{2,5} \d{2,5}", out)
+
+
+def test_guard_allows_equation_when_validated():
+    item = _organized_item()
+    answer = (
+        "图上标着预约价 578 元，由定金 188 元加尾款 390 元组成；"
+        "现货价 598 元（原图，未校验）[4]。"
+    )
+    out, demotions = writer.demote_ocr_price_labels(answer, [item])
+    assert out == answer
+    assert demotions == []
+
+
+def test_guard_rewrites_wrong_equation_with_organized_sentence():
+    item = _organized_item()
+    answer = "图上标着长款预约价 390、现货价 578（OCR，未校验）[4]。"
+    out, demotions = writer.demote_ocr_price_labels(answer, [item])
+
+    assert "预约价 390" not in out
+    assert "现货价 578" not in out
+    assert "预约价 578 元，由定金 188 元加尾款 390 元组成；现货价 598 元" in out
+    assert "188 390 578 598" not in out, "有校验句时不应退回裸数字行"
+    assert out.endswith("598 元[4]。")
+    assert "[4]" in out
+    assert "未校验" not in out and "原图" not in out
+    assert demotions and "预约价390" in demotions[0]["unsupported"]
+
+
+def test_guard_still_rewrites_unvalidated_label():
+    item = _image_item("（OCR，未校验）\n图 1：长款本体 188 390 578 598")
+    answer = "图上标着预约价 578（OCR，未校验）[4]。"
+    out, demotions = writer.demote_ocr_price_labels(answer, [item])
+    assert "预约价 578" not in out
+    assert "长款本体 188 390 578 598" in out
+    assert demotions
+
+
+# ---------- 来源旁注与自查引导 ----------
+
+
+def test_clean_source_annotations_removes_markers_but_keeps_citations():
+    answer = (
+        "预约价 578 元，由定金 188 元加尾款 390 元组成；现货价 598 元"
+        "（价格来自原图 OCR，未校验，以原图为准）[4]。"
+        "别的档位就不列了（原图，未校验）[4]。"
+    )
+    out = writer.clean_source_annotations(answer)
+
+    assert "未校验" not in out and "原图" not in out
+    assert out.count("[4]") == 2, "去掉旁注时不能丢引用"
+    assert "预约价 578 元，由定金 188 元加尾款 390 元组成；现货价 598 元[4]" in out
+
+
+def test_clean_source_annotations_drops_model_caveat_sentence():
+    """模型自己补的「这是机器识别结果，还没校验」整句删掉，引导留一次。"""
+    answer = (
+        "四时花长款预约价 578 元[4]。"
+        "不过这是原帖配图的机器识别结果，还没校验，具体可点开参考来源核对。"
+    )
+
+    out = writer.clean_source_annotations(answer)
+
+    assert out == "四时花长款预约价 578 元[4]。具体可点开参考来源核对。"
+    assert "还没校验" not in out and "机器识别" not in out
+    assert out.count("[4]") == 1
+
+
+def test_source_guide_added_once_only_for_ocr_citation():
+    item = _organized_item()
+    answer = "长款预约价 578 元[4]。"
+
+    suffix = writer.source_guide_suffix(answer, [item])
+
+    assert suffix.strip() == writer.SOURCE_GUIDE + "。"
+    assert writer.source_guide_suffix(answer + suffix, [item]) == ""
+
+
+def test_prompt_asks_for_guide_without_repeating_annotations():
+    for text in (writer._CLUE_HEADER, writer.SYNTH_SYSTEM):
+        assert "具体可点开参考来源核对" in text
+        assert "（原图，未校验）" not in text

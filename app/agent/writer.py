@@ -144,10 +144,16 @@ _CLUE_HEADER = (
     "「档案（Lolibrary）」→ 社区整理的发售资料库，可能有错漏，写「档案记录」"
     "「Lolibrary 上记录」，不能写「官方」，也不能写「网友」；\n"
     "「官方」→ 品牌自有渠道，写「官方公告」「品牌官方说明」；\n"
-    "「图上文字」→ 原帖配图的机器识别结果（OCR，未校验），只保证字符、不保证列对齐。"
-    "只能原样引用图上的整行（保留原行顺序，例如「长款 定金188 尾款390 预约价578 现货598」），"
-    "绝不能把数字归纳成「预约价 390、现货价 578」这类带类型标签的断言；"
-    "型号/列名请对照原图，无法确定某数字属于哪一列就不要替它指派类型，并提醒以原图为准。\n"
+    "「图上文字」→ 原帖配图的机器识别结果（OCR），只保证字符、不保证列对齐。"
+    "lolita 价格口径：预约价 = 定金 + 尾款，二者是同一件裙子的两个付款阶段，现货价是另一回事；"
+    "证据里出现「预约价 578 元，由定金 188 元加尾款 390 元组成；现货价 598 元」这种整理句时，"
+    "说明该档位已通过算术校验：照这个句式回答并保留等式，不要堆一行裸数字，"
+    "也不要罗列其他档位/配色/小物的数字；除非用户明确问全表，只答整理句里的主档位。"
+    "没有整理句的原始行只能原样引用整行（保留原行顺序），绝不能把数字归纳成「预约价 390」这类"
+    "带类型标签的断言，型号/列名看不出来就不要猜；只读到现货价就说明只读到现货价，"
+    "不要用现货价冒充预约价。每个价格数字都要紧挨 [n]；最多在价格句后加一次"
+    "「具体可点开参考来源核对」，不要重复；不要写「机器识别」「未校验」「以原图为准」"
+    "这类提示，来源说明证据标题里已有，答案里不必再提。\n"
     "这些内容不得作为洗护方式、尺码、材质、工艺的规范结论；"
     "与【可作依据】冲突时，以后者为准。"
 )
@@ -183,10 +189,16 @@ SYNTH_SYSTEM = """你是 Lolita 领域的问答助手，像微信里一个懂 Lo
    「Lolibrary 上记录」，并说明它是社区整理。
 8. 禁止用「网友说」指代店家、官方或档案——把店家的话说成网友反馈，比不引用更危险；
    反过来也不能把社区档案抬成「官方」，那会让用户以为品牌确认过。
-9. 「图上文字（OCR，未校验）」只保证字符、不保证列对齐。只能原样引用图上的整行
-   （保留原行顺序，例如「长款 定金188 尾款390 预约价578 现货598」），并挂该条编号；
-   绝不能把数字归纳成「预约价 390、现货价 578」这类带类型标签的断言；型号/列名无法
-   确定就对照原图，或干脆不替数字指派类型，并提醒以原图为准。
+9. 「图上文字」是原帖配图的机器识别结果，只保证字符、不保证列对齐。lolita 价格口径：
+   预约价 = 定金 + 尾款，二者是同一件裙子的两个付款阶段；现货价是另一回事。
+   证据里出现「预约价 578 元，由定金 188 元加尾款 390 元组成；现货价 598 元」这类整理句时，
+   说明该档位已通过算术校验：照这个句式回答并保留等式，不要堆一行裸数字，
+   也不要罗列其他档位/配色/小物的数字；除非用户明确问全表，只答整理句里的主档位。
+   没有整理句就只能原样引用整行，绝不能把数字归纳成「预约价 390」这类带类型标签的断言。
+   回答要分开说预约价和现货价；只读到现货价就明说只读到现货价，不要用现货价冒充预约价。
+   每个价格数字都要紧挨 [n]；最多在价格句后加一次「具体可点开参考来源核对」，
+   不要重复；不要写「机器识别」「未校验」「以原图为准」这类提示，
+   来源说明证据标题里已有，答案里不必再提。
 """
 
 
@@ -249,6 +261,7 @@ _META_MARKERS = (
 # 免责 / 降权：不是事实断言，而是提醒用户别把它当规范。
 _DISCLAIMER_MARKERS = (
     "以实物为准", "为准", "个人感受", "个人经验", "仅供参考", "因人而异",
+    "分歧可能来自",
     "这只是", "只能算", "具体还得", "具体还是得",
 )
 # 反问收尾：对话性的追问，不是结论。
@@ -512,7 +525,8 @@ def fix_source_attribution(
 #
 # OCR 只保证字符，不保证列对齐。实测模型会把「尾款 390」写成「预约价 390」，
 # 后两列直接丢掉。提示词已经禁止这种归纳，这里再兜一层：**只有当某个
-# 「类型 + 数字」在 OCR 原文中不是紧挨着出现时**才动，改成原样引用那一行。
+# 「类型 + 数字」在 OCR 原文中不是紧挨着出现时**才动。有校验后的整理句就
+# 整句换成整理句（数字来自算术校验），没有就改回原样引用那一行。
 # 不做数字换算、不补类型，也不碰没有引用图上文字的句子。
 
 _OCR_PRICE_LABEL_RE = re.compile(
@@ -535,14 +549,45 @@ def _ocr_rows(evidence: list[dict], numbers: dict[int, dict]) -> list[tuple[int,
     return rows
 
 
+def _organized_rows(
+    evidence: list[dict], numbers: dict[int, dict]
+) -> list[tuple[int, dict]]:
+    """证据里已经通过算术校验的整理句，连同它的证据编号。"""
+    from app.agent import image_evidence
+
+    rows: list[tuple[int, dict]] = []
+    for number, item in numbers.items():
+        if item.get("source_kind") != "image_text":
+            continue
+        for row in image_evidence.organized_rows(str(item.get("text") or "")):
+            rows.append((number, row))
+    return rows
+
+
+def _pick_organized(
+    organized: list[tuple[int, dict]], sentence: str, ref: int
+) -> dict | None:
+    """优先取同一编号证据里的行；句子点名了型号就取那一行。"""
+    if not organized:
+        return None
+    same_ref = [row for number, row in organized if number == ref]
+    pool = same_ref or [row for _number, row in organized]
+    for row in pool:
+        label = row.get("label") or ""
+        if label and label in sentence:
+            return row
+    return pool[0] if pool else None
+
+
 def demote_ocr_price_labels(
     answer: str, evidence: list[dict]
 ) -> tuple[str, list[dict]]:
-    """把「预约价 390」这类 OCR 归纳换回图上原文行；返回 ``(新文本, 改动记录)``。
+    """纠正模型对 OCR 数字的错误类型归纳；返回 ``(新文本, 改动记录)``。
 
     只处理同时满足的句子：出现「类型 + 数字」、该组合在 OCR 原文里并不相邻、
-    且句子引用（或至少没有排除）图上文字证据。找不到对应行时退成一句
-    「不保证列对齐，请对照原图」，绝不保留错误的类型指派。
+    且句子引用（或至少没有排除）图上文字证据。证据里有通过算术校验的整理句时，
+    整句换成整理句（数字来自校验），否则改回原样引用那一行；两者都找不到时
+    退成一句「不保证列对齐，请对照原图」，绝不保留错误的类型指派或等式。
     """
     if not answer or not evidence:
         return answer, []
@@ -556,6 +601,7 @@ def demote_ocr_price_labels(
         return answer, []
 
     rows = _ocr_rows(evidence, numbered)
+    organized = _organized_rows(evidence, numbered)
     joined = "".join(line.replace(" ", "").replace("\u3000", "") for _, line in rows)
     demotions: list[dict] = []
     parts: list[str] = []
@@ -578,20 +624,24 @@ def demote_ocr_price_labels(
             continue
 
         ref = min(cited & image_numbers) if cited & image_numbers else min(image_numbers)
-        quotes: list[str] = []
-        for _label, number in unsupported:
-            for _row_number, line in rows:
-                if re.search(rf"(?<!\d){re.escape(number)}(?!\d)", line) and line not in quotes:
-                    quotes.append(line)
-        if quotes:
-            replacement = (
-                "图上标着「" + "」；「".join(quotes[:3]) + f"」（OCR，未校验）[{ref}]。"
-            )
+        picked = _pick_organized(organized, sentence, ref)
+        if picked is not None:
+            # 用校验过的数字重写整句：等式如果本来就不成立，这里只输出成立的那一版。
+            replacement = f"{picked['line'].rstrip('。')}[{ref}]。"
+            quotes: list[str] = []
         else:
-            replacement = (
-                "图上文字是 OCR 识别的，不保证列对齐，具体价格请对照原图"
-                f"（OCR，未校验）[{ref}]。"
-            )
+            quotes = []
+            for _label, number in unsupported:
+                for _row_number, line in rows:
+                    if (
+                        re.search(rf"(?<!\d){re.escape(number)}(?!\d)", line)
+                        and line not in quotes
+                    ):
+                        quotes.append(line)
+        if picked is None and quotes:
+            replacement = "图上标着「" + "」；「".join(quotes[:3]) + f"」[{ref}]。"
+        elif picked is None:
+            replacement = f"图上文字是机器识别的，不保证列对齐[{ref}]。"
         demotions.append(
             {
                 "sentence": sentence[:80],
@@ -604,6 +654,61 @@ def demote_ocr_price_labels(
     if not demotions:
         return answer, []
     return "".join(parts), demotions
+
+
+# 答案里不再重复「未校验 / 以原图为准」：来源性质在证据标题和【仅作线索】块里。
+# 只在确实引用了图上文字证据时，句末补一次「具体可点开参考来源核对」，让用户自查。
+SOURCE_GUIDE = "具体可点开参考来源核对"
+_UNVERIFIED_PAREN_RE = re.compile(r"（[^（）]{0,40}(?:未校验|以原图为准)[^（）]{0,20}）")
+# 模型偶尔会自己补一句「这是机器识别结果，还没校验」：按分句删掉，价格句不动。
+_CAVEAT_MARKERS = ("未校验", "还没校验", "以原图为准", "机器识别结果")
+
+
+def _drop_caveat_clauses(answer: str) -> str:
+    parts: list[str] = []
+    for match in _SENTENCE_RE.finditer(answer):
+        sentence = match.group()
+        if any(marker in sentence for marker in _CAVEAT_MARKERS):
+            clauses = re.split(r"(?<=[，,])", sentence)
+            sentence = "".join(
+                clause
+                for clause in clauses
+                if not any(marker in clause for marker in _CAVEAT_MARKERS)
+            ).lstrip("，, ")
+        parts.append(sentence)
+    return "".join(parts)
+
+
+def clean_source_annotations(answer: str) -> str:
+    """去掉答案里的未校验/以原图为准旁注；[n] 在括号外，不受影响。"""
+    if not answer:
+        return answer
+    answer = _UNVERIFIED_PAREN_RE.sub("", answer)
+    answer = answer.replace("，以原图为准", "").replace("以原图为准", "")
+    return _drop_caveat_clauses(answer)
+
+
+def _keep_one_guide(answer: str) -> str:
+    first = answer.find(SOURCE_GUIDE)
+    if first < 0:
+        return answer
+    cut = first + len(SOURCE_GUIDE)
+    return answer[:cut] + answer[cut:].replace(SOURCE_GUIDE, "")
+
+
+def source_guide_suffix(answer: str, evidence: list[dict]) -> str:
+    """仅当答案引用了图上文字证据、且还没写过引导时，返回要补的一句。"""
+    if not answer or SOURCE_GUIDE in answer:
+        return ""
+    image_numbers = {
+        int(item["n"])
+        for item in evidence
+        if item.get("source_kind") == "image_text" and item.get("n") is not None
+    }
+    cited = {int(token) for token in _CITATION_RE.findall(answer)}
+    if not (image_numbers & cited):
+        return ""
+    return f" {SOURCE_GUIDE}。"
 
 
 # --------------------------------------------------------------------- 诊断
@@ -622,6 +727,7 @@ def _diagnostics_block(
     filled: list[dict] | None = None,
     narrowed: list[str] | None = None,
     demotions: list[dict] | None = None,
+    consensus: dict | None = None,
 ) -> dict:
     flagged = uncited_claim_sentences(answer, evidence)
     return {
@@ -638,6 +744,8 @@ def _diagnostics_block(
         "source_attribution_fixes": fixes,
         # OCR 归纳被换回原文行的记录：出现过就说明模型试图替数字指派列含义。
         "ocr_price_demotions": demotions or [],
+        # 多帖数值比对：没有可比对象时 text 为空、groups 为 []。
+        "number_consensus": consensus or {},
     }
 
 
@@ -760,8 +868,278 @@ def image_hint(question: str, evidence: list[dict]) -> str:
     subject = f"[{number}] 那条笔记" if number else "该帖"
     return (
         f"\n\n另外，{subject}含 {count} 张图，可能含{label}；"
-        f"图片里的文字没有被解析，{target}请以原帖图片为准。"
+        f"{target}{SOURCE_GUIDE}。"
     )
+
+
+# --------------------------------------------------------------------- 多帖数值比对
+#
+# 价格/尺码问题召回的多条帖子常给出互相矛盾的数字，模型会把它们揉成一句，
+# 用户看不出分歧。这里在写作之后补一小段纯代码生成的比对：
+# * 只比同一 SKU、同一维度，且至少两条证据都给出数字的；
+# * 数字全部从证据文本里字面抽取，生成过程不新增任何数字；
+# * 同一数值出现在多数证据（≥3 条）时写「多帖一致」并列出编号，只是措辞，
+#   不改证据等级；其余情况逐条列，不替用户拍板。
+
+_CONSENSUS_PRICE_MARKERS = (
+    "价格", "多少钱", "定金", "尾款", "预约价", "现货价", "全款", "售价", "贵不贵",
+)
+_CONSENSUS_SIZE_MARKERS = (
+    "尺码", "码数", "尺寸", "胸围", "腰围", "肩宽", "袖长", "裙长", "衣长", "什么码", "穿多大",
+)
+_AMOUNT = r"(?:\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d{2,5}(?:\.\d{1,2})?)"
+_CONSENSUS_PRICE_RE = re.compile(
+    rf"(?P<kind>预约价|现货价|定金|尾款|全款|售价|定价|原价|现价|价格)"
+    rf"\s*(?:是|为|约|[:：])?\s*(?:[¥￥]|CNY|RMB)?\s*(?P<value>{_AMOUNT})"
+    rf"\s*(?:元|CNY|RMB)?",
+    re.IGNORECASE,
+)
+_CONSENSUS_CURRENCY_RE = re.compile(
+    rf"(?:[¥￥]|CNY|RMB)\s*(?P<value>{_AMOUNT})", re.IGNORECASE
+)
+_CONSENSUS_SIZE_RE = re.compile(
+    r"(?P<kind>尺码|码数|尺寸|胸围|腰围|肩宽|袖长|裙长|衣长)"
+    r"\s*(?:是|为|约|[:：])?\s*(?P<value>S|M|L|XL|XXL|\d{2,3})\s*(?:cm|CM|厘米)?"
+)
+_CONSENSUS_SKU = (
+    ("长围裙", "长围裙"), ("短围裙", "短围裙"),
+    ("长款", "长款"), ("短款", "短款"),
+    ("边夹", "边夹"), ("发带", "发带"), ("裙撑", "裙撑"), ("帽子", "帽子"),
+    ("围裙", "围裙"), ("OP", "OP"), ("JSK", "JSK"),
+)
+_CONSENSUS_PRICE_KINDS = ("定金", "尾款", "预约价", "现货价")
+UNKNOWN_SKU = "未标明型号"
+
+
+def _consensus_topics(question: str) -> list[str]:
+    text = question or ""
+    topics: list[str] = []
+    if any(marker in text for marker in _CONSENSUS_PRICE_MARKERS):
+        topics.append("price")
+    if any(marker in text for marker in _CONSENSUS_SIZE_MARKERS):
+        topics.append("size")
+    return topics
+
+
+def _normalize_amount(raw: str) -> str:
+    text = raw.replace(",", "")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text.lstrip("0") or "0"
+
+
+def _sku_of(line: str) -> str:
+    upper = line.upper()
+    for key, name in _CONSENSUS_SKU:
+        if key.upper() in upper:
+            return name
+    return UNKNOWN_SKU
+
+
+def _subject_terms(question: str) -> list[str]:
+    """从问题里剥掉数值意图词，剩下的就是「问的是哪条裙子」。"""
+    text = question or ""
+    markers = sorted(
+        {*_CONSENSUS_PRICE_MARKERS, *_CONSENSUS_SIZE_MARKERS}, key=len, reverse=True
+    )
+    for marker in markers:
+        text = text.replace(marker, " ")
+    text = re.sub(r"[的和与及]", " ", text)
+    return [
+        term
+        for term in re.split(r"[\s，。！？、,.!?：:；;（）()]+", text)
+        if len(term) >= 2
+    ]
+
+
+def _mentions_subject(item: dict, terms: list[str]) -> bool:
+    if not terms:
+        return True
+    haystack = f"{item.get('title') or ''}\n{item.get('text') or ''}"
+    return any(term in haystack for term in terms)
+
+
+def _claims_from_item(item: dict, topics: list[str]) -> list[dict]:
+    """一条证据里的数值主张；每个数字都能在原文里字面找到。"""
+    claims: list[dict] = []
+    for raw in str(item.get("text") or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        sku = _sku_of(line)
+        if "price" in topics:
+            found: list[tuple[str, str]] = []
+            for match in _CONSENSUS_PRICE_RE.finditer(line):
+                found.append(
+                    (match.group("kind"), _normalize_amount(match.group("value")))
+                )
+            known = {value for _kind, value in found}
+            for match in _CONSENSUS_CURRENCY_RE.finditer(line):
+                value = _normalize_amount(match.group("value"))
+                if value not in known:
+                    found.append(("价格", value))
+                    known.add(value)
+            if found:
+                by_kind: dict[str, list[str]] = {}
+                for kind, value in found:
+                    values = by_kind.setdefault(kind, [])
+                    if value not in values:
+                        values.append(value)
+                row = ""
+                if all(
+                    kind in by_kind and len(by_kind[kind]) == 1
+                    for kind in _CONSENSUS_PRICE_KINDS
+                ):
+                    row = "/".join(by_kind[kind][0] for kind in _CONSENSUS_PRICE_KINDS)
+                for kind, values in by_kind.items():
+                    claims.append(
+                        {
+                            "topic": "price",
+                            "sku": sku,
+                            "kind": kind,
+                            "values": tuple(values),
+                            "display": row or "/".join(values),
+                        }
+                    )
+        if "size" in topics:
+            for match in _CONSENSUS_SIZE_RE.finditer(line):
+                value = match.group("value").upper()
+                claims.append(
+                    {
+                        "topic": "size",
+                        "sku": sku,
+                        "kind": match.group("kind"),
+                        "values": (value,),
+                        "display": value,
+                    }
+                )
+    return claims
+
+
+def _consensus_group_name(group: dict) -> str:
+    return (
+        group["kind"]
+        if group["sku"] == UNKNOWN_SKU
+        else f"{group['sku']}{group['kind']}"
+    )
+
+
+def _consensus_group_sentence(group: dict) -> str:
+    name = _consensus_group_name(group)
+    if group["high"]:
+        refs = "".join(f"[{n}]" for n in group["refs"])
+        return f"多帖一致（{refs}）：{name} {group['value']}"
+    if len(group["items"]) == 1:
+        entry = group["items"][0]
+        return f"{name}：[{entry['n']}] 写 {entry['display']}"
+    parts = [f"[{entry['n']}] 写 {entry['display']}" for entry in group["items"]]
+    return f"{name}：" + "，".join(parts)
+
+
+def number_consensus(question: str, evidence: list[dict]) -> dict:
+    """多帖数值比对。没有可比对象时返回空文本，调用方什么都不加。"""
+    topics = _consensus_topics(question)
+    result: dict = {"triggered": False, "topics": topics, "groups": [], "text": ""}
+    if not topics:
+        return result
+
+    terms = _subject_terms(question)
+    collected: dict[tuple[str, str], dict[int, dict]] = {}
+    for item in evidence:
+        if not _mentions_subject(item, terms):
+            continue
+        number = item.get("n")
+        if number is None:
+            continue
+        try:
+            number = int(number)
+        except (TypeError, ValueError):
+            continue
+        for claim in _claims_from_item(item, topics):
+            key = (claim["sku"], claim["kind"])
+            entry = collected.setdefault(key, {}).setdefault(
+                number,
+                {
+                    "values": [],
+                    "displays": [],
+                    "source_kind": item.get("source_kind") or "",
+                },
+            )
+            for value in claim["values"]:
+                if value not in entry["values"]:
+                    entry["values"].append(value)
+            if claim["display"] not in entry["displays"]:
+                entry["displays"].append(claim["display"])
+
+    groups: list[dict] = []
+    for (sku, kind), by_number in collected.items():
+        if len(by_number) < 2:
+            continue
+        items = []
+        for number, entry in sorted(by_number.items()):
+            display = "/".join(entry["displays"][:4])
+            if len(entry["displays"]) > 4:
+                display += "…"
+            items.append(
+                {
+                    "n": number,
+                    "values": list(entry["values"]),
+                    "display": display,
+                    "source_kind": entry["source_kind"],
+                    "ocr": entry["source_kind"] == "image_text",
+                }
+            )
+        counts: dict[str, list[int]] = {}
+        for entry in items:
+            for value in entry["values"]:
+                refs = counts.setdefault(value, [])
+                if entry["n"] not in refs:
+                    refs.append(entry["n"])
+        total = len(items)
+        majority, majority_refs = max(counts.items(), key=lambda item: len(item[1]))
+        # 高可信：同一数值 ≥3 条证据，且占可比条数的多数。两条相等不算。
+        high = len(majority_refs) >= 3 and len(majority_refs) * 2 > total
+        groups.append(
+            {
+                "sku": sku,
+                "kind": kind,
+                "consistent": len(counts) == 1,
+                "high": high,
+                "value": majority if high else "",
+                "refs": majority_refs if high else [],
+                "counts": [
+                    {"value": value, "count": len(refs), "refs": refs}
+                    for value, refs in counts.items()
+                ],
+                "items": items[:5],
+            }
+        )
+
+    if not groups:
+        return result
+    groups.sort(key=lambda group: (not group["high"], group["sku"], group["kind"]))
+    groups = groups[:3]
+
+    label = (
+        "价格" if topics == ["price"]
+        else "尺码" if topics == ["size"]
+        else "价格和尺码"
+    )
+    sentences = [_consensus_group_sentence(group) for group in groups]
+    all_high = all(group["high"] for group in groups)
+    conflict = any(len(group["counts"]) > 1 for group in groups)
+    if all_high:
+        text = f"关于{label}，" + "；".join(sentences) + "。"
+    elif conflict:
+        text = f"关于{label}，几条帖子对不上：" + "；".join(sentences) + "。"
+        text += "分歧可能来自型号、时效、是否二手或是否含税。"
+    else:
+        text = f"关于{label}，几条帖子的说法：" + "；".join(sentences) + "。"
+
+    result["triggered"] = True
+    result["groups"] = groups
+    result["text"] = text
+    return result
 
 
 def sanitize_history(raw) -> list[dict]:
@@ -860,7 +1238,15 @@ class DeepSeekWriter:
         text, demotions = demote_ocr_price_labels(text, evidence)
         # 只有非流式能补引用：流式的字已经交付给用户，回头改等于打脸。
         text, filled, narrowed = fill_citations(text, evidence)
+        consensus = number_consensus(question, evidence)
+        if consensus["text"]:
+            text = text.rstrip() + "\n\n" + consensus["text"]
+        # 答案里不留「未校验 / 以原图为准」旁注；引用指回证据，用户可自查。
+        text = clean_source_annotations(text)
+        text = text.rstrip() + source_guide_suffix(text, evidence)
         text += image_hint(question, evidence)
+        # 引导整条回答最多一次：模型自己写过一次就不再补，重复的删掉。
+        text = _keep_one_guide(text)
         self.usage["diagnostics"] = _diagnostics_block(
             text,
             evidence,
@@ -869,6 +1255,7 @@ class DeepSeekWriter:
             filled=filled,
             narrowed=narrowed,
             demotions=demotions,
+            consensus=consensus,
         )
         return text
 
@@ -887,6 +1274,7 @@ class DeepSeekWriter:
         被替换），归因后处理只走非流式。
         """
         picked = model or self._model
+        consensus = number_consensus(question, evidence)
         stream = self._client.chat.completions.create(
             model=picked,
             messages=build_synth_messages(question, evidence, history),
@@ -907,11 +1295,26 @@ class DeepSeekWriter:
             if delta:
                 seen.append(delta)
                 yield delta
+        # 比对段放在模型输出之后、提示之前：不回改已输出的字。
+        if consensus["text"]:
+            block = "\n\n" + consensus["text"]
+            seen.append(block)
+            yield block
+        # 引用了图上文字时，句末补一次自查引导；模型已经写过就不重复。
+        guide = source_guide_suffix("".join(seen), evidence)
+        if guide:
+            seen.append(guide)
+            yield guide
         # 提示放在流末尾一次给出：先让模型把能说的话说完，再补「图里可能有」。
         hint = image_hint(question, evidence)
+        if hint and SOURCE_GUIDE in "".join(seen):
+            # 引导整条回答最多一次：模型正文里已经写过，提示里那半句整段去掉。
+            hint = re.sub(
+                r"；[^；。]*" + re.escape(SOURCE_GUIDE) + "。", "。", hint
+            )
         if hint:
             seen.append(hint)
             yield hint
         self.usage["diagnostics"] = _diagnostics_block(
-            "".join(seen), evidence, [], streamed=True
+            "".join(seen), evidence, [], streamed=True, consensus=consensus
         )

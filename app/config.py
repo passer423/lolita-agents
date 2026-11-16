@@ -123,7 +123,7 @@ class AppSettings(BaseSettings):
     xhs_timeout: float = 45.0
     # 单次小红书召回最多取几条；硬上限 10 在 xhs_search 里。关注扫描与实时
     # 交易类问题需要的覆盖面不同，所以做成配置而不是在通道里写死。
-    xhs_max_results: int = 3
+    xhs_max_results: int = 5
     # 采集 provider：playwright（浏览器自动化，默认）| spider_xhs（逆向签名，免浏览器）。
     xhs_provider: str = "playwright"
     # Spider_XHS 外部仓库路径（平级目录，不进本仓 git）。
@@ -133,7 +133,7 @@ class AppSettings(BaseSettings):
 
     # ---------- 图片文字识别（可选，按需触发） ----------
     # 只在「价格/尺码/预约这类要具体数值」且「正文提示价格标在图上 / 正文过短
-    # 带图 / 全篇没有价格数字」时才识别，最多 2 条证据 × 3 张图；其余问题完全
+    # 带图 / 全篇没有价格数字」时才识别，最多 5 条证据 × 3 张图；其余问题完全
     # 走原路径。依赖 rapidocr-onnxruntime 是可选包，没装时自动跳过（OCR_ENABLED
     # 打开也只在装了依赖后才生效）。
     ocr_enabled: bool = True
@@ -141,7 +141,7 @@ class AppSettings(BaseSettings):
     ocr_image_timeout: float = 8.0
     ocr_image_max_bytes: int = 5 * 1024 * 1024
     # 单次召回最多识别几条证据、每条最多几张图。
-    ocr_max_items: int = 2
+    ocr_max_items: int = 5
     ocr_images_per_item: int = 3
     # 整段图片识别的总预算（秒）。超了放弃剩余图片，已识别到的照常进证据。
     ocr_total_budget: float = 12.0
