@@ -23,6 +23,13 @@ jobs:
     runs-on: ${{ vars.EVAL_RUNNER || 'self-hosted' }}
     env:
       LOLITA_RAG_ROOT: ${{ vars.LOLITA_RAG_ROOT || '../lolita-rag' }}
+      # self-hosted 冒烟机上 data/ 不在 checkout 目录里，用仓库变量指回本机数据。
+      DATA_DIR: ${{ vars.DATA_DIR || 'data' }}
+    # Windows runner 默认 pwsh，而下面的前置检查和环境检查用的是 bash heredoc。
+    # Git for Windows 自带 bash，这里统一指定，Linux runner 同样可用。
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -43,19 +50,20 @@ jobs:
           from pathlib import Path
 
           root = Path(os.environ["LOLITA_RAG_ROOT"])
+          data_dir = Path(os.environ.get("DATA_DIR", "data"))
           required = {
               "上游代码": root / "src" / "config.py",
               "上游真实语料索引": root / "data" / "index" / "manifest.json",
-              "自有知识库索引": Path("data/kbindex/index/manifest.json"),
-              "裙子档案": Path("data/lolibrary/catalog.jsonl"),
+              "自有知识库索引": data_dir / "kbindex/index/manifest.json",
+              "裙子档案": data_dir / "lolibrary/catalog.jsonl",
           }
           missing = [f"{name}：{path}" for name, path in required.items() if not path.exists()]
           if missing:
               raise SystemExit(
                   "每日评测环境不完整：\n- "
                   + "\n- ".join(missing)
-                  + "\n处理：在带数据的 self-hosted runner 上跑，或用仓库变量 LOLITA_RAG_ROOT"
-                  " 指向已装好的上游仓库，并把两份索引放在对应 data/ 下。"
+                  + "\n处理：在带数据的 self-hosted runner 上跑，用仓库变量 LOLITA_RAG_ROOT"
+                  " 指向已装好的上游仓库，并用 DATA_DIR 指向存有两份索引的 data 目录。"
               )
           print("评测环境检查通过：" + "、".join(required))
           PY
@@ -63,7 +71,12 @@ jobs:
       - name: 检查真实 BGE（不可用就红，禁止 hash 兜底）
         run: |
           python - <<'PY'
+          import os
           import sys
+
+          # 上游不是安装包，单独跑这个检查时需要显式把它的根目录加入 sys.path；
+          # 应用内的 bridge 也是这么做的。
+          sys.path.insert(0, os.environ["LOLITA_RAG_ROOT"])
 
           try:
               from src.embedding.embedder import BGEEmbedder
