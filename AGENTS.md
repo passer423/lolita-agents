@@ -54,7 +54,7 @@ python -m ruff check app/main.py scripts/smoke.py
 python -m eval.run --subset quick --min-recall1 0.66 --min-cite1 0.75
 ```
 
-12 条金标子集（own 4 / real 5 / lolibrary 3），本机 14–18 秒（含模型装载）。退出码非 0 就别提交：报告会直接列出排名掉的条目，在 `eval/reports/<时间戳>/report.md`。只想看数字、不判红绿时去掉 `--min-*`。这一项不进 PR CI（依赖上游仓库与索引，托管 runner 没有），手工触发用 `.github/workflows/eval-gate.yml`。
+12 条金标子集（own 4 / real 5 / lolibrary 3），本机 14–18 秒（含模型装载）。退出码非 0 就别提交：报告会直接列出排名掉的条目，在 `eval/reports/<时间戳>/report.md`。只想看数字、不判红绿时去掉 `--min-*`。PR CI 只跑其中 4 条 own（`--subset quick-offline`，现场重建 own 索引、无 BGE 时 hash 兜底）；real / lolibrary 依赖两份不进 git 的索引，仍不挂 PR，用手工工作流 `.github/workflows/eval-gate.yml` 或有数据的机器覆盖。
 
 可选——端到端冒烟，需要服务在跑（另开一个终端 `python -m app.main`，默认 http://127.0.0.1:8787）：
 

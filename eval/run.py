@@ -32,6 +32,21 @@ baseline 的 MRR / hit@10 / 引用准确率，直接列出变好与变差的条�
 本命令与 CI 里的门禁是同一条命令、同一套代码；阈值由 CI workflow 传入并注释
 了实测来源。低于阈值时进程退出码为 1，报告与 `gate.json` 照常落盘。
 
+托管 runner 上没有上游真实语料与裙子档案索引（都不进 git），real / lolibrary
+只能落成 miss。CI 用同一套阈值跑 ``quick-offline``：只含 quick 里 4 条 own
+条目，own 索引可由 ``content/kb`` 现场重建（无 BGE 时用 hash 向量兜底）：
+
+    python -m eval.run --subset quick-offline --configs baseline \
+        --min-recall1 0.66 --min-cite1 0.75
+
+术语子集（内容层校验，专门抓「ref 命中但定义写错」）：
+
+    python -m eval.run --subset terms --configs baseline \
+        --min-recall1 0.85 --min-definition1 0.90
+
+`definition@1` 只统计带 `evidence_must_any` / `evidence_must_not` 的条目，
+阈值与 quick 相互独立，可以单独收紧或放宽。
+
 ## 指标口径
 
 * **recall@k / hit@k**：排在前 k 的证据里是否命中金标。每条问题只有一个目标
@@ -48,6 +63,11 @@ baseline 的 MRR / hit@10 / 引用准确率，直接列出变好与变差的条�
   不同切片（`xxx#0` / `xxx#1`）与同一系列的不同条目（slug 至少共享 3 段前缀）
   视为同一 ref 家族；没有固定 ref 的实时通道用 `support_terms` 是否出现在证据
   文本里。
+* **定义正确性 `definition@1`**：只看排第 1 的证据，要求它的文本满足金标里的
+  内容契约：`evidence_must_any`（每个组至少出现一个词）与 `evidence_must_not`
+  （一个都不许出现）。用来抓「召回 ref 对了，但内容写反了」——这是 ref 命中
+  永远测不出来的错。没有内容契约的条目不参与该指标；逐条原因落在
+  `definition_note`，指标本身只报 0 / 1 / 空，可复现、无模型参与。
 
 ## 边界
 
@@ -115,6 +135,32 @@ SUBSETS: dict[str, tuple[str, ...]] = {
         "lolibrary-03",  # 同系列不同 version（ref 家族）
         "lolibrary-08",  # 档案字段抽取
     ),
+    # CI 子集：quick 里只依赖 own 的 4 条。real / lolibrary 需要上游真实语料与
+    # 裙子档案索引（都不进 git），托管 runner 上只能落成 miss；这 4 条只用
+    # content/kb 重建 own 索引即可离线跑通，阈值沿用 quick 的 0.66 / 0.75。
+    "quick-offline": (
+        "own-01",
+        "own-03",
+        "own-08",
+        "own-12b",
+    ),
+    # 术语子集：只跑内容层校验，用来抓「ref 命中但定义写错」。
+    # 与 quick 并存、阈值独立（见 --min-definition1）。
+    "terms": (
+        "own-06",            # 柄图
+        "own-07",            # 茶会
+        "own-08",            # JSK / OP
+        "own-09",            # KC
+        "own-10",            # 山正
+        "own-11",            # SK
+        "own-12",            # 痛lo（无空格写法，依赖边界回退）
+        "own-12b",           # 痛 lo（带空格写法）
+        "own-12c",           # 痛LO（大写写法）
+        "terms-tongbao",     # 痛包（自有词条 term-tongbao）
+        "terms-tongyi",      # 痛衣（自有词条 term-tongyi）
+        "terms-goudan",      # 狗短（自有词条 term-goudan；曾误命中 term-sk，用于守门禁）
+        "terms-fullset",     # fullset（自有词条 term-fullset）
+    ),
     "all": (),
 }
 
@@ -133,6 +179,8 @@ RESULT_FIELDS = [
     "citation_accuracy@3",
     "citation_accuracy@3_family",
     "answer_supported",
+    "definition@1",
+    "definition_note",
     "cited_count",
     "expected_refs",
     "top_refs",
@@ -150,7 +198,40 @@ SUMMARY_FIELDS = [
     "citation_accuracy@3",
     "citation_accuracy@3_family",
     "answer_supported_rate",
+    "definition@1",
 ]
+
+
+def _normalize_must_any(path: Path, lineno: int, raw: Any) -> list[list[str]]:
+    """把 ``evidence_must_any`` 归一成「组的列表」。
+
+    允许两种写法：``["轻装", "日常"]``（任一词命中即可，等价于一组）和
+    ``[["轻装"], ["裙撑", "fullset"]]``（每组都要满足）。写成后一种是因为
+    「定义对不对」常常有多个要点，只要求命中一个词会太松。
+    """
+    if not raw:
+        return []
+    if not isinstance(raw, list):
+        raise SystemExit(f"{path}:{lineno} evidence_must_any 必须是列表")
+    if all(isinstance(term, str) for term in raw):
+        raw = [raw]
+    groups: list[list[str]] = []
+    for group in raw:
+        if not isinstance(group, list):
+            raise SystemExit(f"{path}:{lineno} evidence_must_any 的每组必须是列表")
+        cleaned = [str(term).strip() for term in group if str(term).strip()]
+        if not cleaned:
+            raise SystemExit(f"{path}:{lineno} evidence_must_any 有空组")
+        groups.append(cleaned)
+    return groups
+
+
+def _normalize_must_not(path: Path, lineno: int, raw: Any) -> list[str]:
+    if not raw:
+        return []
+    if not isinstance(raw, list) or any(not str(term).strip() for term in raw):
+        raise SystemExit(f"{path}:{lineno} evidence_must_not 必须是非空字符串列表")
+    return [str(term).strip() for term in raw]
 
 
 def load_golden(path: Path) -> list[dict]:
@@ -181,6 +262,8 @@ def load_golden(path: Path) -> list[dict]:
             raise SystemExit(f"{path}:{lineno} 既没有 expected_refs 也没有 support_terms")
         item["expected_refs"] = refs
         item["support_terms"] = terms
+        item["evidence_must_any"] = _normalize_must_any(path, lineno, item.get("evidence_must_any"))
+        item["evidence_must_not"] = _normalize_must_not(path, lineno, item.get("evidence_must_not"))
         items.append(item)
     if not items:
         raise SystemExit(f"{path} 里没有金标条目")
@@ -327,6 +410,32 @@ def is_relevant(item: dict, evidence: dict, *, family: bool = False) -> bool:
     return any(term.lower() in haystack for term in item["support_terms"])
 
 
+def definition_check(item: dict, evidence: list[dict]) -> tuple[int | str, str]:
+    """内容层校验：第 1 条证据的文本是否讲对了定义。
+
+    只返回 0 / 1 / 空（没有内容契约的条目不参与），判定全部基于字符串包含，
+    不调模型、不随机。``definition_note`` 写清缺哪组要点、出现了哪些禁错词，
+    让「为什么判 0」可解释。
+    """
+    groups = item.get("evidence_must_any") or []
+    forbidden = item.get("evidence_must_not") or []
+    if not groups and not forbidden:
+        return "", ""
+    text = " ".join(
+        f"{entry.get('title') or ''} {entry.get('text') or ''}" for entry in evidence[:1]
+    ).lower()
+    missing = [
+        group for group in groups if not any(term.lower() in text for term in group)
+    ]
+    hits = [term for term in forbidden if term.lower() in text]
+    problems: list[str] = []
+    if missing:
+        problems.append("缺定义要点：" + "；".join(" / ".join(group) for group in missing))
+    if hits:
+        problems.append("出现禁错项：" + "、".join(hits))
+    return (0 if problems else 1), "；".join(problems)
+
+
 def score_listing(item: dict, ranked: list[dict], cite_k: int = DEFAULT_CITE_K) -> dict[str, Any]:
     first_rank: int | None = None
     for rank, evidence in enumerate(ranked, start=1):
@@ -342,6 +451,7 @@ def score_listing(item: dict, ranked: list[dict], cite_k: int = DEFAULT_CITE_K) 
     family_supported = sum(
         1 for evidence in legacy_cited if is_relevant(item, evidence, family=True)
     )
+    definition_ok, definition_note = definition_check(item, ranked)
     return {
         "rank": first_rank,
         **{f"hit@{k}": int(first_rank is not None and first_rank <= k) for k in METRIC_KS},
@@ -352,6 +462,8 @@ def score_listing(item: dict, ranked: list[dict], cite_k: int = DEFAULT_CITE_K) 
             family_supported / len(legacy_cited) if legacy_cited else 0.0
         ),
         "answer_supported": int(supported > 0),
+        "definition@1": definition_ok,
+        "definition_note": definition_note,
         "cited_count": len(cited),
         "top_refs": " | ".join(str(e.get("ref") or "") for e in ranked[:10]),
     }
@@ -441,6 +553,8 @@ def _skipped_row(config_name: str, item: dict, view: str, reason: str) -> dict:
         "citation_accuracy@3": "",
         "citation_accuracy@3_family": "",
         "answer_supported": "",
+        "definition@1": "",
+        "definition_note": "",
         "cited_count": "",
         "expected_refs": " | ".join(item["expected_refs"]),
         "top_refs": "",
@@ -481,6 +595,7 @@ def summarize(rows: list[dict], configs: list[str]) -> list[dict]:
                         evaluated, "citation_accuracy@3_family"
                     ),
                     "answer_supported_rate": _mean(evaluated, "answer_supported"),
+                    "definition@1": _mean_applicable(evaluated, "definition@1"),
                 }
             )
     return summary
@@ -491,12 +606,22 @@ def _mean(rows: list[dict], field: str) -> float:
     return (sum(values) / len(values)) if values else 0.0
 
 
+def _mean_applicable(rows: list[dict], field: str) -> float | str:
+    """只对「有该指标」的条目求均值；一条都没有时返回空串，报告里显示为 ``-``。
+
+    定义校验只覆盖术语/定义题，普通洗护题不该被算成 0 分，也不该把均值稀释。
+    """
+    values = [float(row[field]) for row in rows if row[field] != ""]
+    return (sum(values) / len(values)) if values else ""
+
+
 def evaluate_gate(
     summary: list[dict],
     rows: list[dict],
     *,
     min_recall1: float | None,
     min_cite1: float | None,
+    min_definition1: float | None = None,
     cite_k: int,
 ) -> dict:
     """按 baseline / merged 视图判断门禁；未传阈值时只出数字、不判红绿。"""
@@ -510,7 +635,11 @@ def evaluate_gate(
         ),
         None,
     )
-    thresholds = {"recall@1": min_recall1, f"cite@{cite_k}": min_cite1}
+    thresholds = {
+        "recall@1": min_recall1,
+        f"cite@{cite_k}": min_cite1,
+        "definition@1": min_definition1,
+    }
     result: dict[str, Any] = {
         "enabled": any(value is not None for value in thresholds.values()),
         "passed": True,
@@ -527,13 +656,30 @@ def evaluate_gate(
         result["error"] = "没有可评估的条目（核心通道全部不可用）"
         return result
 
-    measured = {"recall@1": row["recall@1"], f"cite@{cite_k}": row["citation_accuracy"]}
+    measured = {
+        "recall@1": row["recall@1"],
+        f"cite@{cite_k}": row["citation_accuracy"],
+        "definition@1": row.get("definition@1", ""),
+    }
     result["measured"] = measured
     for metric, threshold in thresholds.items():
         if threshold is None:
             continue
-        value = measured[metric]
-        passed = value + 1e-9 >= threshold
+        value = measured.get(metric, "")
+        if value in ("", None):
+            # 传了阈值却没有任何条目带内容契约：这是配置错误，不能算通过。
+            result["checks"].append(
+                {
+                    "metric": metric,
+                    "value": "",
+                    "threshold": threshold,
+                    "passed": False,
+                    "note": "本次没有可评估该项的条目",
+                }
+            )
+            result["passed"] = False
+            continue
+        passed = float(value) + 1e-9 >= threshold
         result["checks"].append(
             {"metric": metric, "value": value, "threshold": threshold, "passed": passed}
         )
@@ -544,12 +690,18 @@ def evaluate_gate(
             "item_id": item["item_id"],
             "rank": item["rank"],
             f"cite@{cite_k}": item["citation_accuracy"],
+            "definition@1": item.get("definition@1", ""),
+            "definition_note": item.get("definition_note", ""),
         }
         for item in rows
         if item["config"] == "baseline"
         and item["view"] == "merged"
         and item["status"] == "ok"
-        and (_as_float(item["rank"]) != 1 or _as_float(item["citation_accuracy"]) < 1)
+        and (
+            _as_float(item["rank"]) != 1
+            or _as_float(item["citation_accuracy"]) < 1
+            or item.get("definition@1") == 0
+        )
     ]
     return result
 
@@ -709,7 +861,10 @@ def main(argv: list[str] | None = None) -> int:
         "--subset",
         default="all",
         choices=sorted(SUBSETS),
-        help="只跑指定子集（quick = 12 条核心通道快速回归）",
+        help=(
+            "只跑指定子集（quick = 12 条核心回归；quick-offline = CI 可跑的 4 条 own；"
+            "terms = 13 条术语内容校验）"
+        ),
     )
     parser.add_argument(
         "--min-recall1",
@@ -722,6 +877,12 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=None,
         help="baseline / merged 的引用准确率下限；低于则退出码 1",
+    )
+    parser.add_argument(
+        "--min-definition1",
+        type=float,
+        default=None,
+        help="baseline / merged 的定义正确率下限（只统计带内容契约的条目）；低于则退出码 1",
     )
     parser.add_argument("--online", action="store_true", help="同时跑 xhs / weibo / web（联网）")
     parser.add_argument(
@@ -767,6 +928,7 @@ def main(argv: list[str] | None = None) -> int:
         all_rows,
         min_recall1=args.min_recall1,
         min_cite1=args.min_cite1,
+        min_definition1=args.min_definition1,
         cite_k=args.cite_k,
     )
 
@@ -837,13 +999,14 @@ def main(argv: list[str] | None = None) -> int:
                 f"{row['config']:<18} n={row['n']:<3} skip={row['skipped']:<3} "
                 f"recall@1={row['recall@1']:.3f} recall@10={row['recall@10']:.3f} "
                 f"MRR={row['mrr']:.3f} cite@{args.cite_k}={row['citation_accuracy']:.3f} "
+                f"definition@1={fmt(row['definition@1'])} "
                 f"(旧口径 cite@3={row['citation_accuracy@3']:.3f})"
             )
     print(f"\n报告目录：{out_dir}")
     if gate["enabled"] or gate.get("error"):
         if gate["passed"]:
             detail = "，".join(
-                f"{check['metric']}={check['value']:.3f}≥{check['threshold']:.3f}"
+                f"{check['metric']}={fmt(check['value'])}≥{fmt(check['threshold'])}"
                 for check in gate["checks"]
             )
             print(f"门禁通过：{detail}（n={gate['n']}）")
@@ -852,12 +1015,15 @@ def main(argv: list[str] | None = None) -> int:
             for check in gate["checks"]:
                 flag = "PASS" if check["passed"] else "FAIL"
                 print(
-                    f"  [{flag}] {check['metric']}={check['value']:.3f} "
-                    f"< 阈值 {check['threshold']:.3f}"
+                    f"  [{flag}] {check['metric']}={fmt(check['value'])} "
+                    f"< 阈值 {fmt(check['threshold'])}"
+                    + (f"（{check['note']}）" if check.get("note") else "")
                 )
             if gate["failures"]:
                 ids = "、".join(
-                    f"{item['item_id']}(rank={item['rank']})" for item in gate["failures"]
+                    f"{item['item_id']}(rank={item['rank']}, "
+                    f"definition={fmt(item.get('definition@1'))})"
+                    for item in gate["failures"]
                 )
                 print(f"  未达标条目：{ids}")
     return 0 if gate["passed"] else 1
@@ -893,8 +1059,8 @@ def _render_report(
         "",
         "## 汇总（merged 视图）",
         "",
-        f"| 配置 | n | skipped | recall@1 | recall@3 | recall@5 | recall@10 | MRR | 引用@{cite_k} | 引用@3（旧口径） | 答案有支撑 |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        f"| 配置 | n | skipped | recall@1 | recall@3 | recall@5 | recall@10 | MRR | 引用@{cite_k} | 引用@3（旧口径） | 定义@1 | 答案有支撑 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in summary:
         if row["view"] != "merged" or row["channel"] != "*":
@@ -904,6 +1070,7 @@ def _render_report(
             f"{fmt(row['recall@1'])} | {fmt(row['recall@3'])} | {fmt(row['recall@5'])} | "
             f"{fmt(row['recall@10'])} | {fmt(row['mrr'])} | "
             f"{fmt(row['citation_accuracy'])} | {fmt(row['citation_accuracy@3'])} | "
+            f"{fmt(row['definition@1'])} | "
             f"{fmt(row['answer_supported_rate'])} |"
         )
 
@@ -911,8 +1078,8 @@ def _render_report(
         "",
         "## baseline 分通道（channel 视图）",
         "",
-        f"| 通道 | n | skipped | recall@1 | recall@3 | recall@5 | recall@10 | MRR | 引用@{cite_k} | 引用@3（旧口径） |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        f"| 通道 | n | skipped | recall@1 | recall@3 | recall@5 | recall@10 | MRR | 引用@{cite_k} | 引用@3（旧口径） | 定义@1 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in summary:
         if row["config"] != "baseline" or row["view"] != "channel" or row["channel"] == "*":
@@ -921,8 +1088,11 @@ def _render_report(
             f"| {row['channel']} | {row['n']} | {row['skipped']} | "
             f"{fmt(row['recall@1'])} | {fmt(row['recall@3'])} | {fmt(row['recall@5'])} | "
             f"{fmt(row['recall@10'])} | {fmt(row['mrr'])} | "
-            f"{fmt(row['citation_accuracy'])} | {fmt(row['citation_accuracy@3'])} |"
+            f"{fmt(row['citation_accuracy'])} | {fmt(row['citation_accuracy@3'])} | "
+            f"{fmt(row['definition@1'])} |"
         )
+
+    lines += _definition_section(rows)
 
     lines += _citation_caliber_section(rows, summary, cite_k)
     lines += _gate_section(gate, cite_k)
@@ -1049,6 +1219,52 @@ def _render_report(
     return "\n".join(lines)
 
 
+def _definition_section(rows: list[dict]) -> list[str]:
+    """把 definition@1 的失败项和原因单列一节，避免被 recall 数字盖住。"""
+    applicable = [
+        row
+        for row in rows
+        if row["config"] == "baseline"
+        and row["view"] == "merged"
+        and row["status"] == "ok"
+        and row.get("definition@1", "") != ""
+    ]
+    if not applicable:
+        return [
+            "",
+            "## 定义正确性（baseline merged，definition@1）",
+            "",
+            "本次没有带 `evidence_must_any` / `evidence_must_not` 的条目，该指标不参与。",
+        ]
+
+    failed = [row for row in applicable if row["definition@1"] == 0]
+    passed = len(applicable) - len(failed)
+    lines = [
+        "",
+        "## 定义正确性（baseline merged，definition@1）",
+        "",
+        f"带内容契约的条目 {len(applicable)} 条，判对 {passed} 条，"
+        f"`definition@1={passed / len(applicable):.3f}`。"
+        "只看第 1 条证据的文本；判定全部是字符串包含，不调模型。",
+    ]
+    if not failed:
+        lines += ["", "所有带内容契约的条目都满足定义要点与禁错项。"]
+        return lines
+
+    lines += [
+        "",
+        "未通过条目：",
+        "",
+        "| 条目 | 问题 | 第 1 条证据 ref | 判定说明 |",
+        "|---|---|---|---|",
+    ]
+    for row in failed:
+        top_ref = str(row.get("top_refs") or "").split(" | ")[0] or "-"
+        note = str(row.get("definition_note") or "").replace("|", "/") or "-"
+        lines.append(f"| {row['item_id']} | {row['query']} | {top_ref} | {note} |")
+    return lines
+
+
 def _citation_caliber_section(rows: list[dict], summary: list[dict], cite_k: int) -> list[str]:
     """把旧口径、只换家族匹配、新默认口径三种数字并排，并拆开差异来源。"""
     lines = [
@@ -1146,14 +1362,18 @@ def _gate_section(gate: dict | None, cite_k: int) -> list[str]:
         lines.append(f"**无法判定**：{gate['error']}。")
         return lines
     if not gate.get("enabled"):
-        lines.append("未启用：本次命令没有传 `--min-recall1` / `--min-cite1`。")
+        lines.append(
+            "未启用：本次命令没有传 `--min-recall1` / `--min-cite1` / `--min-definition1`。"
+        )
         return lines
 
     lines += ["| 指标 | 实测 | 阈值 | 结果 |", "|---|---|---|---|"]
     for check in gate["checks"]:
         lines.append(
             f"| {check['metric']} | {fmt(check['value'])} | {fmt(check['threshold'])} | "
-            f"{'PASS' if check['passed'] else 'FAIL'} |"
+            f"{'PASS' if check['passed'] else 'FAIL'}"
+            + (f"（{check['note']}）" if check.get("note") else "")
+            + " |"
         )
     lines.append("")
     lines.append(f"门禁总体：**{'PASS' if gate['passed'] else 'FAIL'}**（n={gate['n']}）")
@@ -1162,14 +1382,16 @@ def _gate_section(gate: dict | None, cite_k: int) -> list[str]:
         cite_key = f"cite@{cite_k}"
         lines += [
             "",
-            "未达标条目（merged 排名不是第 1，或引用未全部命中）：",
+            "未达标条目（merged 排名不是第 1、引用未全部命中，或定义为 0）：",
             "",
-            "| 条目 | rank | 引用 |",
-            "|---|---|---|",
+            "| 条目 | rank | 引用 | 定义@1 | 定义说明 |",
+            "|---|---|---|---|---|",
         ]
         for item in gate["failures"]:
+            note = str(item.get("definition_note") or "").replace("|", "/") or "-"
             lines.append(
-                f"| {item['item_id']} | {fmt(item['rank'])} | {fmt(item[cite_key])} |"
+                f"| {item['item_id']} | {fmt(item['rank'])} | {fmt(item[cite_key])} | "
+                f"{fmt(item.get('definition@1'))} | {note} |"
             )
     return lines
 
