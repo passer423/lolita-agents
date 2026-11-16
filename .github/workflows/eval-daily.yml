@@ -1,0 +1,103 @@
+name: 每日真实检索评测
+
+# 真实检索质量门禁：每天在带数据、能下载模型的 runner 上跑 quick + terms。
+# 与 PR 里的 offline-eval-gate 不同，这一步必须用真实 BGE，不允许 hash 兜底。
+# 运行环境默认 self-hosted（需要本仓 data/kbindex、data/lolibrary 与上游
+# data/index）；可用仓库变量 EVAL_RUNNER 覆盖标签。
+on:
+  schedule:
+    # UTC 01:00 = 北京时间 09:00
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-daily
+  cancel-in-progress: false
+
+jobs:
+  daily-eval:
+    # 缺数据或模型下载不可用时直接红：不跳过，也不降级成 hash 凑数字。
+    runs-on: ${{ vars.EVAL_RUNNER || 'self-hosted' }}
+    env:
+      LOLITA_RAG_ROOT: ${{ vars.LOLITA_RAG_ROOT || '../lolita-rag' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: 安装依赖（含 sentence-transformers / BGE 运行栈）
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pip install -r "${LOLITA_RAG_ROOT}/requirements.txt"
+
+      - name: 检查评测环境（缺一项就红，不跳过）
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["LOLITA_RAG_ROOT"])
+          required = {
+              "上游代码": root / "src" / "config.py",
+              "上游真实语料索引": root / "data" / "index" / "manifest.json",
+              "自有知识库索引": Path("data/kbindex/index/manifest.json"),
+              "裙子档案": Path("data/lolibrary/catalog.jsonl"),
+          }
+          missing = [f"{name}：{path}" for name, path in required.items() if not path.exists()]
+          if missing:
+              raise SystemExit(
+                  "每日评测环境不完整：\n- "
+                  + "\n- ".join(missing)
+                  + "\n处理：在带数据的 self-hosted runner 上跑，或用仓库变量 LOLITA_RAG_ROOT"
+                  " 指向已装好的上游仓库，并把两份索引放在对应 data/ 下。"
+              )
+          print("评测环境检查通过：" + "、".join(required))
+          PY
+
+      - name: 检查真实 BGE（不可用就红，禁止 hash 兜底）
+        run: |
+          python - <<'PY'
+          import sys
+
+          try:
+              from src.embedding.embedder import BGEEmbedder
+
+              embedder = BGEEmbedder(allow_download=True)
+              if not embedder.name.startswith("bge"):
+                  raise RuntimeError(f"后端不是 BGE：{embedder.name}")
+              vector = embedder.encode(["裙撑"])
+          except Exception as exc:
+              print(
+                  "BGE 模型不可用，拒绝用 hash 向量跑每日真实评测。\n"
+                  f"{type(exc).__name__}: {exc}\n"
+                  "处理：给 runner 开外网，或预先把 BAAI/bge-small-zh-v1.5 放进 HuggingFace 缓存。",
+                  file=sys.stderr,
+              )
+              raise
+          print(f"BGE 可用：{embedder.name} dim={embedder.dim} shape={vector.shape}")
+          PY
+
+      - name: quick 门禁（真实 BGE）
+        run: >-
+          python -m eval.run --subset quick --configs baseline
+          --min-recall1 0.66 --min-cite1 0.75
+
+      - name: terms 门禁（真实 BGE）
+        run: >-
+          python -m eval.run --subset terms --configs baseline
+          --min-recall1 0.85 --min-cite1 0.90 --min-definition1 0.90
+
+      - name: 上传评测报告（eval/reports/ 已在 .gitignore）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-eval-report-${{ github.run_id }}
+          path: eval/reports/
+          if-no-files-found: warn
+          retention-days: 30

@@ -219,6 +219,14 @@ HTTP 序列化。真实 uvicorn 下用正确的 UTF-8 请求，召回与答案�
 校验直接返回 422 并说明原因，不再伪装成「知识库没有内容」。
 `scripts/smoke_encoding.py` 用真实 uvicorn 复核这条链路（不进 CI，理由见脚本注释）。
 
+**CI 绿不代表检索质量。** PR 里的 `offline-eval-gate` 只是结构性冒烟：托管 runner
+没有 real / lolibrary 两份不进 git 的索引，这一步用 hash 向量重建 own 索引，只跑
+quick 里 4 条 own，验证金标格式、索引可建、own 管线不断。真实检索质量由本机
+quick / terms 门禁（本节上面的命令）保证，并由 `.github/workflows/eval-daily.yml`
+每天在有数据、能下载模型的 runner 上用真实 BGE 重跑 quick + terms，报告只作为
+Artifacts 留痕（`eval/reports/` 已被 `.gitignore` 忽略）。模型下载不可用时该
+workflow 会明确失败并打印原因，不会静默降级成 hash。
+
 ## 后台任务队列
 
 关注扫描与索引重建是分钟级操作，过去会把 HTTP 请求一直挂着。现在它们进
