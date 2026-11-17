@@ -6,6 +6,19 @@ Lolita 垂直领域的问答 agent：**多路召回 → 生成回答 → 关注�
 
 编排层用 **LangGraph** 的 `StateGraph` 实现（[ADR-0002](docs/adr/0002-用LangGraph编排多路召回.md)）；召回层坚持**一源一通道、互不混写**（[ADR-0001](docs/adr/0001-多路召回一源一通道.md)）。
 
+## 项目快照（2026-11，全量数据见「评测口径」）
+
+| 维度 | 数字 |
+|---|---|
+| 评测金标 | 60 条（52 条离线可跑：own 18 / real 26 / lolibrary 8） |
+| 检索 recall@1 / MRR / cite@1 | 0.904 / 0.925 / 0.923（merged，n=52） |
+| 答案层 faithfulness | 0.913（21/23，LLM 裁判，见 `eval/answer_eval.py`） |
+| 测试 | 463 用例，`app` 包语句覆盖率 86% |
+| 索引规模 | real 14314 chunks / 6518 帖；检索 P50：own 7.4ms、real 41.5ms |
+| 质量门禁 | quick / terms / quick-offline（CI）+ 每日真实 BGE workflow，金标做过变异测试验证 |
+
+检索、合并、生成三层都有对应指标和门禁；消费级延迟（进程内检索 P95 < 120ms）与本地优先（不依赖托管服务）同时成立。复现命令：`python scripts/bench_numbers.py`、`python eval/answer_eval.py`、`python -m pytest --cov=app`。
+
 ## 六个召回通道
 
 | 通道 | 来源 | 时机 | 是否落盘 |
@@ -218,6 +231,21 @@ HTTP 序列化。真实 uvicorn 下用正确的 UTF-8 请求，召回与答案�
 字符串体）会把中文替换成 `?`，服务端无从还原。这种形态现在由 `ChatIn` 的
 校验直接返回 422 并说明原因，不再伪装成「知识库没有内容」。
 `scripts/smoke_encoding.py` 用真实 uvicorn 复核这条链路（不进 CI，理由见脚本注释）。
+
+### 多路召回消融（subset=all，n=52，merged 视角）
+
+| 配置 | 含义 | recall@1 | recall@10 | MRR | cite@1 |
+|---|---|---|---|---|---|
+| baseline | hybrid 召回 + 向量路过滤 + 合并层（默认） | 0.904 | 0.962 | 0.925 | 0.923 |
+| real_all | real 通道不过滤纯 BM25 命中 | 0.904 | 1.000 | 0.944 | 0.923 |
+| merge_none | 无合并层（直接拼接） | 0.769 | 0.962 | 0.821 | 0.769 |
+| merge_round_robin | 合并层换成轮询合并 | 0.769 | 0.962 | 0.865 | 0.769 |
+
+读法：合并层贡献 recall@1 +13.5pp（0.769→0.904），是承重部件；real 的向量路过滤是保守取舍（recall@10 可到 1.000，但默认配置宁漏不错）。`python scripts/make_ablation_table.py` 从最近一次全量报告重新生成。
+
+### 答案层 faithfulness
+
+检索指标只问「找没找到」；`python eval/answer_eval.py` 补生成层：对带内容契约的金标跑完整问答（真实 writer），LLM 裁判逐句判断答案的事实性陈述是否都被证据支撑（诚实拒答算有据）。2026-11 全量 23 条：**faithfulness = 0.913（21/23）**，两条未获支撑均是真缺陷（价格归因超出证据解释、多套件价格混淆），不是裁判误报——这套评估抓得住生成层的错。需要在线 LLM，离线明确失败不降级。
 
 **CI 绿不代表检索质量。** PR 里的 `offline-eval-gate` 只是结构性冒烟：托管 runner
 没有 real / lolibrary 两份不进 git 的索引，这一步用 hash 向量重建 own 索引，只跑
