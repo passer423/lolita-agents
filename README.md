@@ -12,8 +12,8 @@ Lolita 垂直领域的问答 agent：**多路召回 → 生成回答 → 关注�
 |---|---|
 | 评测金标 | 60 条（52 条离线可跑：own 18 / real 26 / lolibrary 8） |
 | 检索 recall@1 / MRR / cite@1 | 0.904 / 0.925 / 0.923（merged，n=52） |
-| 答案层 faithfulness | 0.913（21/23，LLM 裁判，见 `eval/answer_eval.py`） |
-| 测试 | 463 用例，`app` 包语句覆盖率 86% |
+| 答案层 faithfulness | 1.000（23/23，LLM 裁判，见 `eval/answer_eval.py`） |
+| 测试 | 477 用例，`app` 包语句覆盖率 87% |
 | 索引规模 | real 14314 chunks / 6518 帖；检索 P50：own 7.4ms、real 41.5ms |
 | 质量门禁 | quick / terms / quick-offline（CI）+ 每日真实 BGE workflow，金标做过变异测试验证 |
 
@@ -245,7 +245,7 @@ HTTP 序列化。真实 uvicorn 下用正确的 UTF-8 请求，召回与答案�
 
 ### 答案层 faithfulness
 
-检索指标只问「找没找到」；`python eval/answer_eval.py` 补生成层：对带内容契约的金标跑完整问答（真实 writer），LLM 裁判逐句判断答案的事实性陈述是否都被证据支撑（诚实拒答算有据）。2026-11 全量 23 条：**faithfulness = 0.913（21/23）**，两条未获支撑均是真缺陷（价格归因超出证据解释、多套件价格混淆），不是裁判误报——这套评估抓得住生成层的错。需要在线 LLM，离线明确失败不降级。
+检索指标只问「找没找到」；`python eval/answer_eval.py` 补生成层：对带内容契约的金标跑完整问答（真实 writer），LLM 裁判逐句判断答案的事实性陈述是否都被证据支撑（诚实拒答算有据）。2026-11 全量 23 条：**faithfulness = 1.000（23/23）**——初测 0.913（21/23）暴露的两条真缺陷（价格差价归因超出证据、多套件价格数字张冠李戴）已通过收紧 writer 提示词修复并回归验证。需要在线 LLM，离线明确失败不降级。
 
 **CI 绿不代表检索质量。** PR 里的 `offline-eval-gate` 只是结构性冒烟：托管 runner
 没有 real / lolibrary 两份不进 git 的索引，这一步用 hash 向量重建 own 索引，只跑
