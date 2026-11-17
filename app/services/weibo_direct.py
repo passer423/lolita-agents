@@ -262,16 +262,19 @@ def search(
     query = (query or "").strip()
     if not query:
         return []
-    ready, reason = readiness(app)
-    if not ready:
-        raise WeiboDirectUnavailable(reason)
 
     limit = max(1, min(10, max_results))
     timeout_seconds = float(timeout or app.weibo_direct_timeout)
     cache = _cache_path(app, query, limit)
     cached = _read_cache(cache)
     if cached is not None:
+        # 缓存命中不需要 Playwright：把可用性检查放到缓存之后，托管 CI
+        # （不装浏览器）也能验证缓存路径，离线重放也不会因为浏览器缺失而失败。
         return _posts_to_results(cached)
+
+    ready, reason = readiness(app)
+    if not ready:
+        raise WeiboDirectUnavailable(reason)
 
     posts = _fetch_posts(query, app, limit=limit, timeout=timeout_seconds)
     kept = _filter_posts(query, posts, limit)
