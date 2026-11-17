@@ -866,7 +866,9 @@ def _weibo_status(search: dict[str, Any], app: AppSettings) -> dict[str, Any]:
 def _xhs_status(app: AppSettings) -> dict[str, Any]:
     from app.services import xhs_search
 
-    ready, reason = xhs_search.readiness(app)
+    # readiness() 只看结构；status_readiness() 额外带上「最近真实调用失败 /
+    # 连续空结果」，且不会反过来拦召回（见 xhs_search.status_readiness）。
+    ready, reason = xhs_search.status_readiness(app)
     return {"enabled": app.xhs_enabled, "ready": ready, "reason": reason}
 
 

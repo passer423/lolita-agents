@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from app.config import APP_ROOT, AppSettings
 from app.services import web_search
@@ -91,6 +92,51 @@ def readiness(app: AppSettings) -> tuple[bool, str]:
 def available(app: AppSettings) -> bool:
     """只有“启用 + 对应 provider 就绪”才认为能搜。"""
     return readiness(app)[0]
+
+
+# 状态展示用的运行健康度。``readiness()`` 仍只判结构（配置 / 依赖 / 登录文件），
+# 召回路径完全不受这里影响；只有 ``status_readiness()`` 会把「最近真实调用失败」
+# 或「连续空结果」折算成 not ready。
+#
+# 为什么不做主动探测：小红书没有免签名的轻量自检接口，主动探测要么再走一次
+# Playwright（几秒 + 可能触发风控），要么消耗一次搜索配额；而状态接口会被
+# 反复轮询。复用真实调用的结果既零额外请求，也不会因为一次网络抖动把召回拦掉。
+HEALTH_TTL_SECONDS = 15 * 60
+EMPTY_STREAK_DEGRADE = 3
+_health: dict[str, dict[str, Any]] = {}
+
+
+def _record_health(provider: str, *, ok: bool, reason: str = "", empty: bool = False) -> None:
+    entry = _health.setdefault(
+        provider, {"ts": 0.0, "ok": True, "reason": "", "empty_streak": 0}
+    )
+    entry["ts"] = time.time()
+    entry["ok"] = ok
+    if ok:
+        entry["reason"] = ""
+        entry["empty_streak"] = int(entry.get("empty_streak") or 0) + 1 if empty else 0
+    else:
+        entry["reason"] = reason
+
+
+def status_readiness(app: AppSettings) -> tuple[bool, str]:
+    """给状态接口用：结构就绪 + 最近调用是否真的成功。
+
+    失败只影响「显示为 not ready」，不影响 ``available()`` / ``search()``：
+    登录态失效后第一次真实调用报错时把原因记下来，下一次查询状态就能看到，
+    TTL 到期后重新按结构判断，不会永久卡红。
+    """
+    ready, reason = readiness(app)
+    if not ready:
+        return ready, reason
+    entry = _health.get(_provider(app))
+    if not entry or time.time() - float(entry.get("ts") or 0) > HEALTH_TTL_SECONDS:
+        return True, ""
+    if not entry.get("ok"):
+        return False, f"最近一次调用失败：{entry.get('reason') or '未知原因'}（可能是 XHS_COOKIE 失效）"
+    if int(entry.get("empty_streak") or 0) >= EMPTY_STREAK_DEGRADE:
+        return False, f"最近连续 {EMPTY_STREAK_DEGRADE} 次召回为空，可能是登录态失效或被风控"
+    return True, ""
 
 
 def _cache_path(app: AppSettings, query: str, *, provider: str, limit: int) -> Path:
@@ -249,9 +295,18 @@ def search(
     if provider == "spider_xhs":
         from app.services import xhs_spider
 
-        notes = xhs_spider.fetch_notes(query, app, limit, timeout=timeout_seconds)
+        try:
+            notes = xhs_spider.fetch_notes(query, app, limit, timeout=timeout_seconds)
+        except XhsUnavailable as exc:
+            _record_health(provider, ok=False, reason=str(exc))
+            raise
     else:
-        notes = _playwright_fetch_notes(query, app, limit, timeout_seconds)
+        try:
+            notes = _playwright_fetch_notes(query, app, limit, timeout_seconds)
+        except XhsUnavailable as exc:
+            _record_health(provider, ok=False, reason=str(exc))
+            raise
 
+    _record_health(provider, ok=True, empty=not notes)
     _write_cache(cache, notes)
     return _notes_to_results(notes)

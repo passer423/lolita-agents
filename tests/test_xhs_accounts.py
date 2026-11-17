@@ -262,6 +262,55 @@ def test_fetch_account_notes_filters_by_series_in_body(monkeypatch):
     assert len(detail_calls) == 3
 
 
+# ---------------------------------------------------------------------------
+# 登录态失效：状态接口要反映「最近真实调用失败」，但不能反过来拦召回。
+
+
+@pytest.fixture
+def _clean_health():
+    xhs_search._health.clear()
+    yield
+    xhs_search._health.clear()
+
+
+def test_status_shows_recent_auth_failure_without_blocking_recall(
+    monkeypatch, tmp_path, _clean_health
+):
+    app = _spider_app(tmp_path)
+    app.ensure_dirs()
+    monkeypatch.setattr(xhs_spider, "readiness", lambda _app: (True, ""))
+    monkeypatch.setattr(
+        xhs_spider,
+        "fetch_notes",
+        lambda *_a, **_k: (_ for _ in ()).throw(xhs_search.XhsUnavailable("登录已过期")),
+    )
+
+    with pytest.raises(xhs_search.XhsUnavailable):
+        xhs_search.search("痛包", app)
+
+    # 召回侧仍只看结构，不会被一次失败拦住
+    assert xhs_search.available(app) is True
+    ready, reason = xhs_search.status_readiness(app)
+    assert ready is False
+    assert "登录已过期" in reason
+
+
+def test_status_degrades_after_three_empty_results(monkeypatch, tmp_path, _clean_health):
+    app = _spider_app(tmp_path)
+    app.ensure_dirs()
+    monkeypatch.setattr(xhs_spider, "readiness", lambda _app: (True, ""))
+    monkeypatch.setattr(xhs_spider, "fetch_notes", lambda *_a, **_k: [])
+
+    for query in ("痛包", "狗短", "fullset"):
+        assert xhs_search.search(query, app) == []
+
+    ready, reason = xhs_search.status_readiness(app)
+    assert ready is False
+    assert "空" in reason
+    # 空结果同样不拦召回
+    assert xhs_search.available(app) is True
+
+
 # ------------------------------------------------------------------ 召回接线
 
 
