@@ -101,6 +101,9 @@ def test_cache_hit_does_not_start_browser(monkeypatch, workdir):
         return [_post("https://m.weibo.cn/detail/1", "四时花预约价 578，现货 598")]
 
     monkeypatch.setattr(weibo_direct, "_fetch_posts", fake_fetch)
+    # 这个用例只验缓存是否复用：可用性检查是另一个维度的环境依赖（托管 CI 不装
+    # Playwright），显式打桩，避免测试结论随 runner 装没装浏览器而变。
+    monkeypatch.setattr(weibo_direct, "readiness", lambda _app: (True, ""))
 
     first = weibo_direct.search("四时花 价格", app, max_results=5)
     second = weibo_direct.search("四时花 价格", app, max_results=5)
