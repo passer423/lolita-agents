@@ -63,6 +63,9 @@ CHANNEL_SOURCE_KIND = {
     "web": "realtime",
 }
 
+# real 通道：纯 bm25 命中排第一且领先第二名多少分时才放行（见 _recall_real）。
+_REAL_BM25_TOP_MARGIN = 0.25
+
 EVIDENCE_TEXT_LIMIT = 300
 LOLIBRARY_TOP_K = 3
 WEIBO_MAX_EVIDENCE = 3
@@ -299,7 +302,23 @@ def _recall_real(
     # 才豁免向量下限（BM25_ONLY_MIN_CONTENT_MATCHES，为「谢安然穿哪个牌子」这类
     # 真答案留的口子）；这里更严一档：真实语料是他人发言，一旦进证据就可能被
     # writer 当成事实陈述，宁可漏也不能把道听途说当答案。
+    #
+    # 例外：纯 bm25 命中排在整条结果第一位、且与第二名有明显分差时放行这一条。
+    # 这类命中是「整句字面强命中 + 其余路都不认」，与上面那种只共享一个词的
+    # 噪声不同；分差要求保证它没有和别的候选贴在一起。阈值 0.25 的依据：分数
+    # 已按各自召回池归一化到 [0,1]，0.25 意味着第二名只剩 ≤75% 的置信度，
+    # 是明确的第一名而不是近乎并列；实测全量 52 条里，纯 bm25 首名只出现在
+    # 5 条 real 金标上，其中 3 条没有第二名（分差 1.0），2 条第二名同为 1.0
+    # （多意图拆句后各自归一化），阈值落在这段空档里，不会误伤中间态。
     semantic = [hit for hit in hits if "vector" in (hit.get("retriever") or "")]
+    top = hits[0] if hits else None
+    if (
+        top is not None
+        and "bm25" in (top.get("retriever") or "")
+        and "vector" not in (top.get("retriever") or "")
+        and (len(hits) == 1 or top.get("score", 0.0) - hits[1].get("score", 0.0) >= _REAL_BM25_TOP_MARGIN)
+    ):
+        semantic = [top, *semantic]
     return _kb_evidence("real", semantic, limit)
 
 
