@@ -19,6 +19,8 @@ Lolita 垂直领域的问答 agent：**多路召回 → 生成回答 → 关注�
 
 检索、合并、生成三层都有对应指标和门禁；消费级延迟（进程内检索 P95 < 120ms）与本地优先（不依赖托管服务）同时成立。复现命令：`python scripts/bench_numbers.py`、`python eval/answer_eval.py`、`python -m pytest --cov=app`。
 
+![问答演示：多路召回 + 引用编号 + 召回过程/参考来源面板](docs/assets/demo-answer.jpg)
+
 ## 六个召回通道
 
 | 通道 | 来源 | 时机 | 是否落盘 |
