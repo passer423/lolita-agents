@@ -1,12 +1,16 @@
 name: CI
 
-# 只对 PR 触发：本仓库约定不直接推 main，合入前的门禁就是这里。
+# 对 PR 和 main 的直推都触发：本仓库默认直接提交 main，没有 PR 就没有远端门禁。
+# 两处触发的是同一套 job；如果同一改动既开 PR 又落 main，会各跑一遍（ref 不同，
+# concurrency 不会互相取消），这是可接受的重复。
 # 托管 runner 上能跑的三项：ruff、pytest、离线检索门禁（quick-offline）。
 # 检索门禁只跑 quick 里 4 条 own 条目：上游代码可以公开 clone，own 索引可以由
 # content/kb 现场重建；real / lolibrary 依赖两份不进 git 的索引，跑不了，所以
 # 不进这一步（它们仍由手动工作流 eval-gate.yml 或有数据的机器覆盖）。
 on:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
