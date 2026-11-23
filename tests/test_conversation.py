@@ -13,8 +13,8 @@ def _db(tmp_path):
     return path
 
 
-def _account(path, email="owner@example.com"):
-    return db.create_account(path, email, "scrypt$1$1$1$x$y")
+def _account(path, username="owner"):
+    return db.create_account(path, username, "scrypt$1$1$1$x$y")
 
 
 def test_exchange_keeps_user_and_assistant_together(tmp_path):

@@ -761,9 +761,9 @@
           '<button class="chip' + (mode === 'login' ? ' on' : '') + '" data-auth-mode="login">登录</button>' +
           '<button class="chip' + (mode === 'register' ? ' on' : '') + '" data-auth-mode="register">注册</button>' +
         '</div>' +
-        '<label class="auth-field"><span>邮箱</span>' +
-          '<input id="auth-email" type="email" autocomplete="username" inputmode="email" ' +
-            'placeholder="you@example.com"></label>' +
+        '<label class="auth-field"><span>用户名</span>' +
+          '<input id="auth-user" type="text" autocomplete="username" maxlength="32" ' +
+            'placeholder="3–32 个字符，中文/字母/数字"></label>' +
         '<label class="auth-field"><span>密码</span>' +
           '<input id="auth-pass" type="password" autocomplete="' +
             (mode === 'register' ? 'new-password' : 'current-password') + '" ' +
@@ -773,31 +773,31 @@
         '<div class="auth-msg hint" id="auth-msg"></div>' +
       '</div>';
 
-    const email = document.getElementById('auth-email');
+    const user = document.getElementById('auth-user');
     const pass = document.getElementById('auth-pass');
     const msg = document.getElementById('auth-msg');
     const submit = document.getElementById('auth-submit');
 
     root.querySelectorAll('[data-auth-mode]').forEach((button) => {
       button.addEventListener('click', () => {
-        const keep = email.value;
+        const keep = user.value;
         renderAuth(button.dataset.authMode);
-        // 切模式时保留已输入的邮箱，少打一遍
-        const node = document.getElementById('auth-email');
+        // 切模式时保留已输入的用户名，少打一遍
+        const node = document.getElementById('auth-user');
         if (node) { node.value = keep; node.focus(); }
       });
     });
 
     async function doSubmit() {
-      const value = email.value.trim();
-      if (!value || !pass.value) { msg.textContent = '请填写邮箱和密码'; return; }
+      const value = user.value.trim();
+      if (!value || !pass.value) { msg.textContent = '请填写用户名和密码'; return; }
       submit.disabled = true;
       msg.textContent = mode === 'register' ? '正在注册…' : '正在登录…';
       try {
         const response = await fetch('/api/auth/' + mode, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json; charset=utf-8' },
-          body: JSON.stringify({ email: value, password: pass.value }),
+          body: JSON.stringify({ username: value, password: pass.value }),
         });
         let data = {};
         try { data = await response.json(); } catch (_) { /* 非 JSON */ }
@@ -818,7 +818,7 @@
     pass.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') { event.preventDefault(); doSubmit(); }
     });
-    email.focus();
+    user.focus();
   }
 
   // ---------------------------------------------------------------- 对话列表
@@ -960,14 +960,14 @@
       return;
     }
 
-    const email = (state.account && state.account.email) || '';
+    const username = (state.account && state.account.username) || '';
     // 问答是主区域，放最上面；关注项是辅助功能，折叠在下面，
     // 不占首屏、也不需要用户先滑过设置才能提问。
     root.innerHTML =
       '<div class="card chat-card">' +
         '<div class="chat-head">' +
           '<span class="chat-model">' + esc(status.model) +
-            (email ? ' · ' + esc(email) : '') + '</span>' +
+            (username ? ' · ' + esc(username) : '') + '</span>' +
           '<div class="chat-actions">' +
             '<button class="ghost sm" id="chat-stop" style="display:none" disabled>停止</button>' +
             '<button class="ghost sm" id="thread-new">新对话</button>' +

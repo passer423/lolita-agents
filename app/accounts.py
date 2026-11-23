@@ -1,4 +1,4 @@
-"""邮箱账号：注册 / 登录 / 登出 / 登录态门禁。
+"""用户名账号：注册 / 登录 / 登出 / 登录态门禁。
 
 密码只存哈希。用的是标准库 ``hashlib.scrypt``（每用户随机 salt，N=2^14）：
 不引入 bcrypt/argon2 依赖，2C2G 上单次验证约几十毫秒，够用且不会把内存打穿。
@@ -20,7 +20,6 @@ import binascii
 import hashlib
 import hmac
 import logging
-import re
 import secrets
 import threading
 import time
@@ -49,7 +48,10 @@ SCRYPT_R = 8
 SCRYPT_P = 1
 SCRYPT_MAXMEM = 64 * 1024 * 1024
 
-EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,}$")
+#: 用户名规则：3–32 个字符，中文/字母/数字/下划线/连字符/点，至少一个非符号。
+USERNAME_MIN = 3
+USERNAME_MAX = 32
+USERNAME_SYMBOLS = "_-."
 
 #: 不需要登录的 API 路径（登录/注册/探针/文档）。
 PUBLIC_API_PATHS = frozenset(
@@ -129,10 +131,22 @@ def verify_password(password: str, stored: str) -> bool:
 # --------------------------------------------------------------------- 规范化
 
 
-def normalize_email(email: str) -> str:
-    value = str(email or "").strip().lower()
-    if not EMAIL_RE.match(value):
-        raise ValueError("邮箱格式不正确")
+def check_username(username: str) -> str:
+    """校验并返回去掉首尾空白后的用户名。
+
+    只查注册；登录不套这套字符限制，历史上用邮箱注册的账号仍可原样登录。
+    """
+    value = str(username or "").strip()
+    if not value:
+        raise ValueError("请填写用户名")
+    if len(value) < USERNAME_MIN:
+        raise ValueError(f"用户名至少 {USERNAME_MIN} 个字符")
+    if len(value) > USERNAME_MAX:
+        raise ValueError(f"用户名最多 {USERNAME_MAX} 个字符")
+    if not all(ch.isalnum() or ch in USERNAME_SYMBOLS for ch in value):
+        raise ValueError("用户名只能包含中文、字母、数字、下划线、连字符和点")
+    if not any(ch.isalnum() for ch in value):
+        raise ValueError("用户名至少要包含一个中文、字母或数字")
     return value
 
 
@@ -152,30 +166,28 @@ def _token_hash(token: str) -> str:
 # --------------------------------------------------------------------- 账号动作
 
 
-def register(db_path, email: str, password: str) -> tuple[dict, str]:
-    email = normalize_email(email)
+def register(db_path, username: str, password: str) -> tuple[dict, str]:
+    username = check_username(username)
     password = check_password(password)
-    account = db.create_account(db_path, email, hash_password(password))
+    account = db.create_account(db_path, username, hash_password(password))
     return account, _issue_session(db_path, account["id"])
 
 
-def login(db_path, email: str, password: str) -> tuple[dict, str]:
-    try:
-        email = normalize_email(email)
-    except ValueError as exc:
-        raise PermissionError("邮箱或密码不正确") from exc
-    account = db.get_account_by_email(db_path, email)
+def login(db_path, username: str, password: str) -> tuple[dict, str]:
+    # 登录只做 trim，不校验字符集：旧邮箱账号的用户名里带 @，仍要能登录。
+    username = str(username or "").strip()
+    account = db.get_account_by_username(db_path, username) if username else None
     global _dummy_hash
     if _dummy_hash is None:
-        # 账号不存在时也跑一次 scrypt，避免靠响应时间判断邮箱是否注册过。
-        # 只算一次并缓存，否则每个伪造邮箱的登录请求都要多花一次哈希。
+        # 账号不存在时也跑一次 scrypt，避免靠响应时间判断用户名是否注册过。
+        # 只算一次并缓存，否则每个伪造用户名的登录请求都要多花一次哈希。
         _dummy_hash = hash_password("dummy-password-not-used")
     stored = account["password_hash"] if account else _dummy_hash
     if not verify_password(password, stored) or account is None:
-        # 账号不存在与密码错误给同一句话，避免把「这个邮箱注册过」告诉攻击者。
-        raise PermissionError("邮箱或密码不正确")
+        # 账号不存在与密码错误给同一句话，避免把「这个用户名注册过」告诉攻击者。
+        raise PermissionError("用户名或密码不正确")
     db.touch_account(db_path, account["id"])
-    return {k: account[k] for k in ("id", "email", "created_at")}, _issue_session(
+    return {k: account[k] for k in ("id", "username", "created_at")}, _issue_session(
         db_path, account["id"]
     )
 
@@ -201,7 +213,7 @@ def resolve_session(db_path, token: str) -> dict | None:
             db.touch_session(db_path, record["token_hash"])
     except (ValueError, TypeError):
         pass
-    return {"id": record["account_id"], "email": record["email"]}
+    return {"id": record["account_id"], "username": record["username"]}
 
 
 def logout(db_path, token: str) -> None:
@@ -324,26 +336,26 @@ router = APIRouter(prefix="/api/auth", tags=["accounts"])
 
 
 class Credentials(BaseModel):
-    email: str = ""
+    username: str = ""
     password: str = ""
 
 
 @router.post("/register", status_code=201)
 def register_account(payload: Credentials, request: Request, response: Response) -> dict:
     try:
-        account, token = register(default_settings.db_path, payload.email, payload.password)
+        account, token = register(default_settings.db_path, payload.username, payload.password)
     except ValueError as exc:
         status = 409 if "注册过" in str(exc) else 422
         raise HTTPException(status_code=status, detail=str(exc)) from exc
     set_session_cookie(response, token, request)
     maybe_prune(default_settings)
-    return {"account": {k: account[k] for k in ("id", "email", "created_at")}}
+    return {"account": {k: account[k] for k in ("id", "username", "created_at")}}
 
 
 @router.post("/login")
 def login_account(payload: Credentials, request: Request, response: Response) -> dict:
     try:
-        account, token = login(default_settings.db_path, payload.email, payload.password)
+        account, token = login(default_settings.db_path, payload.username, payload.password)
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     set_session_cookie(response, token, request)

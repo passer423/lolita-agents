@@ -4,7 +4,7 @@
 ``/api/threads`` / ``/api/chat`` 503 / ``/api/follows``。
 账号门禁是默认拒绝的，所以要用真实账号测登录后的路径，先设置：
 
-    $env:SMOKE_EMAIL = "you@example.com"
+    $env:SMOKE_USERNAME = "tester"
     $env:SMOKE_PASSWORD = "..."
     python scripts/smoke.py
 
@@ -96,14 +96,14 @@ def check_chat_status(base_url: str) -> dict:
 
 
 def login(base_url: str) -> bool:
-    """用 SMOKE_EMAIL / SMOKE_PASSWORD 登录，拿到会话 cookie。没配置就返回 False。"""
+    """用 SMOKE_USERNAME / SMOKE_PASSWORD 登录，拿到会话 cookie。没配置就返回 False。"""
     global COOKIE
-    email = os.environ.get("SMOKE_EMAIL", "").strip()
+    username = os.environ.get("SMOKE_USERNAME", "").strip()
     password = os.environ.get("SMOKE_PASSWORD", "")
-    if not email or not password:
+    if not username or not password:
         return False
     url = base_url.rstrip("/") + "/api/auth/login"
-    body = json.dumps({"email": email, "password": password}).encode("utf-8")
+    body = json.dumps({"username": username, "password": password}).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
@@ -138,7 +138,7 @@ def check_chat_503(base_url: str) -> str:
     status, body = request(base_url, path, method="POST", payload={"message": "冒烟测试"})
     if not COOKIE:
         assert status == 401, f"未登录期望 401，实际 {status}"
-        return "401（未登录；配置 SMOKE_EMAIL/SMOKE_PASSWORD 可验证 503）"
+        return "401（未登录；配置 SMOKE_USERNAME/SMOKE_PASSWORD 可验证 503）"
     assert status == 503, f"未配 key 时期望 503，实际 {status}"
     data = parse_json(body, path)
     assert data.get("detail"), "503 响应缺少 detail（没有告诉调用方缺什么）"
@@ -178,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     if login(base_url):
         print("已登录：后续受保护接口按登录态检查")
     else:
-        print("未配置 SMOKE_EMAIL / SMOKE_PASSWORD：只验证公开接口与未登录 401")
+        print("未配置 SMOKE_USERNAME / SMOKE_PASSWORD：只验证公开接口与未登录 401")
     failures = 0
 
     def run(label: str, func) -> None:

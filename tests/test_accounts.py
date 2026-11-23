@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -18,7 +19,7 @@ def _fresh(data_dir):
 def test_register_sets_httponly_cookie_and_me_works(client):
     me = client.get("/api/auth/me")
     assert me.status_code == 200
-    assert me.json()["account"]["email"] == "tester@example.com"
+    assert me.json()["account"]["username"] == "tester"
 
     cookie = client.post(
         "/api/auth/logout"
@@ -27,7 +28,7 @@ def test_register_sets_httponly_cookie_and_me_works(client):
 
     response = client.post(
         "/api/auth/login",
-        json={"email": "tester@example.com", "password": "test-password-123"},
+        json={"username": "tester", "password": "test-password-123"},
     )
     assert response.status_code == 200
     header = response.headers["set-cookie"]
@@ -37,7 +38,7 @@ def test_register_sets_httponly_cookie_and_me_works(client):
 
 
 def test_password_is_stored_as_hash_not_plaintext(client):
-    row = db.get_account_by_email(settings.db_path, "tester@example.com")
+    row = db.get_account_by_username(settings.db_path, "tester")
     assert row is not None
     assert row["password_hash"].startswith("scrypt$")
     assert "test-password-123" not in row["password_hash"]
@@ -48,12 +49,12 @@ def test_password_is_stored_as_hash_not_plaintext(client):
 def test_register_rejects_duplicate_and_weak_password(client):
     duplicate = client.post(
         "/api/auth/register",
-        json={"email": "TESTER@example.com", "password": "test-password-123"},
+        json={"username": "TESTER", "password": "test-password-123"},
     )
     assert duplicate.status_code == 409
 
     weak = _fresh(settings.data_dir).post(
-        "/api/auth/register", json={"email": "weak@example.com", "password": "123"}
+        "/api/auth/register", json={"username": "weakuser", "password": "123"}
     )
     assert weak.status_code == 422
 
@@ -61,11 +62,11 @@ def test_register_rejects_duplicate_and_weak_password(client):
 def test_login_rejects_wrong_password_without_leaking_existence(client):
     wrong = _fresh(settings.data_dir).post(
         "/api/auth/login",
-        json={"email": "tester@example.com", "password": "not-the-password"},
+        json={"username": "tester", "password": "not-the-password"},
     )
     unknown = _fresh(settings.data_dir).post(
         "/api/auth/login",
-        json={"email": "nobody@example.com", "password": "not-the-password"},
+        json={"username": "nobody-here", "password": "not-the-password"},
     )
     assert wrong.status_code == 401
     assert unknown.status_code == 401
@@ -102,7 +103,7 @@ def test_threads_are_not_visible_across_accounts(client):
     bob = _fresh(settings.data_dir)
     registered = bob.post(
         "/api/auth/register",
-        json={"email": "bob@example.com", "password": "bob-password-123"},
+        json={"username": "bob", "password": "bob-password-123"},
     )
     assert registered.status_code == 201
 
@@ -154,7 +155,7 @@ def test_login_in_new_browser_restores_history(client):
     assert another.get("/api/threads").status_code == 401
     assert another.post(
         "/api/auth/login",
-        json={"email": "tester@example.com", "password": "test-password-123"},
+        json={"username": "tester", "password": "test-password-123"},
     ).status_code == 200
     listed = another.get("/api/threads").json()["threads"]
     assert [item["id"] for item in listed] == [thread["id"]]
@@ -165,13 +166,73 @@ def test_login_in_new_browser_restores_history(client):
     ]
 
 
+def test_username_rules_give_actionable_messages(client):
+    cases = [
+        ("", "请填写用户名"),
+        ("   ", "请填写用户名"),
+        ("ab", "至少 3 个字符"),
+        ("a" * 33, "最多 32 个字符"),
+        ("has space", "只能包含中文、字母、数字"),
+        ("!!!", "只能包含中文、字母、数字"),
+        ("___", "至少要包含一个中文、字母或数字"),
+    ]
+    for name, hint in cases:
+        response = client.post(
+            "/api/auth/register",
+            json={"username": name, "password": "test-password-123"},
+        )
+        assert response.status_code == 422, (name, response.text)
+        assert hint in response.json()["detail"], (name, response.json())
+
+    # 中文用户名可以注册；首尾空白会被去掉
+    chinese = client.post(
+        "/api/auth/register",
+        json={"username": "  洛丽塔迷  ", "password": "test-password-123"},
+    )
+    assert chinese.status_code == 201
+    assert chinese.json()["account"]["username"] == "洛丽塔迷"
+
+
+def test_old_email_account_still_logs_in_after_migration(tmp_path):
+    """v5 的 email 列改名成 username：旧邮箱账号原样可登录，不需要重置密码。"""
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE accounts ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "email TEXT NOT NULL UNIQUE COLLATE NOCASE, "
+        "password_hash TEXT NOT NULL, created_at TEXT NOT NULL, "
+        "last_seen_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO accounts (email, password_hash, created_at, last_seen_at) "
+        "VALUES (?, ?, ?, ?)",
+        (
+            "old@example.com",
+            accounts.hash_password("old-password-123"),
+            "2026-01-01T00:00:00",
+            "2026-01-01T00:00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    db.init_db(path)
+
+    row = db.get_account_by_username(path, "OLD@example.com")
+    assert row is not None
+    assert row["username"] == "old@example.com"
+    account, _ = accounts.login(path, "old@example.com", "old-password-123")
+    assert account["username"] == "old@example.com"
+
+
 def test_follows_are_isolated_between_accounts(client):
     db.add_follow(settings.db_path, client.account["id"], "Alice 的关注", "web")
 
     bob = _fresh(settings.data_dir)
     bob.post(
         "/api/auth/register",
-        json={"email": "bob-follow@example.com", "password": "bob-password-123"},
+        json={"username": "bob-follow", "password": "bob-password-123"},
     )
     assert bob.get("/api/follows").json()["follows"] == []
     assert [f["subject"] for f in client.get("/api/follows").json()["follows"]] == [

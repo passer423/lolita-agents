@@ -2,7 +2,7 @@
 
 一个进程只开一个 ``data/app.db``（WAL）。表分三类：
 
-* ``accounts`` + ``account_sessions``：邮箱账号与登录态（只存密码哈希与
+* ``accounts`` + ``account_sessions``：用户名账号与登录态（只存密码哈希与
   token 的 SHA-256，不存明文）；
 * ``chat_threads`` + ``thread_messages``：一个账号下的多个对话及其消息；
 * ``follows`` + ``follow_events``：关注项，按 ``account_id`` 隔离。
@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: 每账号保留的对话数、每对话保留的消息数、全库对话上限、闲置过期天数。
 KEEP_THREADS_PER_ACCOUNT = 20
@@ -35,7 +35,7 @@ KEEP_SESSIONS_PER_ACCOUNT = 10
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
     password_hash TEXT NOT NULL,
     created_at    TEXT NOT NULL,
     last_seen_at  TEXT NOT NULL
@@ -167,9 +167,21 @@ def _migrate_follows(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_accounts(conn: sqlite3.Connection) -> None:
+    """``accounts`` 的登录标识从邮箱换成用户名（v5 → v6）。
+
+    只把列改名、旧值原样保留：早期用邮箱注册的账号不用改数据也还能登录——
+    登录接口不校验用户名字符集，把原来那串邮箱填进用户名即可，密码不变。
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(accounts)")}
+    if "email" in columns and "username" not in columns:
+        conn.execute("ALTER TABLE accounts RENAME COLUMN email TO username")
+
+
 def init_db(db_path: Path) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate_accounts(conn)
         _migrate_follows(conn)
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
@@ -180,28 +192,28 @@ def init_db(db_path: Path) -> None:
 # --------------------------------------------------------------------- 账号
 
 
-def create_account(db_path: Path, email: str, password_hash: str) -> dict:
+def create_account(db_path: Path, username: str, password_hash: str) -> dict:
     stamp = now()
     with connect(db_path) as conn:
         try:
             cursor = conn.execute(
-                "INSERT INTO accounts (email, password_hash, created_at, last_seen_at) "
+                "INSERT INTO accounts (username, password_hash, created_at, last_seen_at) "
                 "VALUES (?, ?, ?, ?)",
-                (email, password_hash, stamp, stamp),
+                (username, password_hash, stamp, stamp),
             )
         except sqlite3.IntegrityError as exc:
-            raise ValueError("这个邮箱已经注册过了") from exc
+            raise ValueError("这个用户名已经注册过了") from exc
         row = conn.execute(
-            "SELECT id, email, created_at, last_seen_at FROM accounts WHERE id = ?",
+            "SELECT id, username, created_at, last_seen_at FROM accounts WHERE id = ?",
             (cursor.lastrowid,),
         ).fetchone()
     return dict(row)
 
 
-def get_account_by_email(db_path: Path, email: str) -> dict | None:
+def get_account_by_username(db_path: Path, username: str) -> dict | None:
     with connect(db_path) as conn:
         row = conn.execute(
-            "SELECT * FROM accounts WHERE email = ? COLLATE NOCASE", (email,)
+            "SELECT * FROM accounts WHERE username = ? COLLATE NOCASE", (username,)
         ).fetchone()
     return dict(row) if row else None
 
@@ -209,7 +221,7 @@ def get_account_by_email(db_path: Path, email: str) -> dict | None:
 def get_account(db_path: Path, account_id: int) -> dict | None:
     with connect(db_path) as conn:
         row = conn.execute(
-            "SELECT id, email, created_at, last_seen_at FROM accounts WHERE id = ?",
+            "SELECT id, username, created_at, last_seen_at FROM accounts WHERE id = ?",
             (account_id,),
         ).fetchone()
     return dict(row) if row else None
@@ -246,7 +258,7 @@ def get_session(db_path: Path, token_hash: str, *, moment: str | None = None) ->
     with connect(db_path) as conn:
         row = conn.execute(
             "SELECT s.token_hash, s.account_id, s.expires_at, s.last_seen_at, "
-            "a.email "
+            "a.username "
             "FROM account_sessions s JOIN accounts a ON a.id = s.account_id "
             "WHERE s.token_hash = ? AND s.expires_at > ?",
             (token_hash, moment),

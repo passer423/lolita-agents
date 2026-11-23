@@ -105,7 +105,7 @@ lolita-agents/
 │   ├── config.py          应用配置（DATA_DIR / 召回与补查开关）
 │   ├── bridge.py          ★ 与上游管线的桥：search_kb（own）/ search_real（real）双索引
 │   ├── db.py              SQLite：accounts / sessions / 对话线程 / follows / meta
-│   ├── accounts.py        邮箱账号、scrypt 密码哈希、cookie 会话与全站账号门禁
+│   ├── accounts.py        用户名账号、scrypt 密码哈希、cookie 会话与全站账号门禁
 │   ├── main.py            FastAPI 入口（auth / chat / follows / kb 路由 + 静态挂载）
 │   ├── agent/             ★ LangGraph 编排 + 召回 + 规划 + 写作
 │   │   ├── graph.py         StateGraph：核心通道扇出 → route → 补查扇出 → answer → verify
@@ -202,7 +202,7 @@ START ──fanout──▶ own ─┐
 
 ## 账号与对话
 
-- **注册 / 登录**：`POST /api/auth/register`、`/api/auth/login`、`/api/auth/logout`，`GET /api/auth/me`。邮箱 + 密码，密码只存 `hashlib.scrypt`（每用户随机 salt，格式 `scrypt$N$r$p$salt$hash`），不存明文、不做可逆加密。
+- **注册 / 登录**：`POST /api/auth/register`、`/api/auth/login`、`/api/auth/logout`，`GET /api/auth/me`。用户名 + 密码，密码只存 `hashlib.scrypt`（每用户随机 salt，格式 `scrypt$N$r$p$salt$hash`），不存明文、不做可逆加密。用户名 3–32 个字符，只允许中文、字母、数字、`_` `-` `.`，且至少含一个非符号；比较不分大小写，登录失败统一提示「用户名或密码不正确」。
 - **登录态**：服务端会话。cookie `lolita_session` 是随机 token，库里只存其 SHA-256；`HttpOnly` + `SameSite=Lax`，HTTPS（或 `X-Forwarded-Proto: https`）时加 `Secure`。绝对有效期 30 天，刷新页面不用重登；登出或过期后服务端删/拒掉该 token，接口返回 401。
 - **门禁**：默认拒绝。除 `/api/health`、`/api/chat/status` 与 `/api/auth/*` 外，所有 `/api/*` 都由 `AccountGate` 中间件校验 cookie，未登录直接 401；不是前端藏按钮。
 - **多对话**：`GET/POST /api/threads`、`GET /api/threads/{id}/messages`、`DELETE /api/threads/{id}`。标题取首问摘要（折叠空白、截 30 字）。流式请求第一帧返回 `{"type":"conversation","id":...}`，前端据此把新对话挂到侧栏。
@@ -216,8 +216,8 @@ START ──fanout──▶ own ─┐
   - 过期登录会话删除，每账号只留最近 10 个会话；
   - `DELETE /api/chat/history` 可清一个对话（带 `conversation_id`）或本账号全部对话，不影响关注项。
 - **开销**：账号行约 200 B；登录会话行约 200 B（每账号 ≤10）；一条消息按 1–2 KB 估，单账号上限 20×100 条 ≈ 2–4 MB，全库上限 500 个对话 ≈ 50–100 MB（含 WAL 的临时膨胀）。SQLite 每请求开关连接，常驻内存主要是页缓存（默认几 MB），不随账号数线性增长。
-- **旧数据**：早期全局 `conversations` 表与 `follows.account_id IS NULL` 的行保留在库里，代码不再读写，也不会展示给任何账号。
-- **未做**：邮箱验证、找回密码、第三方登录、账号注销、管理后台。注册是开放的，公网部署请用 nginx 限制 `/api/auth/register` 与 `/api/auth/login` 的频率。
+- **旧数据**：早期全局 `conversations` 表与 `follows.account_id IS NULL` 的行保留在库里，代码不再读写，也不会展示给任何账号。schema v5 的 `accounts.email` 列已改名为 `username`（只改列名、旧值不动）：若线上曾用邮箱注册过，把原邮箱整串填进「用户名」即可登录，密码和归属数据都不变；没有邮箱字段仅供展示的兼容层。
+- **未做**：找回密码、第三方登录、账号注销、管理后台。注册是开放的，公网部署请用 nginx 限制 `/api/auth/register` 与 `/api/auth/login` 的频率。
 - **nginx 限流**：`deploy/nginx/limits.conf` 新增 `auth_req`（登录/注册 5r/m/IP，`burst=3`，超出 429）；`/api/chat` 仍是 1 并发 + 6r/m/IP。对话列表、切换、删除走 `/api/threads`，不吃聊天配额。多个账号共用一个出口 IP 时共享配额（2C2G 上这是保护内存的取舍）；演示多人同网时可把 `limit_conn` 调到 2、`rate` 调到 12r/m，代价是内存翻倍。
 
 ## 边界与纪律
