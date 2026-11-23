@@ -1,0 +1,50 @@
+# lolita-agents —— 2C2G（2 GiB）低配档 systemd unit
+#
+# 安装位置：/etc/systemd/system/lolita-agents.service
+# 需要替换的占位符：
+#   __APP_DIR__   仓库目录，例如 /srv/lolita-agents
+#   __RUN_USER__  运行用户，例如 lolita
+#   __RUN_GROUP__ 运行用户组，通常与用户同名
+#
+# 说明与验证见 docs/deploy.md 的 3.14.2，以及 deploy/README.md。
+
+[Unit]
+Description=lolita-agents demo (2C2G)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__RUN_USER__
+Group=__RUN_GROUP__
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__APP_DIR__/.env
+
+# 单 worker：每个 worker 是独立进程，各自把 BGE 权重持有为匿名内存，
+# 单进程常驻约 1.2–1.8 GB；2 GiB 上开两个必然 OOM。本项目瓶颈是一次
+# LLM 调用加检索 I/O，不是 CPU 并行，单 worker 足够。
+#
+# --limit-concurrency 8 只做兜底安全阀：页面加载会并行请求 html/js/css，
+# 压到 1–2 会把自己的首屏挡成 503。对话串行化交给 nginx 的 limit_conn。
+#
+# --timeout-graceful-shutdown 15 + TimeoutStopSec=45：给 SSE 收尾留时间，
+# 又不至于让 systemctl restart 卡在等待上（内存紧张时进程退出会变慢）。
+ExecStart=__APP_DIR__/.venv/bin/uvicorn app.main:app \
+  --host 127.0.0.1 --port 8787 \
+  --workers 1 \
+  --limit-concurrency 8 --backlog 32 \
+  --timeout-keep-alive 5 \
+  --proxy-headers --forwarded-allow-ips=127.0.0.1 \
+  --timeout-graceful-shutdown 15
+
+Restart=always
+RestartSec=5
+TimeoutStopSec=45
+LimitNOFILE=65535
+
+# 可选：让内核在这档内存上更早回收（cgroup v2 MemoryHigh），避免瞬间冲顶。
+# 若发现响应明显变慢（频繁触发直接回收），删掉这一行重新 daemon-reload。
+MemoryHigh=1536M
+
+[Install]
+WantedBy=multi-user.target
