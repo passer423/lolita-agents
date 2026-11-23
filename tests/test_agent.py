@@ -397,6 +397,14 @@ def test_dress_model_hint_fills_series(monkeypatch):
     monkeypatch.setattr(channels, "recall", fake_recall({
         "own": evidence("own"), "real": evidence("real"), "lolibrary": evidence("lolibrary"),
     }))
+    monkeypatch.setattr(dress, "verify_candidate_name", lambda name, ctx, **_: {
+        "candidate": name,
+        "series_en": name,
+        "brand": "Baby, the Stars Shine Bright",
+        "region": "JP",
+        "source": "archive",
+        "title": name,
+    })
     planner = ScriptedPlanner([], dress_script=[{
         "brand": "Baby, the Stars Shine Bright",
         "region": "JP",
@@ -417,6 +425,41 @@ def test_dress_model_hint_fills_series(monkeypatch):
     route = next(step for step in result["steps"] if step["kind"] == "route")
     assert "Mille-feuille Royal pour la Princesse" in route["dress_series"]
     assert route["dress_region"] == "JP"
+    name_step = next(step for step in result["steps"] if step["kind"] == "dress_name")
+    assert name_step["result"] == "passed"
+    assert name_step["candidates"][0]["name"] == "Mille-feuille Royal pour la Princesse"
+    assert name_step["candidates"][0]["verified"] is True
+
+
+def test_dress_model_hint_rejected_is_visible(monkeypatch):
+    """猜到了但档案里没有：不采用，页面显示「校验未通过」。"""
+    monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+    monkeypatch.setattr(channels, "recall", fake_recall({
+        "own": evidence("own"), "real": evidence("real"), "lolibrary": evidence("lolibrary"),
+    }))
+    monkeypatch.setattr(dress, "verify_candidate_name", lambda *_a, **_k: None)
+    planner = ScriptedPlanner([], dress_script=[{
+        "brand": "Baby, the Stars Shine Bright",
+        "region": "JP",
+        "series": "Phantom Ribbon Dream",
+        "series_cn": "幻影缎带梦",
+        "confidence": "high",
+    }])
+    app = settings.model_copy(update={"lolibrary_online_enabled": False})
+
+    result = graph.run(
+        "Baby 缎带与齿轮 预约价多少",
+        ctx=RecallContext(settings=app),
+        planner=planner,
+        writer=StubWriter(),
+    )
+
+    route = next(step for step in result["steps"] if step["kind"] == "route")
+    assert route["dress_series"] == ""
+    name_step = next(step for step in result["steps"] if step["kind"] == "dress_name")
+    assert name_step["result"] == "failed"
+    assert name_step["candidates"][0]["name"] == "Phantom Ribbon Dream"
+    assert name_step["candidates"][0]["verified"] is False
 
 
 def test_pending_dress_question_uses_model_and_verifies(monkeypatch, workdir):
@@ -464,7 +507,7 @@ def test_pending_dress_question_uses_model_and_verifies(monkeypatch, workdir):
     assert planner.dress_calls == 1
     route = next(step for step in result["steps"] if step["kind"] == "route")
     assert route["supplementary"] == []
-    assert route["dress_series"] == "Starry Night Dream"
+    assert route["dress_series"] == "Starry Night Dream JSK"
     assert route["dress_source"] == "model"
     assert result["dress"]["verified"] is True
     assert result["dress"]["source"] == "model_verified"

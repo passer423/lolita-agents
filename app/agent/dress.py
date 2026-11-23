@@ -1528,8 +1528,18 @@ def resolve_dress(
     return _with_queries(query)
 
 
-def merge_model_hint(query: dict, hint: dict, ctx: RecallContext) -> dict:
-    """把模型兜底结果合并进离线识别；离线命中优先，低置信度/未知品牌丢弃。"""
+def merge_model_hint(
+    query: dict,
+    hint: dict,
+    ctx: RecallContext,
+    *,
+    trace: dict | None = None,
+) -> dict:
+    """把模型兜底结果合并进离线识别；离线命中优先，低置信度/未知品牌丢弃。
+
+    模型给的系列名必须回本地档案或 Lolibrary 核验：没通过就只保留品牌/地区，
+    不采用系列名；``trace`` 会收到候选与校验结果，供页面显示「解析裙名」。
+    """
     current = DressQuery.from_dict(query)
     if current is None or not isinstance(hint, dict):
         return query
@@ -1550,6 +1560,7 @@ def merge_model_hint(query: dict, hint: dict, ctx: RecallContext) -> dict:
     series_en = current.series_en
     series_cn = current.series_cn
     model_used = False
+    series_verified = False
 
     hint_brand_name = str(hint.get("brand") or "").strip()
     brand_conflict = bool(
@@ -1574,10 +1585,40 @@ def merge_model_hint(query: dict, hint: dict, ctx: RecallContext) -> dict:
         region = hint_region
         model_used = True
     # 品牌对不上时不采用它给的系列名：那可能是另一条裙子的名字。
-    if hint_series and not series_en and not brand_conflict and brand:
-        series_en = hint_series
-        model_used = True
-    if hint_series_cn and not series_cn:
+    # 品牌对得上也不能直接采用：模型候选必须回本地档案 / Lolibrary 核验。
+    if hint_series and not series_en:
+        if brand_conflict or not brand:
+            if trace is not None:
+                trace.update(
+                    candidate=hint_series,
+                    brand=hint_brand_name or brand,
+                    verified=False,
+                    reason="brand_conflict" if brand_conflict else "brand_missing",
+                )
+        else:
+            checked = verify_candidate_name(hint_series, ctx)
+            if trace is not None:
+                trace.update(
+                    candidate=hint_series,
+                    brand=str((checked or {}).get("brand") or hint_brand_name or brand),
+                    verified=bool(checked),
+                )
+            if checked:
+                series_en = str(checked.get("series_en") or hint_series)
+                series_cn = series_cn or hint_series_cn
+                checked_brand = _brand_by_name(brands, str(checked.get("brand") or ""))
+                if checked_brand is not None:
+                    brand, brand_id, region = (
+                        checked_brand.name,
+                        checked_brand.id,
+                        checked_brand.region,
+                    )
+                series_verified = True
+                model_used = True
+                notes.append(f"模型候选 {hint_series} 已通过档案校验")
+            else:
+                notes.append(f"模型候选 {hint_series} 未通过档案校验，不采用")
+    if hint_series_cn and not series_cn and (series_en or not hint_series):
         series_cn = hint_series_cn
         model_used = True
 
@@ -1598,13 +1639,13 @@ def merge_model_hint(query: dict, hint: dict, ctx: RecallContext) -> dict:
         confidence=confidence,
         source=source,
         is_specific=bool(series_en or current.product_number),
-        verified=current.verified,
+        verified=current.verified or series_verified,
         notes=tuple(notes),
         original_question=current.original_question,
         normalized_question=current.normalized_question,
         normalize_changes=current.normalize_changes,
         matched_alias=(hint_series_cn or hint_series or current.matched_alias)
-        if model_used
+        if series_verified
         else current.matched_alias,
         name_source="model" if source == "model" else current.name_source,
     )

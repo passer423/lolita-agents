@@ -70,7 +70,7 @@ from typing import Annotated, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
-from app.agent import channels, conflicts, cost, dress, history_memory, routing, trace
+from app.agent import channels, conflicts, cost, dress, dress_name_tool, history_memory, routing, trace
 from app.agent.channels import ALL_CHANNELS, ChannelUnavailable, RecallContext
 from app.agent.planner import PlannerOutputError, plan_channels, plan_intents
 from app.agent.writer import HISTORY_FETCH_MESSAGES, sanitize_history
@@ -135,6 +135,8 @@ class AgentState(TypedDict, total=False):
     dress_profile: dict
     dress_unresolved: bool
     dress_unverified: bool
+    # 模型给了候选但档案校验没过：不采用，只用来向用户反问。
+    dress_name_failed: dict
     # 核心全 0 时的保守扩展兜底：每轮最多一次模型调用。
     fallback_used: bool
     fallback_hit: bool
@@ -717,7 +719,12 @@ def build_graph(
         }
         if progress is not None:
             progress.dress_done(data, step)
-        return {"dress_query": data, "steps": [step]}
+        steps = [step]
+        # 页面上的「解析裙名」：只有真的解析出候选全名才出现，未触发不占行。
+        name_step = dress_name_tool.trace_from_query(data)
+        if name_step:
+            steps.append(name_step)
+        return {"dress_query": data, "steps": steps}
 
     def route(state: AgentState) -> dict:
         """补查决策：**规则**定要不要查（不看召回结果），模型只提检索词。
@@ -748,10 +755,23 @@ def build_graph(
         # 保守扩展已经用过一次模型；同一轮不再调第二次（含超时/失败的尝试）。
         if state.get("fallback_used"):
             needs_model = False
+        name_step: dict | None = None
         if needs_model:
             hint = _extract_dress_hint(planner, question, state.get("history"))
             if hint:
-                dress_query = dress.merge_model_hint(dress_query, hint, ctx)
+                dress_query, name_step = dress_name_tool.merge_hint(
+                    dress_query, hint, ctx
+                )
+        # 兜底/本地已经有系列名时，用最终结果刷新解析轨迹；未解析出名字不出行。
+        if name_step is None:
+            name_step = dress_name_tool.trace_from_query(dress_query)
+        name_failed: dict = {}
+        if name_step and name_step.get("source") == "model" and name_step.get("result") == "failed":
+            first = (name_step.get("candidates") or [{}])[0]
+            name_failed = {
+                "candidate": str(first.get("name") or ""),
+                "brand": str(first.get("brand") or ""),
+            }
         # 反问只在「问的就是这条裙子 / 这个系列叫什么」时触发：这种问题的答案
         # 本身就是身份，认不出来就没有证据可推。其余问题（概念、术语、洗护、
         # 尺码、交易流程）即使认不出裙子也照常召回+写作——裙子档案不准最多是
@@ -806,12 +826,14 @@ def build_graph(
         ]
         if progress is not None:
             progress.route_done(wanted, step, search_steps)
+        name_steps = [name_step] if name_step else []
         return {
             "supplementary": wanted,
             "query": query,
             "dress_query": dress_query,
             "dress_unresolved": dress_unresolved,
-            "steps": [*search_steps, step],
+            "dress_name_failed": name_failed,
+            "steps": [*search_steps, *name_steps, step],
         }
 
     def fallback_expand(state: AgentState) -> dict:
@@ -873,9 +895,27 @@ def build_graph(
                 rejected.append(candidate)
         step["validated"] = [item.get("series_en") or item.get("candidate") for item in validated]
         step["rejected"] = rejected
+        # 模型候选的校验结果要单独可见：通过才采用，没通过就如实显示。
+        name_step = dress_name_tool.build_trace(
+            candidate=(
+                str(validated[0].get("series_en") or validated[0].get("candidate") or "")
+                if validated
+                else candidates[0]
+            ),
+            brand=str(validated[0].get("brand") or "") if validated else "",
+            verified=bool(validated),
+            rejected=rejected,
+            source="model",
+            name_source="model",
+        )
+        name_steps = [name_step] if name_step["candidates"] else []
         if not validated:
             step["ms"] = int((time.perf_counter() - started) * 1000)
-            return {"steps": [step], "fallback_used": True, "fallback_hit": False}
+            return {
+                "steps": [*name_steps, step],
+                "fallback_used": True,
+                "fallback_hit": False,
+            }
 
         retry_query = str(validated[0].get("series_en") or validated[0].get("candidate") or "")
         evidence: list[dict] = []
@@ -893,7 +933,7 @@ def build_graph(
         step["hit"] = bool(evidence)
         step["ms"] = int((time.perf_counter() - started) * 1000)
         result: dict = {
-            "steps": [step],
+            "steps": [*name_steps, step],
             "fallback_used": True,
             "fallback_hit": bool(evidence),
         }
@@ -955,6 +995,17 @@ def build_graph(
         }
 
     def answer(state: AgentState) -> dict:
+        failed = state.get("dress_name_failed") or {}
+        if failed.get("candidate"):
+            return {
+                "answer": _dress_unverified_answer(
+                    {
+                        "brand": failed.get("brand") or "",
+                        "title": failed.get("candidate") or "",
+                    }
+                ),
+                "stopped_reason": "dress_unverified",
+            }
         if state.get("dress_unresolved"):
             return {
                 "answer": _dress_clarification(state["question"]),
@@ -991,7 +1042,12 @@ def build_graph(
     def verify(state: AgentState) -> dict:
         if state.get("stream"):
             return {}
-        if state.get("dress_unresolved") or state.get("dress_unverified"):
+        if (
+            state.get("dress_unresolved")
+            or state.get("dress_unverified")
+            or (state.get("dress_name_failed") or {}).get("candidate")
+        ):
+            # 反问/未核实答案没有引用编号，不能按「有证据没标来源」处理。
             return {}
         evidence = _normalize(
             state.get("evidence", []),
@@ -1246,6 +1302,7 @@ def run(
             "dress_profile": {},
             "dress_unresolved": False,
             "dress_unverified": False,
+            "dress_name_failed": {},
             "fallback_used": False,
             "fallback_hit": False,
         },
@@ -1312,6 +1369,7 @@ def stream(
                     "dress_profile": {},
                     "dress_unresolved": False,
                     "dress_unverified": False,
+                    "dress_name_failed": {},
                 },
                 config={"recursion_limit": MAX_RECURSION},
             )
@@ -1364,7 +1422,11 @@ def stream(
     )
     numbered = _numbered(evidence)
 
-    if state.get("dress_unresolved") or state.get("dress_unverified"):
+    if (
+        state.get("dress_unresolved")
+        or state.get("dress_unverified")
+        or (state.get("dress_name_failed") or {}).get("candidate")
+    ):
         text = state.get("answer") or _dress_clarification(question)
         yield {
             "type": "replace",
@@ -1412,7 +1474,11 @@ def stream(
         text = _forced_answer(evidence, reason="no_evidence")
         yield {"type": "delta", "text": text}
 
-    if state.get("dress_unresolved") or state.get("dress_unverified"):
+    if (
+        state.get("dress_unresolved")
+        or state.get("dress_unverified")
+        or (state.get("dress_name_failed") or {}).get("candidate")
+    ):
         # 反问/未核实答案没有引用编号，不能按「有证据没标来源」处理。
         problems, invalid = [], []
     else:

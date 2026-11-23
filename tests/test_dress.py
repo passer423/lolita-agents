@@ -419,7 +419,10 @@ def test_price_extraction_keeps_preorder_and_deposit_next_to_noise(workdir):
 
 
 def test_model_hint_fills_missing_series(workdir):
-    app = make_app(workdir)
+    app = make_app(
+        workdir,
+        records=[record(title="Mille-feuille Royal pour la Princesse JSK")],
+    )
     ctx = RecallContext(settings=app)
     query = dress.resolve_dress("Baby 缎带与齿轮 预约价多少", ctx).to_dict()
     hint = {
@@ -429,11 +432,15 @@ def test_model_hint_fills_missing_series(workdir):
         "series_cn": "皇家千层公主",
         "confidence": "high",
     }
+    trace: dict = {}
 
-    merged = dress.merge_model_hint(query, hint, ctx)
+    merged = dress.merge_model_hint(query, hint, ctx, trace=trace)
 
-    assert merged["series_en"] == "Mille-feuille Royal pour la Princesse"
+    assert merged["series_en"] == "Mille-feuille Royal pour la Princesse JSK"
     assert merged["is_specific"] is True
+    assert merged["verified"] is True
+    assert trace["candidate"] == "Mille-feuille Royal pour la Princesse"
+    assert trace["verified"] is True
     assert "Mille-feuille Royal pour la Princesse" in merged["lolibrary_query"]
 
 
@@ -451,9 +458,20 @@ def test_low_confidence_model_hint_is_ignored(workdir):
 
 
 def test_pending_query_merged_with_model_hint(workdir):
-    app = make_app(workdir)
+    app = make_app(
+        workdir,
+        records=[
+            record(
+                slug="btssb-starry-night-jsk",
+                url="https://lolibrary.org/items/btssb-starry-night-jsk",
+                title="Starry Night Dream JSK",
+                aliases=[],
+            )
+        ],
+    )
     ctx = RecallContext(settings=app)
     pending = dress.resolve_dress("星月夜之梦价格", ctx).to_dict()
+    trace: dict = {}
 
     merged = dress.merge_model_hint(
         pending,
@@ -465,13 +483,42 @@ def test_pending_query_merged_with_model_hint(workdir):
             "confidence": "high",
         },
         ctx,
+        trace=trace,
     )
 
     assert merged["source"] == "model"
     assert merged["brand"] == "Baby, the Stars Shine Bright"
-    assert merged["series_en"] == "Starry Night Dream"
+    assert merged["series_en"] == "Starry Night Dream JSK"
+    assert merged["verified"] is True
+    assert trace["verified"] is True
+    assert any("已通过档案校验" in note for note in merged["notes"])
+
+
+def test_model_hint_rejected_when_not_verified(workdir):
+    app = make_app(workdir)
+    app.lolibrary_online_enabled = False
+    ctx = RecallContext(settings=app)
+    pending = dress.resolve_dress("星月夜之梦价格", ctx).to_dict()
+    trace: dict = {}
+
+    merged = dress.merge_model_hint(
+        pending,
+        {
+            "brand": "Baby, the Stars Shine Bright",
+            "region": "JP",
+            "series": "Starry Night Dream",
+            "series_cn": "星月夜之梦",
+            "confidence": "high",
+        },
+        ctx,
+        trace=trace,
+    )
+
+    assert merged["series_en"] == ""
     assert merged["verified"] is False
-    assert any("待 Lolibrary" in note for note in merged["notes"])
+    assert trace["candidate"] == "Starry Night Dream"
+    assert trace["verified"] is False
+    assert any("未通过档案校验" in note for note in merged["notes"])
 
 
 def test_learned_alias_written_and_used(workdir):

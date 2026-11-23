@@ -101,6 +101,14 @@
       return '· ' + via + '：' + esc(candidates || '无候选') + ' → ' +
         esc(step.error || '未命中');
     }
+    if (step.kind === 'dress_name') {
+      // 解析裙名工具：候选全名 + 品牌 + 真实验校结果；未触发时后端不发这一步。
+      const rows = step.candidates || [];
+      const parts = rows.map((item) =>
+        esc(item.name || '未识别') + '（' + esc(item.brand || '品牌未识别') + '，' +
+        (item.verified ? '校验通过' : '校验未通过') + '）');
+      return '· ' + (step.label || '解析裙名') + '：' + (parts.join('；') || '未识别');
+    }
     if (step.kind === 'timeout') {
       // 整体预算用尽：说清"等到哪一步"，别让用户以为是某一路挂死
       const waited = step.deadline_s ? Math.round(step.deadline_s) + ' 秒' : '';
@@ -139,6 +147,9 @@
         put('dress_profile', text, true);
       } else if (step.kind === 'dress_search') {
         put('dress_search_' + order.length, text, true);
+      } else if (step.kind === 'dress_name') {
+        // 同一轮可能先本地、再模型：用固定 key，后面的结果覆盖前面的。
+        put('dress_name', text, true);
       } else if (step.kind === 'timeout') {
         put('timeout', text, true);
       }
