@@ -65,6 +65,22 @@ _PRODUCT_RE = re.compile(
 _LATIN_TOKEN = re.compile(r"[a-z0-9]{2,}")
 _CJK = re.compile(r"[\u4e00-\u9fff]")
 
+# 独立缩写 token：前后都不能贴着别的字母/数字，避免把 "asbwq" 里的 "sbw" 抠出来。
+_ABBREV_TOKEN = re.compile(r"(?<![A-Za-z0-9])([A-Za-z0-9]{2,8})(?![A-Za-z0-9])")
+_ABBREV_VOWELS = set("aeiou")
+# 品类词/品牌简称不是系列名；外部检索和待定判断都要跳过。
+_ABBREV_STOPWORDS = {"jsk", "op", "sk", "set", "otk", "utk", "kc", "lo", "lolita", "jks", "sp"}
+# 只有这些「裙子信息意图」才允许裸缩写进入待定；光有「是什么」不算，避免把任意缩写当裙子。
+_ABBREV_INTENT = (
+    "哪条", "哪款", "哪个系列", "什么裙子", "什么款", "多少钱", "价格", "多少",
+    "发售", "出库", "出荷", "再贩", "现货", "预约", "定金", "配色", "颜色",
+    "有没有货", "有没有现货", "有货吗", "买得到",
+)
+# 出现这些词说明是在比较两个东西，不是在问某一条裙子。
+_ABBREV_BLOCKERS = ("区别", "对比", "哪个好", "怎么选", "哪个牌子", "比较")
+_ABBREV_PARTICLES = ("的", "是", "在", "有", "吗", "呢", "啊", "呀", "吧", "款", "条", "个", "这", "那", "它", "一", "下", "么", "件", "只")
+_ABBREV_PUNCT = re.compile(r"[\s，。！？、,.!?~～；;：:（）()【】\[\]\"'“”‘’]+")
+
 
 @dataclass(frozen=True, slots=True)
 class Brand:
@@ -316,6 +332,69 @@ def remember_series_alias(
                     "en": en,
                     "brand": brand.id,
                     "verified_url": verified_url,
+                    "verified_at": stamp,
+                }
+            )
+        payload = {"aliases": entries[-500:]}
+        temp = path.with_suffix(".tmp")
+        temp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        temp.replace(path)
+    return True
+
+
+def remember_user_alias(
+    cn: str,
+    en: str,
+    ctx: RecallContext,
+    *,
+    brand_id: str = "",
+) -> bool:
+    """用户直接给出的「简称 → 全名」，写进运行时别名表（``source=user``）。
+
+    这是给「以后有人告诉我 SBW 的全名」留的入口：不要求模型或 Lolibrary 先
+    识别过，但写入内容必须来自用户，不能由代码猜测。品牌可以留空。
+    """
+    cn = (cn or "").strip()
+    en = (en or "").strip()
+    brand_id = (brand_id or "").strip()
+    if not 2 <= len(cn) <= 40 or not 3 <= len(en) <= 200:
+        return False
+    if not re.search(r"[A-Za-z\u4e00-\u9fff]", en):
+        return False
+
+    brands = load_brands(ctx.settings)
+    brand = _brand_by_id(brands, brand_id) or _brand_by_name(brands, brand_id)
+    if brand_id and brand is None:
+        return False
+
+    path = ctx.settings.learned_aliases_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _learned_lock:
+        entries = _read_alias_file(path)
+        stamp = date.today().isoformat()
+        updated = False
+        for item in entries:
+            if str(item.get("cn") or "").strip().lower() != cn.lower():
+                continue
+            item.update(
+                {
+                    "en": en,
+                    "brand": brand.id if brand else "",
+                    "source": "user",
+                    "verified_at": stamp,
+                }
+            )
+            updated = True
+            break
+        if not updated:
+            entries.append(
+                {
+                    "cn": cn,
+                    "en": en,
+                    "brand": brand.id if brand else "",
+                    "source": "user",
                     "verified_at": stamp,
                 }
             )
@@ -595,7 +674,7 @@ def _one_char_apart(text: str, target: str) -> bool:
 
 def _match_series(question: str, aliases: list[SeriesAlias]) -> tuple[SeriesAlias | None, str]:
     for alias in aliases:
-        if alias.cn in question or _alias_hit(alias.en, question):
+        if _alias_hit(alias.cn, question) or _alias_hit(alias.en, question):
             return alias, ""
     # 中文社区叫法经常靠口耳相传，错一个字很常见。只对 >=4 字的别名做一字容错，
     # 避免把「四时花」这种短词匹配到别的三字短语上。
@@ -689,12 +768,15 @@ def _field_term(question: str) -> str:
 
 def _with_queries(query: DressQuery) -> DressQuery:
     category = _category_hint(query.question)
+    # 没认出品牌/系列时，独立缩写本身就是要查的关键词：不能让检索词退化成
+    # 只剩「价格」，否则「sbw 现在多少钱」会拿「价格」去搜。
+    abbrev = _abbrev_token(query.question)
     # 有具体系列名时不要再带品牌：Lolibrary 通道的「品牌命中即入选」会把
     # 该品牌下所有条目都带出来，反而盖过真正的系列。
-    base = query.series_en or query.brand
+    base = query.series_en or query.brand or abbrev
     lolibrary_query = " ".join(part for part in (base, category) if part).strip()
 
-    social_base = query.series_cn or query.series_en or query.brand
+    social_base = query.series_cn or query.series_en or query.brand or abbrev
     social_query = " ".join(
         part for part in (social_base, category, _field_term(query.question)) if part
     ).strip()
@@ -788,14 +870,103 @@ def _brand_name_chars(text: str, brand: Brand) -> int:
     return _name_chars(lowered)
 
 
-def _name_text(question: str, brands: list[Brand] | None = None) -> str:
-    """从问题里剥出中文名字（去掉品牌、意图词、泛化问法）。"""
+def _is_abbrev_token(token: str) -> bool:
+    """像缩写的独立 token：2–8 位、非纯数字、无元音或全大写或带数字。"""
+    token = (token or "").strip()
+    if not 2 <= len(token) <= 8 or token.isdigit():
+        return False
+    lowered = token.lower()
+    if lowered in _ABBREV_STOPWORDS:
+        return False
+    if any(ch.isdigit() for ch in token):
+        return True
+    if token.isupper():
+        return True
+    return not (_ABBREV_VOWELS & set(lowered))
+
+
+def _abbrev_tokens(text: str, brands: list[Brand] | None = None) -> list[str]:
+    """抽独立缩写 token，排除品牌简称与品类词；不把连续英文句子的普通单词算进来。"""
+    brand_terms = {
+        name.lower()
+        for brand in brands or []
+        for name in (brand.name, *brand.aliases)
+        if name
+    }
+    tokens: list[str] = []
+    for match in _ABBREV_TOKEN.finditer(text or ""):
+        raw = match.group(1)
+        lowered = raw.lower()
+        if lowered in brand_terms or not _is_abbrev_token(raw):
+            continue
+        if lowered not in tokens:
+            tokens.append(lowered)
+    return tokens
+
+
+def _abbrev_token(text: str, brands: list[Brand] | None = None) -> str:
+    tokens = _abbrev_tokens(text, brands)
+    return tokens[0] if len(tokens) == 1 else ""
+
+
+def abbrev_token(text: str, brands: list[Brand] | None = None) -> str:
+    """公开入口：编排层用它判断是否值得触发保守扩展兜底。"""
+    return _abbrev_token(text, brands)
+
+
+def _looks_like_abbrev_name(text: str, brands: list[Brand] | None = None) -> bool:
+    """裸缩写 + 裙子意图词才算待定。
+
+    必须同时满足：有信息意图、只有一个独立缩写、且去掉缩写/意图词/品牌后
+    没有剩下别的内容。这样「sbw 现在多少钱」「sbw 有没有现货」会进入待定，
+    而「iphone 15 多少钱」「我的 sbw 多少钱」「sbw 和 ap 有什么区别」不会。
+    """
+    lowered = (text or "").lower()
+    if not any(marker in lowered for marker in _ABBREV_INTENT):
+        return False
+    if any(marker in lowered for marker in _ABBREV_BLOCKERS):
+        return False
+    tokens = _abbrev_tokens(text, brands)
+    if len(tokens) != 1:
+        return False
+    token = tokens[0]
+    rest = lowered
+    for brand in brands or []:
+        for name in (brand.name, *brand.aliases):
+            if name:
+                rest = rest.replace(name.lower(), " ")
+    rest = re.sub(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", " ", rest)
+    for marker in (*_NOT_NAME_MARKERS, *_ABBREV_INTENT):
+        rest = rest.replace(marker, " ")
+    rest = _strip_markers(rest)
+    rest = _ABBREV_PUNCT.sub("", rest)
+    for particle in _ABBREV_PARTICLES:
+        rest = rest.replace(particle, "")
+    return not rest.strip()
+
+
+def _name_text(
+    question: str,
+    brands: list[Brand] | None = None,
+    *,
+    keep_latin: bool = False,
+) -> str:
+    """从问题里剥出名字（去掉品牌、意图词、泛化问法）。
+
+    ``keep_latin=True`` 用于外部反查：保留 ``sbw`` 这类独立缩写，最多 3 个，
+    普通英文单词（有元音、全小写）不进来，避免把整句英文当系列名。
+    """
     lowered = (question or "").lower()
     for brand in brands or []:
         for name in (brand.name, *brand.aliases):
             if name:
                 lowered = lowered.replace(name.lower(), " ")
-    return "".join(_CJK.findall(_strip_markers(lowered)))
+    cleaned = _strip_markers(lowered)
+    cjk = "".join(_CJK.findall(cleaned))
+    if not keep_latin:
+        return cjk
+    tokens = _abbrev_tokens(cleaned, None)[:3]
+    return (cjk + (" " if cjk and tokens else "") + " ".join(tokens)).strip()
 
 
 def split_keywords(name: str, terms: list[dict]) -> tuple[list[str], str]:
@@ -945,7 +1116,7 @@ def resolve_by_web(
         or ctx.settings.weibo_direct_enabled
     ):
         return query, {}
-    name = _name_text(current.question, load_brands(ctx.settings))
+    name = _name_text(current.question, load_brands(ctx.settings), keep_latin=True)
     if len(name) < 2:
         return query, {}
     queries = [name, f"{name} lolita"][:2]
@@ -1030,6 +1201,69 @@ def resolve_by_web(
     }
 
 
+def verify_candidate_name(
+    name: str,
+    ctx: RecallContext,
+    *,
+    fetcher=None,
+) -> dict | None:
+    """模型给的候选名回本地档案与 Lolibrary 校验；通过才返回可检索的真名。
+
+    这是「选而不造」的硬门槛：模型只提供候选，最终采用哪个由档案决定。
+    本地档案命中（标题/别名）优先，其次查 Lolibrary 在线档案。
+    """
+    candidate = " ".join((name or "").split()).strip()
+    if not 3 <= len(candidate) <= 120:
+        return None
+    if not re.search(r"[A-Za-z\u4e00-\u9fff]", candidate):
+        return None
+
+    target = _normalize_title(candidate)
+    lowered = candidate.lower()
+    for record in channels.load_catalog(ctx):
+        title = str(record.get("title") or "")
+        normalized = _normalize_title(title)
+        aliases = _record_aliases(record)
+        alias_hit = any(_alias_hit(alias, lowered) for alias in aliases)
+        title_hit = bool(
+            normalized
+            and len(target) >= 4
+            and (normalized == target or target in normalized or normalized in target)
+        )
+        if not (title_hit or alias_hit):
+            continue
+        brand_name = str(record.get("brand") or "")
+        canonical, region, _ = _region_of_name(load_brands(ctx.settings), brand_name)
+        return {
+            "candidate": candidate,
+            "series_en": title or candidate,
+            "brand": canonical or brand_name,
+            "region": region,
+            "source": "archive",
+            "title": title,
+            "url": str(record.get("url") or ""),
+        }
+
+    if not ctx.settings.lolibrary_online_enabled:
+        return None
+    items, _error = lolibrary_online.lookup(candidate, fetcher=fetcher, max_items=3)
+    probe = DressQuery(question=candidate, series_en=candidate, source="pending_model")
+    for item in items:
+        if not _archive_matches(probe, item):
+            continue
+        canonical, region, _ = _region_of_name(load_brands(ctx.settings), item.brand)
+        return {
+            "candidate": candidate,
+            "series_en": item.title,
+            "brand": canonical or item.brand,
+            "region": region,
+            "source": "lolibrary",
+            "title": item.title,
+            "url": item.url,
+        }
+    return None
+
+
 def resolve_with_search(
     query: dict,
     ctx: RecallContext,
@@ -1070,7 +1304,8 @@ def _looks_like_dress_question(text: str) -> bool:
 
 
 _IDENTITY_RE = re.compile(
-    r"是\s*(?:哪|什么)\s*(?:一)?\s*(?:个|种|款|条)?\s*"
+    # 「那」在口语里常被当作「哪」：优先放宽问法，不去改用户原文。
+    r"是\s*(?:哪|那|什么)\s*(?:一)?\s*(?:个|种|款|条)?\s*"
     r"(?:系列|型号|裙子|款|条|版|品牌|牌子)"
     r"|叫什么(?:名字)?|怎么称呼"
 )
@@ -1156,12 +1391,16 @@ def resolve_dress(
     is_specific = bool(series_en or product_number)
     has_entity = bool(final_brand or series_en or product_number or record)
     if not has_entity:
+        # 裸缩写 + 裙子意图词也要进入待定：否则「sbw 现在多少钱」在识别前就被丢掉，
+        # 后面的外部发现/模型兜底都没机会跑。
+        abbrev = _abbrev_token(text, brands)
         # 问「这是哪条 / 哪个系列」时即使本地没线索也要给模型一次机会：认出系列
         # 才有答案，认不出就该反问（见 graph.route 的 dress_unresolved）。
         if (
             identity_intent(text)
             or _looks_like_dress_question(text)
             or _looks_like_bare_name(text)
+            or _looks_like_abbrev_name(text, brands)
         ):
             pending = DressQuery(
                 question=text,
@@ -1173,7 +1412,7 @@ def resolve_dress(
                 original_question=original,
                 normalized_question=text,
                 normalize_changes=normalize_changes,
-                matched_alias=matched_alias,
+                matched_alias=abbrev or matched_alias,
                 name_source="none",
             )
             return _with_queries(pending)

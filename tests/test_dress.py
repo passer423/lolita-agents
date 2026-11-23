@@ -884,3 +884,95 @@ def test_online_without_price_note_only_has_normal_tier():
     assert detail.price_tiers[0].amount == "12000"
     assert all(tier.stage == "normal" for tier in detail.price_tiers)
 
+
+# --------------------------------------------------------------------- 缩写与裸名字
+
+
+def test_name_text_keeps_standalone_abbrev_only():
+    """外部反查要保留 sbw，但普通英文单词和整句英文不能混进名字。"""
+    assert "sbw" in dress._name_text("sbw 是什么裙子", keep_latin=True)
+    # 拆词表仍只吃中文：缩写不能混进词表匹配
+    assert "sbw" not in dress._name_text("sbw 是什么裙子")
+    text = dress._name_text("is this sbw available now", keep_latin=True)
+    assert "sbw" in text
+    assert "available" not in text and "this" not in text
+
+
+def test_name_text_rejects_non_token_abbrev():
+    """贴在其他字母里的 sbw 不算独立缩写；整词匹配才算。"""
+    assert dress.abbrev_token("asbwq 多少钱") == ""
+    assert dress.abbrev_token("sbw 多少钱") == "sbw"
+
+
+def test_identity_intent_accepts_na_variant():
+    assert dress.identity_intent("sbw是那条裙子")
+    assert dress.identity_intent("这条裙子是哪条")
+    assert not dress.identity_intent("这条裙子掉色吗")
+
+
+def test_abbrev_with_intent_enters_pending(workdir):
+    app = make_app(workdir)
+    ctx = RecallContext(settings=app)
+
+    for question in ("sbw 现在多少钱", "sbw 有没有现货", "sbw 是什么裙子", "sbw是那条裙子"):
+        query = dress.resolve_dress(question, ctx)
+        assert query is not None, question
+        assert query.source == "pending_model"
+        assert query.matched_alias == "sbw"
+
+    assert "sbw" in dress.resolve_dress("sbw 现在多少钱", ctx).social_query
+
+
+def test_abbrev_guards_do_not_misfire(workdir):
+    """普通句子不能因为出现缩写就被当成裙子问题。"""
+    app = make_app(workdir)
+    ctx = RecallContext(settings=app)
+
+    for question in (
+        "iphone 15 多少钱",
+        "我的 sbw 多少钱",
+        "sbw 和 ap 有什么区别",
+        "sbw 怎么洗",
+        "今天天气怎么样",
+    ):
+        assert dress.resolve_dress(question, ctx) is None, question
+
+
+def test_remember_user_alias_resolves_next_turn(workdir):
+    app = make_app(workdir)
+    ctx = RecallContext(settings=app)
+
+    assert dress.remember_user_alias("SBW", "Sweet Bitter World JSK", ctx)
+
+    query = dress.resolve_dress("sbw 是哪条裙子", ctx)
+    assert query is not None
+    assert query.series_en == "Sweet Bitter World JSK"
+    assert query.matched_alias == "SBW"
+    assert query.name_source == "local"
+
+    assert dress.remember_user_alias("x", "Too Short Alias", ctx) is False
+    assert dress.remember_user_alias("SBW", "--", ctx) is False
+    assert dress.remember_user_alias("SBW", "Unknown Brand JSK", ctx, brand_id="nope") is False
+
+
+def test_verify_candidate_name_requires_real_archive(workdir, monkeypatch):
+    app = make_app(workdir, records=[record()])
+    app.lolibrary_online_enabled = False
+    ctx = RecallContext(settings=app)
+
+    hit = dress.verify_candidate_name("Mille-feuille Royal pour la Princesse JSK", ctx)
+    assert hit is not None and hit["source"] == "archive"
+    assert dress.verify_candidate_name("Phantom Series Name", ctx) is None
+
+    app.lolibrary_online_enabled = True
+    detail = lolibrary_online.ArchiveDetail(
+        url="https://lolibrary.org/items/starry-night-dream-jsk",
+        title="Starry Night Dream JSK",
+        brand="Baby, the Stars Shine Bright",
+        category="JSK",
+    )
+    monkeypatch.setattr(lolibrary_online, "lookup", lambda *a, **k: ([detail], ""))
+    online = dress.verify_candidate_name("Starry Night Dream JSK", ctx)
+    assert online is not None and online["source"] == "lolibrary"
+    assert dress.verify_candidate_name("Dreamy Latte Phantom", ctx) is None
+

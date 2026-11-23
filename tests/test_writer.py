@@ -388,21 +388,21 @@ def test_real_ugc_keeps_netizen_wording():
 
 
 def test_archive_is_not_called_netizen():
-    """档案是社区整理，不是品牌官方——既不能叫网友，也不能抬成官方。"""
+    """lolibrary 只标来源名，不是品牌官方——既不能叫网友，也不能抬成官方。"""
     ev = evidence(source_kind="third_party", title="Memorial Cake JSK", url="https://lolibrary.org/items/x")
-    assert source_appellation(ev[0]) == "档案（Lolibrary）"
+    assert source_appellation(ev[0]) == "lolibrary"
 
     writer = make_writer(content="有网友说这条是 2016 年的款式[1]。")
     text = writer.write("哪年的", ev)
 
     assert "网友" not in text
     assert "官方" not in text
-    assert text == "Lolibrary 上说这条是 2016 年的款式[1]。"
+    assert text == "lolibrary 上说这条是 2016 年的款式[1]。"
 
 
 def test_community_archive_without_lolibrary_is_still_archive():
     ev = evidence(source_kind="third_party", title="某品牌年鉴摘录", url="https://example.com/a")
-    assert source_appellation(ev[0]) == "档案（社区整理）"
+    assert source_appellation(ev[0]) == "档案"
 
     writer = make_writer(content="有网友提到这条是早年款[1]。")
 
@@ -424,9 +424,11 @@ def test_archive_is_not_promoted_to_official_in_prompt():
     )
     messages = build_synth_messages("q", archive)
 
-    assert "（档案（Lolibrary））" in messages[-1]["content"]
-    assert "社区整理" in messages[0]["content"]
-    assert "不是品牌官方" in messages[0]["content"]
+    assert "（lolibrary）" in messages[-1]["content"]
+    # 不再铺「社区整理 / 非官方 / 可能有错漏」的长句，只保留来源名。
+    assert "社区整理" not in messages[0]["content"]
+    assert "可能有错漏" not in messages[0]["content"]
+    assert "lolibrary" in messages[0]["content"]
 
 
 def test_mixed_ugc_and_store_citation_is_left_alone():

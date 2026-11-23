@@ -40,8 +40,7 @@ MAX_HISTORY_CHARS = 500
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
 # 证据效力等级 → 给模型看的标签。与 channels.CHANNEL_SOURCE_KIND 一一对应。
-# 注意：档案不是官方。Lolibrary 是社区整理的发售资料库，可能有错漏，用户看到
-# 「官方」会当成品牌确认过的事实，所以两者必须分开称呼。
+# 档案不是官方：Lolibrary 只标来源名，不再附加「社区整理、可能有错漏」这类长解释。
 SOURCE_KIND_LABELS = {
     "own_content": "自有知识库",
     "third_party": "档案",
@@ -80,8 +79,8 @@ _OFFICIAL_MARKERS = ("官方公告", "官方说明", "品牌官方", "官方账�
 # 称呼：非 UGC 来源绝不能用「网友」笼统指代，档案也不能抬成「官方」。
 APPELLATION_OWN = "自有知识库"
 APPELLATION_OFFICIAL = "官方"
-APPELLATION_ARCHIVE = "档案（Lolibrary）"
-APPELLATION_COMMUNITY_ARCHIVE = "档案（社区整理）"
+APPELLATION_ARCHIVE = "lolibrary"
+APPELLATION_COMMUNITY_ARCHIVE = "档案"
 APPELLATION_SHOP = "店家/商家"
 APPELLATION_UGC = "网友发言"
 APPELLATION_WEB = "网络内容"
@@ -121,8 +120,8 @@ def source_appellation(item: dict) -> str:
     """证据该被怎么称呼：效力等级打底，来源域纠正「店家 / 官方 / 档案 / 网友」。
 
     等级只说「能不能当规范」，这里回答「是谁说的」。顺序很重要：店家页面上
-    也常写「官方」，先判店铺再判官方，否则旗舰店会被叫成官方；档案则单独
-    标成社区整理，不和品牌官方混用。
+    也常写「官方」，先判店铺再判官方，否则旗舰店会被叫成官方；档案直接标
+    ``lolibrary``，不和品牌官方混用，也不再附加社区整理之类的长解释。
     """
     kind = item.get("source_kind")
     if kind == "own_content":
@@ -154,8 +153,7 @@ _CLUE_HEADER = (
     "称呼要跟每条开头的标签走：\n"
     "「网友发言」→ 写「有网友提到」「出物的人说」；\n"
     "「店家/商家」→ 写「店家提到」「店铺页面写着」，绝不能写成「网友」；\n"
-    "「档案（Lolibrary）」→ 社区整理的发售资料库，可能有错漏，写「档案记录」"
-    "「Lolibrary 上记录」，不能写「官方」，也不能写「网友」；\n"
+    "「lolibrary」→ 写「lolibrary 上记录」，不能写「官方」，也不能写「网友」；\n"
     "「官方」→ 品牌自有渠道，写「官方公告」「品牌官方说明」；"
     "同一件事官方帖和网友帖说法不一致时，官方定价、开团与再贩时间、兑换规则"
     "以「官方」为准并说明是官方说法；二手成交价、到手价、翻车反馈仍然看网友帖；\n"
@@ -210,12 +208,11 @@ SYNTH_SYSTEM = """你是 Lolita 领域的问答助手，像微信里一个懂 Lo
    【仅作线索】是网友发言、店家页面和网络内容，不能当规范。两者冲突时以【可作依据】为准。
 7. **称呼跟着证据开头的标签走**：「网友发言」才写「有网友提到」「出物的人说」；
    「店家/商家」写「店家提到」「店铺页面写着」；「官方」只给品牌自有渠道，写「官方公告」；
-   「档案（Lolibrary）」是社区整理的发售资料库，不是品牌官方、可能有错漏，写「档案记录」
-   「Lolibrary 上记录」，并说明它是社区整理。
+   「lolibrary」写「lolibrary 上记录」，不要写「官方」或「网友」；「档案」写「档案记录」。
    官方定价、开团与再贩时间、兑换规则和网友帖不一致时以「官方」为准，并说明是官方说法；
    二手成交价、到手价、翻车反馈仍然看网友帖。
 8. 禁止用「网友说」指代店家、官方或档案——把店家的话说成网友反馈，比不引用更危险；
-   反过来也不能把社区档案抬成「官方」，那会让用户以为品牌确认过。
+   反过来也不能把 lolibrary 或档案抬成「官方」，那会让用户以为品牌确认过。
 9. 「图上文字」是原帖配图的机器识别结果，只保证字符、不保证列对齐。lolita 价格口径：
    预约价 = 定金 + 尾款，二者是同一件裙子的两个付款阶段；现货价是另一回事。
    证据里出现「预约价 578 元，由定金 188 元加尾款 390 元组成；现货价 598 元」这类整理句时，
@@ -513,8 +510,8 @@ def fix_source_attribution(
     """把非 UGC 来源上的「网友 / 出物的人」改成正确称谓；返回 ``(新文本, 改动记录)``。
 
     只有整句引用的证据都属于同一类非 UGC 来源时才替换：混引时无从判断指的是
-    哪一条，改写可能把一句正确的 UGC 归因也改坏。档案用「档案记录里」，
-    不用「官方」——社区整理的资料不能说得像品牌确认过。
+    哪一条，改写可能把一句正确的 UGC 归因也改坏。档案用「lolibrary 上」或
+    「档案记录里」，不用「官方」——资料不能说得像品牌确认过。
     """
     if not answer or not evidence:
         return answer, []
@@ -536,7 +533,7 @@ def fix_source_attribution(
         elif labels == {APPELLATION_OFFICIAL}:
             label = "官方"
         elif labels == {APPELLATION_ARCHIVE}:
-            label = "Lolibrary 上"
+            label = "lolibrary 上"
         elif labels == {APPELLATION_COMMUNITY_ARCHIVE}:
             label = "档案记录里"
         elif labels == {APPELLATION_OWN}:

@@ -128,6 +128,9 @@ class AgentState(TypedDict, total=False):
     dress_profile: dict
     dress_unresolved: bool
     dress_unverified: bool
+    # 核心全 0 时的保守扩展兜底：每轮最多一次模型调用。
+    fallback_used: bool
+    fallback_hit: bool
     answer: str
     stopped_reason: str
     # 流式路径标记：answer/verify 空转，答案交给 stream() 去 writer.stream
@@ -729,6 +732,9 @@ def build_graph(
                 and not dress_query.get("series_en")
             )
         )
+        # 保守扩展已经用过一次模型；同一轮不再调第二次（含超时/失败的尝试）。
+        if state.get("fallback_used"):
+            needs_model = False
         if needs_model:
             hint = _extract_dress_hint(planner, question, state.get("history"))
             if hint:
@@ -792,6 +798,90 @@ def build_graph(
             "dress_unresolved": dress_unresolved,
             "steps": [*search_steps, step],
         }
+
+    def fallback_expand(state: AgentState) -> dict:
+        """核心通道全 0 命中时的保守扩展：模型只给候选名，不回答案。
+
+        触发边界很窄：三个核心通道都已跑完且全空，问句里出现独立缩写或
+        本地未识别出系列的待定查询。每轮最多一次模型调用；候选必须逐个回
+        本地档案/Lolibrary 校验，通过才补检索，未通过不进入答案。
+        """
+        started = time.perf_counter()
+        cores = set(channels.CORE_CHANNELS)
+        if state.get("evidence") or not cores.issubset(set(state.get("recalled") or [])):
+            return {}
+        question = state.get("retrieval_question") or state["question"]
+        dress_query = dict(state.get("dress_query") or {})
+        token = dress.abbrev_token(question, dress.load_brands(ctx.settings))
+        unknown_series = bool(
+            dress_query.get("source") == "pending_model" and dress_query.get("matched_alias")
+        )
+        if not token and not unknown_series:
+            return {}
+        expand = getattr(planner, "expand_names", None)
+        if expand is None:
+            return {}
+
+        step: dict = {
+            "kind": "fallback",
+            "triggered": True,
+            "reason": "core_empty_abbrev" if token else "core_empty_unknown_series",
+            "candidates": [],
+            "validated": [],
+            "rejected": [],
+            "hit": False,
+        }
+        try:
+            raw = expand(question, state.get("history"))
+        except Exception as exc:  # noqa: BLE001 - 超时/非法输出都当作没扩展
+            logger.warning("保守扩展失败：%s", exc)
+            step["error"] = f"{type(exc).__name__}: {exc}"[:160]
+            step["ms"] = int((time.perf_counter() - started) * 1000)
+            return {"steps": [step], "fallback_used": True, "fallback_hit": False}
+
+        candidates = [str(item).strip() for item in (raw or []) if str(item).strip()][:5]
+        step["candidates"] = candidates
+        if not candidates:
+            step["ms"] = int((time.perf_counter() - started) * 1000)
+            return {"steps": [step], "fallback_used": True, "fallback_hit": False}
+
+        validated: list[dict] = []
+        rejected: list[str] = []
+        for candidate in candidates[:3]:
+            info = dress.verify_candidate_name(candidate, ctx)
+            if info:
+                validated.append(info)
+            else:
+                rejected.append(candidate)
+        step["validated"] = [item.get("series_en") or item.get("candidate") for item in validated]
+        step["rejected"] = rejected
+        if not validated:
+            step["ms"] = int((time.perf_counter() - started) * 1000)
+            return {"steps": [step], "fallback_used": True, "fallback_hit": False}
+
+        retry_query = str(validated[0].get("series_en") or validated[0].get("candidate") or "")
+        evidence: list[dict] = []
+        counts: dict[str, int] = {}
+        for name in channels.CORE_CHANNELS:
+            try:
+                items = channels.recall(name, retry_query, ctx, query=retry_query)
+            except Exception as exc:  # noqa: BLE001 - 兜底检索失败不影响原结果
+                logger.warning("兜底检索失败 %s：%s", name, exc)
+                items = []
+            counts[name] = len(items)
+            evidence.extend(items)
+        step["query"] = retry_query
+        step["channels"] = counts
+        step["hit"] = bool(evidence)
+        step["ms"] = int((time.perf_counter() - started) * 1000)
+        result: dict = {
+            "steps": [step],
+            "fallback_used": True,
+            "fallback_hit": bool(evidence),
+        }
+        if evidence:
+            result["evidence"] = evidence
+        return result
 
     def fanout_after_route(state: AgentState) -> list[Send]:
         """route 之后的条件边：有补查就 Send 到实时通道，否则直接去整合档案。
@@ -906,6 +996,7 @@ def build_graph(
     graph.add_node("prepare", prepare)
     graph.add_node("dress_resolve", dress_resolve)
     graph.add_node("dress_profile", dress_profile)
+    graph.add_node("fallback_expand", fallback_expand)
     graph.add_node("route", route)
     graph.add_node("answer", answer)
     graph.add_node("verify", verify)
@@ -915,7 +1006,9 @@ def build_graph(
     graph.add_edge("prepare", "dress_resolve")
     graph.add_conditional_edges("dress_resolve", fanout_core, list(channels.CORE_CHANNELS))
     for name in channels.CORE_CHANNELS:
-        graph.add_edge(name, "route")
+        graph.add_edge(name, "fallback_expand")
+    # 核心全 0 且疑似缩写/未知系列时，模型只扩展候选名并校验后再补一轮检索
+    graph.add_edge("fallback_expand", "route")
     # route 之后：有补查就追加实时通道，否则直接去整合档案
     graph.add_conditional_edges(
         "route", fanout_after_route, [*channels.SUPPLEMENTARY_CHANNELS, "dress_profile"]
@@ -1124,6 +1217,8 @@ def run(
             "dress_profile": {},
             "dress_unresolved": False,
             "dress_unverified": False,
+            "fallback_used": False,
+            "fallback_hit": False,
         },
         None if deadline_at is None else max(0.0, deadline_at - time.monotonic()),
     )

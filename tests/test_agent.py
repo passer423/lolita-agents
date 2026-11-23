@@ -18,9 +18,15 @@ import time
 
 import pytest
 
-from app.agent import channels, graph, trace
+from app.agent import channels, dress, graph, trace
 from app.agent.channels import ChannelUnavailable, RecallContext
-from app.agent.planner import PlannerOutputError, build_query_prompt, parse_query, plan_channels
+from app.agent.planner import (
+    PlannerOutputError,
+    build_query_prompt,
+    parse_expand_reply,
+    parse_query,
+    plan_channels,
+)
 from app.config import AppSettings, settings
 from app.services import lolibrary_online
 
@@ -30,12 +36,23 @@ from app.services import lolibrary_online
 class ScriptedPlanner:
     """按脚本返回补查决策；脚本用完就不再补查（避免测试挂死）。"""
 
-    def __init__(self, script=None, dress_script=None):
+    def __init__(self, script=None, dress_script=None, expand_script=None):
         self.script = list(script or [])
         self.dress_script = list(dress_script or [])
         self.calls = 0
         self.dress_calls = 0
         self.usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        # 只有显式给了扩展脚本才暴露 expand_names：默认不改变既有用例的行为。
+        if expand_script is not None:
+            self.expand_script = list(expand_script)
+            self.expand_calls = 0
+            self.expand_names = self._expand_names
+
+    def _expand_names(self, question, history=None):
+        self.expand_calls += 1
+        if not self.expand_script:
+            return []
+        return self.expand_script.pop(0)
 
     def extract_query(self, question, history=None):
         self.calls += 1
@@ -98,6 +115,26 @@ def fake_recall(channels_map):
         return list(result or [])
 
     return recall
+
+
+class EchoWriter:
+    """把证据标题原样拼进答案，用来检查未校验的名字有没有漏进正文。"""
+
+    usage = {"calls": 1}
+
+    def write(self, question, evidence, history=None, **_kwargs):
+        return " / ".join(str(item.get("title") or "") for item in evidence)
+
+    def stream(self, question, evidence, history=None, **_kwargs):
+        yield self.write(question, evidence, history)
+
+
+def offline(monkeypatch):
+    """去掉一切外部依赖，兜底只走假模型与假通道。"""
+    monkeypatch.setattr(settings, "search_enabled", False)
+    monkeypatch.setattr(settings, "xhs_enabled", False)
+    monkeypatch.setattr(settings, "weibo_direct_enabled", False)
+    monkeypatch.setattr(settings, "lolibrary_online_enabled", False)
 
 
 def core_only(monkeypatch):
@@ -1820,3 +1857,109 @@ def test_old_cache_version_is_skipped(tmp_path):
 
     xhs_search._write_cache(path, [{"title": "new", "image_count": 2}])
     assert xhs_search._read_cache(path) == [{"title": "new", "image_count": 2}]
+
+
+# --------------------------------------------------------------------- 核心 0 命中的保守扩展
+
+
+def test_parse_expand_reply_filters_and_caps():
+    assert parse_expand_reply('{"candidates": ["A JSK", "A JSK", "B OP", "x"]}') == ["A JSK", "B OP"]
+    with pytest.raises(PlannerOutputError):
+        parse_expand_reply('{"candidates": "A JSK"}')
+    with pytest.raises(PlannerOutputError):
+        parse_expand_reply("not json")
+
+
+def test_fallback_expands_verified_name_and_cites_evidence(monkeypatch):
+    monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+    offline(monkeypatch)
+    planner = ScriptedPlanner(expand_script=[["Sweet Bitter World JSK", "Phantom Series Name"]])
+    checked = []
+
+    def recall(channel, question, ctx, *, query=""):
+        if question == "Sweet Bitter World JSK" and channel == "real":
+            return evidence("real", title="Sweet Bitter World JSK")
+        return []
+
+    def verify(name, ctx):
+        checked.append(name)
+        if name == "Sweet Bitter World JSK":
+            return {"candidate": name, "series_en": name, "brand": "Baby", "source": "archive"}
+        return None
+
+    monkeypatch.setattr(channels, "recall", recall)
+    monkeypatch.setattr(dress, "verify_candidate_name", verify)
+
+    result = graph.run(
+        "sbw 现在多少钱", ctx=ctx(), planner=planner, writer=EchoWriter(), history=[]
+    )
+    step = next(item for item in result["steps"] if item.get("kind") == "fallback")
+
+    assert step["triggered"] is True
+    assert step["candidates"] == ["Sweet Bitter World JSK", "Phantom Series Name"]
+    assert step["rejected"] == ["Phantom Series Name"]
+    assert step["validated"] == ["Sweet Bitter World JSK"]
+    assert step["channels"]["real"] >= 1
+    assert step["hit"] is True
+    assert checked == ["Sweet Bitter World JSK", "Phantom Series Name"]
+    assert planner.expand_calls == 1
+    # 扩展已经用过模型；同一轮不再让 route 调第二次。
+    assert planner.dress_calls == 0
+    assert result["refused"] is False
+    assert "Sweet Bitter World JSK" in result["answer"]
+    # 模型编的、没通过校验的名字不能出现在正文里。
+    assert "Phantom Series Name" not in result["answer"]
+
+
+def test_fallback_all_candidates_rejected_answers_not_found(monkeypatch):
+    monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+    offline(monkeypatch)
+    planner = ScriptedPlanner(expand_script=[["Phantom Series A", "Phantom Series B"]])
+    monkeypatch.setattr(channels, "recall", lambda *_a, **_k: [])
+    monkeypatch.setattr(dress, "verify_candidate_name", lambda *_a, **_k: None)
+
+    result = graph.run(
+        "sbw 现在多少钱", ctx=ctx(), planner=planner, writer=EchoWriter(), history=[]
+    )
+    step = next(item for item in result["steps"] if item.get("kind") == "fallback")
+
+    assert step["candidates"] == ["Phantom Series A", "Phantom Series B"]
+    assert step["validated"] == []
+    assert step["hit"] is False
+    assert result["refused"] is True
+    assert "没有检索到" in result["answer"]
+    assert "Phantom" not in result["answer"]
+    assert planner.expand_calls == 1
+    assert planner.dress_calls == 0
+
+
+def test_fallback_skips_non_suspicious_empty_result(monkeypatch):
+    monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+    offline(monkeypatch)
+    planner = ScriptedPlanner(expand_script=[["Should Not Run"]])
+    monkeypatch.setattr(channels, "recall", lambda *_a, **_k: [])
+
+    result = graph.run(
+        "蕾丝怎么洗", ctx=ctx(), planner=planner, writer=StubWriter(), history=[]
+    )
+
+    assert not [item for item in result["steps"] if item.get("kind") == "fallback"]
+    assert planner.expand_calls == 0
+
+
+def test_fallback_not_triggered_when_core_has_hits(monkeypatch):
+    monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+    core_only(monkeypatch)
+    planner = ScriptedPlanner(expand_script=[["Should Not Run"]])
+    monkeypatch.setattr(
+        channels,
+        "recall",
+        fake_recall({"own": evidence("own"), "real": [], "lolibrary": []}),
+    )
+
+    result = graph.run(
+        "sbw 现在多少钱", ctx=ctx(), planner=planner, writer=StubWriter(), history=[]
+    )
+
+    assert not [item for item in result["steps"] if item.get("kind") == "fallback"]
+    assert planner.expand_calls == 0

@@ -41,8 +41,11 @@ from app.config import AppSettings
 logger = logging.getLogger(__name__)
 
 PLANNER_MAX_TOKENS = 200
+EXPAND_MAX_TOKENS = 300
 PLANNER_TIMEOUT = 30.0
 DRESS_TIMEOUT = 12.0
+# 保守扩展只做「候选名字」，超时短，失败就当没扩展。
+EXPAND_TIMEOUT = 6.0
 
 # 实时意图 → 要补的通道。命中哪一组，就把该组通道全开；多组命中按顺序去重合并。
 #
@@ -136,10 +139,60 @@ def build_query_prompt(question: str, history: list[dict] | None = None) -> str:
 """
 
 
+def build_expand_prompt(question: str, history: list[dict] | None = None) -> str:
+    """核心通道全 0 命中时的保守扩展提示词：只要候选，不要断言。"""
+    turns = (history or [])[-2:]
+    context = ""
+    if turns:
+        lines = "\n".join(
+            f"{'用户' if turn.get('role') == 'user' else '助手'}：{turn.get('content', '')}"
+            for turn in turns
+        )
+        context = f"\n最近两轮对话（仅用于理解指代）：\n{lines}\n"
+    return f"""用户的问题可能包含一个缩写或未知的裙子系列名。请只给出它可能的**完整名称候选**，
+供系统逐个回档案核验；不要下结论，不要解释，不要写「就是」。
+用户问题：
+{question}
+{context}
+## 输出协议
+只输出一个 JSON 对象，不要任何其它文字：
+
+{{"candidates": ["Sweet Bitter World JSK", "Sweet Bitter World OP"]}}
+
+## 规则
+1. 每个候选是完整的裙子系列名或缩写的明确展开，3–80 字；
+2. 最多 5 个，按可能性排序；不确定就返回空数组；
+3. 禁止编造品牌或系列；没有把握时宁可不给；
+4. 不要输出句子、理由或「可能是」这类断言。
+"""
+
+
+def parse_expand_reply(text: str) -> list[str]:
+    """解析候选名列表；非法输出直接报错，由调用方当作未触发。"""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise PlannerOutputError(f"扩展候选不是合法 JSON：{text[:80]}") from exc
+    if not isinstance(data, dict):
+        raise PlannerOutputError("扩展候选必须是 JSON 对象")
+    raw = data.get("candidates")
+    if not isinstance(raw, list):
+        raise PlannerOutputError("candidates 必须是数组")
+    candidates: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        candidate = " ".join(item.split()).strip()
+        if not 3 <= len(candidate) <= 80:
+            continue
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates[:5]
+
+
 @dataclass(frozen=True, slots=True)
 class DressHint:
     """模型对「这条裙子是什么」的兜底判断。"""
-
     brand: str = ""
     region: str = ""
     series: str = ""
@@ -291,6 +344,27 @@ class DeepSeekPlanner:
         self._record_usage(response)
         text = (response.choices[0].message.content or "").strip()
         return parse_dress_reply(text)
+
+    def expand_names(self, question: str, history: list[dict] | None = None) -> list[str]:
+        """核心通道全 0 命中时的保守扩展：只返回候选名，不做断言。"""
+        messages: list[dict] = [
+            {"role": "user", "content": build_expand_prompt(question, history)},
+        ]
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=0,
+                max_tokens=EXPAND_MAX_TOKENS,
+                response_format={"type": "json_object"},
+                timeout=EXPAND_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001 - 超时/网络失败当作没扩展
+            raise PlannerOutputError(f"扩展候选模型调用失败：{type(exc).__name__}: {exc}") from exc
+
+        self._record_usage(response)
+        text = (response.choices[0].message.content or "").strip()
+        return parse_expand_reply(text)
 
 
 def parse_query(text: str) -> str:
