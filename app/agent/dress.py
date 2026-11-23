@@ -50,6 +50,10 @@ CARE_MARKERS = (
 )
 
 _DRESS_MARKERS = ("裙子", "连衣裙", "小裙子", "半裙", "jsk", "op", "sk", "套装", "这条", "这款")
+# 短别名（AP / 白菜…）需要问题里有「在说裙子或品牌动态」的语境才认。
+# 上新类词既不属于价格字段，也不一定带「裙子」，单独列出来，否则「AP 最近上新」
+# 会因为没有语境被当成闲聊直接丢掉。
+_BRAND_CONTEXT_MARKERS = ("上新", "新款", "新作", "再贩", "再版", "开团", "补款", "入荷")
 _CATEGORY_HINTS = (
     ("jsk", "JSK"), ("op", "OP"), ("skirt", "SK"), ("sk", "SK"),
     ("连衣裙", "OP"), ("半裙", "SK"), ("套装", "SET"),
@@ -137,6 +141,8 @@ class DressQuery:
     normalize_changes: tuple[str, ...] = ()
     matched_alias: str = ""
     name_source: str = ""
+    # 只识别到品牌、没有系列：按品牌名本身检索，不做档案整合、不调模型猜系列。
+    brand_only: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -159,6 +165,7 @@ class DressQuery:
             "normalize_changes": list(self.normalize_changes),
             "matched_alias": self.matched_alias,
             "name_source": self.name_source,
+            "brand_only": self.brand_only,
         }
 
     @classmethod
@@ -185,6 +192,7 @@ class DressQuery:
             normalize_changes=tuple(str(item) for item in (data.get("normalize_changes") or [])),
             matched_alias=str(data.get("matched_alias") or ""),
             name_source=str(data.get("name_source") or ""),
+            brand_only=bool(data.get("brand_only")),
         )
 
 
@@ -422,7 +430,10 @@ def _alias_hit(alias: str, text: str) -> bool:
 
 def _has_context(text: str) -> bool:
     lowered = text.lower()
-    return any(marker in lowered for marker in (*_DRESS_MARKERS, *FIELD_MARKERS))
+    return any(
+        marker in lowered
+        for marker in (*_DRESS_MARKERS, *FIELD_MARKERS, *_BRAND_CONTEXT_MARKERS)
+    )
 
 
 # --------------------------------------------------------------------- 检索前处理
@@ -763,6 +774,10 @@ def _field_term(question: str) -> str:
         return "配色"
     if "发售" in lowered or "上市" in lowered or "出荷" in lowered:
         return "发售"
+    # 品牌动态词也要进社交检索：只拿品牌名搜「AP」噪声太大，带上「上新」才像一条动态。
+    for marker in ("入荷", "再贩", "再版", "开团", "补款", "新款", "新作", "上新"):
+        if marker in lowered:
+            return marker
     return ""
 
 
@@ -776,7 +791,9 @@ def _with_queries(query: DressQuery) -> DressQuery:
     base = query.series_en or query.brand or abbrev
     lolibrary_query = " ".join(part for part in (base, category) if part).strip()
 
-    social_base = query.series_cn or query.series_en or query.brand or abbrev
+    # 只有品牌时优先用问句里的写法（AP / Baby）：中文社交平台更常出现简称，
+    # 拿完整英文品牌名去微博/小红书搜反而搜不到。
+    social_base = query.series_cn or query.series_en or query.matched_alias or query.brand or abbrev
     social_query = " ".join(
         part for part in (social_base, category, _field_term(query.question)) if part
     ).strip()
@@ -800,6 +817,7 @@ def _with_queries(query: DressQuery) -> DressQuery:
         normalize_changes=query.normalize_changes,
         matched_alias=query.matched_alias,
         name_source=query.name_source or name_source_of(query.source),
+        brand_only=query.brand_only,
     )
 
 
@@ -1446,6 +1464,33 @@ def resolve_dress(
                 name_source="none",
             )
             return _with_queries(pending)
+        # 只有品牌、没有系列片段，但问题在问品牌动态（「AP 最近上新」「BABY 入荷」）：
+        # 允许直接拿品牌名去检索，不要返回空。品牌动态词负责挡掉普通闲聊。
+        if (
+            brand is not None
+            and not care_intent
+            and _has_context(text)
+            and _brand_name_chars(text, brand) < 3
+            and not any(marker in lowered for marker in _NOT_NAME_MARKERS)
+        ):
+            brand_only_query = DressQuery(
+                question=text,
+                brand=brand.name,
+                brand_id=brand.id,
+                region=brand.region,
+                source="brand_alias",
+                confidence="medium",
+                is_specific=False,
+                verified=False,
+                notes=("只识别到品牌，没有具体系列：按品牌名检索",),
+                original_question=original,
+                normalized_question=text,
+                normalize_changes=normalize_changes,
+                matched_alias=matched_alias,
+                name_source=name_source_of("brand_alias"),
+                brand_only=True,
+            )
+            return _with_queries(brand_only_query)
         return None
     if care_intent and not field_intent:
         return None
@@ -1567,10 +1612,22 @@ def merge_model_hint(query: dict, hint: dict, ctx: RecallContext) -> dict:
 
 
 def dress_channels(query: dict, intent_channels: list[str]) -> list[str]:
-    """按地区决定补查通道；JP 只走核心 Lolibrary，CN 强制 xhs+weibo。"""
+    """按地区决定补查通道。
+
+    JP 平时只走核心 Lolibrary；但如果只识别到品牌（没有系列），又是在问品牌
+    动态，就允许官网/微博/网页补查——这正是「AP 最近上新」需要的路径。
+    CN 仍强制 xhs+weibo。
+    """
     region = str((query or {}).get("region") or "UNKNOWN")
     if region == "JP":
-        wanted: list[str] = []
+        if (query or {}).get("brand_only"):
+            wanted = [
+                name
+                for name in (intent_channels or [])
+                if name in ("official", "weibo", "web")
+            ]
+        else:
+            wanted = []
     elif region == "CN":
         wanted = list(SOCIAL_CHANNELS)
     else:
@@ -1970,6 +2027,9 @@ def build_profile(
     """整合结构化档案与一条可引用的证据；没有识别结果返回空 dict。"""
     current = DressQuery.from_dict(query)
     if current is None:
+        return {}
+    if current.brand_only:
+        # 只识别到品牌：没有系列就没有「裙子档案」可整合，硬拼一张卡片会误导。
         return {}
     if current.source == "pending_model" and not (current.brand or current.series_en):
         return {}

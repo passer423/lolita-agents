@@ -400,6 +400,19 @@ def test_archive_is_not_called_netizen():
     assert text == "lolibrary 上说这条是 2016 年的款式[1]。"
 
 
+def test_brand_site_source_kind_is_official_without_keyword_guessing():
+    """官网源是结构化登记的，直接按 source_kind 叫官方，不靠标题里猜「官方」。"""
+    ev = evidence(
+        source_kind="official",
+        title="Angelic Pretty｜Melty Berry Princessシリーズ入荷のご案内",
+        url="https://angelicpretty.com/Page/Feature/202610.aspx",
+    )
+    assert source_appellation(ev[0]) == "官方"
+
+    prompt = build_synth_messages("AP 最近上新", ev)[-1]["content"]
+    assert "品牌官网" in prompt or "（官方）" in prompt
+
+
 def test_community_archive_without_lolibrary_is_still_archive():
     ev = evidence(source_kind="third_party", title="某品牌年鉴摘录", url="https://example.com/a")
     assert source_appellation(ev[0]) == "档案"

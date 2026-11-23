@@ -94,7 +94,14 @@ _CHANNEL_ORDER["image_text"] = _CHANNEL_ORDER["xhs"]
 
 # 证据效力等级 → 排序权重。自有内容在前，网友发言在后。图上文字是从实时帖子里
 # 派生的，和 realtime 同档：它只是一条未校验的线索，但比泛化网友发言更贴题。
-_KIND_ORDER = {"own_content": 0, "third_party": 1, "realtime": 2, "image_text": 2, "upstream_ugc": 3}
+_KIND_ORDER = {
+    "own_content": 0,
+    "official": 0,
+    "third_party": 1,
+    "realtime": 2,
+    "image_text": 2,
+    "upstream_ugc": 3,
+}
 
 # 操作型问题（怎么洗 / 要不要细节图 / 闲鱼收）要的是踩过坑的人怎么说，
 # 不是规范词条怎么定义。此时把 UGC 整体提到自有内容与档案前面。
@@ -722,10 +729,16 @@ def build_graph(
         intent = plan_channels(question)
         dress_query = dict(state.get("dress_query") or {})
         search_traces: list[dict] = []
-        if dress_query and not dress_query.get("series_en"):
+        if (
+            dress_query
+            and not dress_query.get("series_en")
+            and not dress_query.get("brand_only")
+        ):
             # 先用「拆词 → Lolibrary / 网页反查」做确定性检索，失败再让模型猜。
+            # 只识别到品牌的查询不在这里反查：品牌名本身就是检索词，不需要
+            # 再让网页/模型去猜一个系列。
             dress_query, search_traces = dress.resolve_with_search(dress_query, ctx)
-        needs_model = bool(dress_query) and (
+        needs_model = bool(dress_query) and not dress_query.get("brand_only") and (
             dress_query.get("source") == "pending_model"
             or (
                 dress_query.get("source") != "model"
@@ -745,6 +758,7 @@ def build_graph(
         # 卡片不准，不该连答案都不给。
         dress_unresolved = bool(
             dress_query
+            and not dress_query.get("brand_only")
             and dress.identity_intent(question)
             and not dress_query.get("series_en")
         )
@@ -782,6 +796,7 @@ def build_graph(
                     "dress_alias": dress_query.get("matched_alias", ""),
                     "name_source": dress_query.get("name_source", ""),
                     "dress_verified": bool(dress_query.get("verified")),
+                    "dress_brand_only": bool(dress_query.get("brand_only")),
                 }
             )
         if error:
@@ -812,6 +827,9 @@ def build_graph(
             return {}
         question = state.get("retrieval_question") or state["question"]
         dress_query = dict(state.get("dress_query") or {})
+        if dress_query.get("brand_only"):
+            # 已经明确是「品牌 + 上新」：没有系列可扩，别让模型猜一个系列名。
+            return {}
         token = dress.abbrev_token(question, dress.load_brands(ctx.settings))
         unknown_series = bool(
             dress_query.get("source") == "pending_model" and dress_query.get("matched_alias")

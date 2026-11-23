@@ -48,7 +48,8 @@ from app.config import settings as default_settings
 logger = logging.getLogger(__name__)
 
 CORE_CHANNELS = ("own", "real", "lolibrary")
-SUPPLEMENTARY_CHANNELS = ("xhs", "weibo", "web")
+# official 排在最前：news 意图里它是第一来源，微博/网页是抓不到时的降级路径。
+SUPPLEMENTARY_CHANNELS = ("official", "xhs", "weibo", "web")
 ALL_CHANNELS = (*CORE_CHANNELS, *SUPPLEMENTARY_CHANNELS)
 
 # 通道 → 证据效力等级。``own`` 与 ``real`` 是同一召回机制（bridge + 向量检索），
@@ -58,6 +59,7 @@ CHANNEL_SOURCE_KIND = {
     "own": "own_content",
     "real": "upstream_ugc",
     "lolibrary": "third_party",
+    "official": "official",
     "xhs": "realtime",
     "weibo": "realtime",
     "web": "realtime",
@@ -644,6 +646,43 @@ def _official_evidence(
     return extra
 
 
+def _recall_official(
+    question: str, ctx: RecallContext, query: str = "", limit: int | None = None
+) -> list[dict]:
+    """品牌官网新作/入荷（试点 AP、BABY）；只回答 news 类问题。
+
+    抓不到时抛 ``ChannelUnavailable``，由 graph 跳过并继续微博/网页，不拿
+    空结果冒充「官网没有上新」。
+    """
+    from app.services import brand_site
+
+    try:
+        rows = brand_site.lookup(query or question, ctx.settings)
+    except brand_site.BrandSiteUnavailable as exc:
+        raise ChannelUnavailable(f"品牌官网不可用：{exc}") from exc
+    items: list[dict] = []
+    for row in rows:
+        title = str(row.get("title") or "").strip()
+        url = str(row.get("url") or "").strip()
+        if not title or not url:
+            continue
+        date = str(row.get("date") or "").strip()
+        text = "｜".join(part for part in (date, title, f"{row.get('brand', '')} 官网") if part)
+        items.append(
+            {
+                "channel": "official",
+                "source_kind": CHANNEL_SOURCE_KIND["official"],
+                "ref": url,
+                "title": f"{row.get('brand', '')}｜{title}".strip("｜"),
+                "text": _clip(text, limit),
+                "url": url,
+                # 日期单独留一份，写作层需要「哪年哪月」时不必从正文里抠。
+                "published_at": date,
+            }
+        )
+    return items
+
+
 def _recall_xhs(
     question: str, ctx: RecallContext, query: str = "", limit: int | None = None
 ) -> list[dict]:
@@ -852,6 +891,10 @@ def _recall_web(
     text = query or question
     configured, _ = web_search.paid_config_status(ctx.settings)
     if not configured or web_search.quota_blocked(ctx.settings):
+        # 最近一次真实调用已经失败：短窗口内直接跳过，不再让每个请求白等约 19 秒。
+        blocked, reason = web_search.no_key_blocked(ctx.settings)
+        if blocked:
+            raise ChannelUnavailable(f"网页通道按最近一次实际失败降级：{reason}")
         # 无 key / 配额失效：Bing 浏览器主路，失败或为空才用 360 文本兜底。
         results = web_search.search_no_key(
             text, ctx.settings, max_results=ctx.settings.search_max_results
@@ -978,7 +1021,8 @@ def _web_status(app: AppSettings) -> dict[str, Any]:
             status["reason"] = f"{config_reason}；无 key 网页来源未启用（WEB_BROWSER_ENABLED=false）"
         return status
 
-    ready, reason = web_search.no_key_readiness(app)
+    # 结构就绪 + 最近一次真实调用结果：不能出现「显示 ready、实际每次失败 19 秒」。
+    ready, reason = web_search.no_key_health(app)
     if ready:
         detail = "搜索引擎配额失效" if configured else f"付费搜索未配置（{config_reason}）"
         return {
@@ -995,6 +1039,14 @@ def _web_status(app: AppSettings) -> dict[str, Any]:
         "mode": "browser",
         "reason": f"{detail}；无 key 网页来源不可用（{reason}）",
     }
+
+
+def _official_status(app: AppSettings) -> dict[str, Any]:
+    """品牌官网源状态：只报「已登记」，不假装当前网络一定可达。"""
+    from app.services import brand_site
+
+    ready, reason = brand_site.readiness(app)
+    return {"enabled": True, "ready": ready, "reason": reason}
 
 
 def _xhs_status(app: AppSettings) -> dict[str, Any]:
@@ -1035,6 +1087,7 @@ def channel_status(app: AppSettings | None = None) -> dict[str, dict[str, Any]]:
         "reason": "" if records else "档案为空：先运行 python scripts/import_lolibrary.py",
     }
 
+    result["official"] = _official_status(app)
     result["xhs"] = _xhs_status(app)
     result["weibo"] = _weibo_status(app)
     result["web"] = _web_status(app)
@@ -1059,6 +1112,7 @@ _HANDLERS = {
     "own": _recall_own,
     "real": _recall_real,
     "lolibrary": _recall_lolibrary,
+    "official": _recall_official,
     "xhs": _recall_xhs,
     "weibo": _recall_weibo,
     "web": _recall_web,

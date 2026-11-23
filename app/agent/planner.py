@@ -56,7 +56,8 @@ EXPAND_TIMEOUT = 6.0
 INTENT_CHANNELS: dict[str, tuple[str, ...]] = {
     "transaction": ("xhs", "web"),
     "social": ("xhs", "weibo"),
-    "news": ("web",),
+    # 上新类问题：先看品牌官网，官网抓不到再走微博直抓，最后才是网页搜索。
+    "news": ("official", "weibo", "web"),
 }
 
 # 触发词。**刻意写宽**：多查一路的代价是多两秒和一点噪声，漏查的代价是拿历史
@@ -70,11 +71,11 @@ INTENT_MARKERS: dict[str, tuple[str, ...]] = {
     "social": (
         "口碑", "评价", "测评", "种草", "避雷", "攻略", "翻车", "实拍", "开箱", "返图",
     ),
-    "news": ("新款", "新作", "上新", "发售"),
+    "news": ("新款", "新作", "上新", "发售", "入荷"),
 }
 
 # 通道固定顺序：让 route 的 step 在多次运行间稳定（并行执行，但展示要一致）。
-_CHANNEL_ORDER = ("xhs", "weibo", "web")
+_CHANNEL_ORDER = ("official", "xhs", "weibo", "web")
 
 
 class PlannerUnavailable(RuntimeError):

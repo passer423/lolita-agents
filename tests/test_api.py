@@ -102,9 +102,9 @@ def test_status_reports_channels_without_key(client, tmp_path, monkeypatch):
     assert payload["enabled"] is False
     assert "LLM_API_KEY" in payload["hint"]
     assert payload["channels"]["core"] == ["own", "real", "lolibrary"]
-    assert payload["channels"]["supplementary"] == ["xhs", "weibo", "web"]
+    assert payload["channels"]["supplementary"] == ["official", "xhs", "weibo", "web"]
     status = payload["channels"]["status"]
-    assert set(status) == {"own", "real", "lolibrary", "xhs", "weibo", "web"}
+    assert set(status) == {"own", "real", "lolibrary", "official", "xhs", "weibo", "web"}
     # 「没开」和「开了但没就绪」必须能区分：测试环境里 xhs 是关的。
     assert status["xhs"] == {
         "enabled": False,

@@ -40,6 +40,18 @@ def _prepare() -> None:
 _prepare()
 
 
+@pytest.fixture(autouse=True)
+def _reset_runtime_health():
+    """网页检索健康度是进程级状态；每个用例前后清掉，避免失败用例污染状态用例。"""
+    from app.services import web_search
+
+    web_search.reset_no_key_health()
+    try:
+        yield
+    finally:
+        web_search.reset_no_key_health()
+
+
 @pytest.fixture()
 def workdir() -> Path:
     path = WORK_TMP / f"case{next(_counter):04d}"

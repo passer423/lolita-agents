@@ -67,6 +67,61 @@ _QUOTA_BLOCKED_UNTIL: dict[str, float] = {}
 # 内存标记活不过进程重启；落一份小文件，重启后状态接口也不会继续报 ready。
 _QUOTA_STATE_FILE = "search_quota.json"
 
+# 无 key 网页检索的**实际调用**健康度。结构就绪（装了浏览器）不等于搜得动：
+# 实测 Bing 浏览器 0 条 + 360 风控时，一次要等约 19 秒。这里记录最近一次
+# 真实调用的结果，让状态如实降级，并在短窗口内直接跳过，避免每次都干等。
+_NO_KEY_HEALTH: dict[str, dict] = {}
+_NO_KEY_HEALTH_TTL = 10 * 60
+_NO_KEY_DEGRADE_TTL = 10 * 60
+
+
+def _no_key_health_key(app: AppSettings) -> str:
+    return str(app.data_dir)
+
+
+def record_no_key_result(app: AppSettings, ok: bool, reason: str = "") -> None:
+    _NO_KEY_HEALTH[_no_key_health_key(app)] = {
+        "at": time.time(),
+        "ok": bool(ok),
+        "reason": (reason or "").strip()[:200],
+    }
+
+
+def reset_no_key_health() -> None:
+    """测试与手动恢复用：清掉最近失败记录。"""
+    _NO_KEY_HEALTH.clear()
+
+
+def no_key_health(app: AppSettings) -> tuple[bool, str]:
+    """结构就绪 + 最近真实调用结果；供状态接口如实展示。"""
+    ready, reason = no_key_readiness(app)
+    if not ready:
+        return ready, reason
+    entry = _NO_KEY_HEALTH.get(_no_key_health_key(app))
+    if entry and not entry.get("ok"):
+        age = time.time() - float(entry.get("at") or 0)
+        if age <= _NO_KEY_HEALTH_TTL:
+            detail = entry.get("reason") or "最近一次检索失败"
+            return False, (
+                f"最近一次实际检索失败（{detail}）；"
+                f"{int(_NO_KEY_HEALTH_TTL // 60)} 分钟内按不可用降级，之后自动重试"
+            )
+    return True, ""
+
+
+def no_key_blocked(app: AppSettings) -> tuple[bool, str]:
+    """最近一次真实失败是否还在「快速跳过」窗口内。
+
+    只影响无 key 路径；付费搜索可用时不会走到这里。
+    """
+    entry = _NO_KEY_HEALTH.get(_no_key_health_key(app))
+    if not entry or entry.get("ok"):
+        return False, ""
+    age = time.time() - float(entry.get("at") or 0)
+    if age <= _NO_KEY_DEGRADE_TTL:
+        return True, entry.get("reason") or "最近一次检索失败"
+    return False, ""
+
 
 def _quota_provider(app: AppSettings, provider: str = "") -> str:
     return (provider or app.search_provider or "bocha").strip().lower() or "bocha"
@@ -646,6 +701,7 @@ def search_no_key(
         results = _bing_browser_search(text, limit=count, timeout=timeout_seconds)
         if results:
             logger.info("Bing 浏览器检索 %s：%s 条", text, len(results))
+            record_no_key_result(app, True)
             return results
         errors.append("Bing 浏览器检索 0 条")
     except Exception as exc:  # noqa: BLE001 - 主路失败才允许兜底
@@ -655,9 +711,12 @@ def search_no_key(
         results = _search_360(text, limit=count, timeout=min(timeout_seconds, 10.0))
         if results:
             logger.info("Bing 不可用，360 文本兜底 %s：%s 条", text, len(results))
+            record_no_key_result(app, True)
             return results
         errors.append("360 文本兜底 0 条")
     except Exception as exc:  # noqa: BLE001 - 兜底失败统一报不可用
         errors.append(f"{type(exc).__name__}: {str(exc)[:120]}")
 
-    raise SearchUnavailable("无 key 网页来源不可用：" + "；".join(errors))
+    detail = "；".join(errors)
+    record_no_key_result(app, False, detail)
+    raise SearchUnavailable("无 key 网页来源不可用：" + detail)

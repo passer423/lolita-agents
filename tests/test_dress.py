@@ -166,6 +166,42 @@ def test_brand_plus_bare_name_goes_to_model(workdir):
     assert query.region == "JP"
 
 
+@pytest.mark.parametrize(
+    "question",
+    ["AP 最近上新", "AP 新款", "AP 再贩", "AP 开团", "AP 补款", "AP 入荷"],
+)
+def test_short_alias_news_context_resolves_brand_only(workdir, question):
+    """短别名 + 品牌动态词算品牌语境，拿品牌名本身检索，不返回空。"""
+    app = make_app(workdir)
+    query = dress.resolve_dress(question, RecallContext(settings=app))
+
+    assert query is not None, question
+    assert query.brand_only is True
+    assert query.brand == "Angelic Pretty"
+    assert query.region == "JP"
+    assert query.is_specific is False
+    # 只有品牌时，社交检索优先用问句里的写法（AP），不是完整英文名。
+    assert query.social_query.startswith("AP")
+
+
+def test_short_alias_without_context_still_ignored(workdir):
+    app = make_app(workdir)
+    assert dress.resolve_dress("AP 是什么", RecallContext(settings=app)) is None
+    assert dress.resolve_dress("Baby 最近怎么样", RecallContext(settings=app)) is None
+
+
+def test_brand_only_jp_news_keeps_official_weibo_web(workdir):
+    app = make_app(workdir)
+    query = dress.resolve_dress("AP 最近上新", RecallContext(settings=app))
+
+    channels = dress.dress_channels(
+        query.to_dict(), ["official", "weibo", "web"]  # type: ignore[union-attr]
+    )
+    assert channels == ["official", "weibo", "web"]
+    # 具体到系列的 JP 查询仍只走核心，不被品牌动态放宽误伤。
+    assert dress.dress_channels({"region": "JP"}, ["official", "weibo", "web"]) == []
+
+
 def test_series_alias_tolerates_one_char_typo(workdir):
     """没进别名表的一字之差也要能匹配，并标明是按近似名匹配的。"""
     app = make_app(workdir)

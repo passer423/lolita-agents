@@ -183,7 +183,7 @@ def test_prepare_normalizes_before_dress_and_recall(monkeypatch):
 @pytest.mark.parametrize("question, expected", [
     ("这条裙子多少钱", ["xhs", "web"]),
     ("有实拍测评吗", ["xhs", "weibo"]),
-    ("最近有什么新款", ["web"]),
+    ("最近有什么新款", ["official", "weibo", "web"]),
     ("价格和测评都想知道", ["xhs", "weibo", "web"]),
     ("蕾丝怎么洗", []),
 ])
@@ -263,6 +263,35 @@ def test_supplementary_channels_decided_by_rule(monkeypatch):
         for step in result["steps"]
     )
     assert planner.calls == 1
+
+
+def test_ap_news_routes_official_then_weibo_then_web(monkeypatch):
+    """「AP 最近上新」：官网首选，微博次之，网页兜底；不调模型猜系列。"""
+    monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+    calls: list[tuple[str, str]] = []
+
+    def recall(channel, question, ctx, *, query=""):
+        calls.append((channel, query))
+        if channel == "official":
+            return evidence("official", title="Angelic Pretty 入荷")
+        return []
+
+    monkeypatch.setattr(channels, "recall", recall)
+    planner = ScriptedPlanner()
+    result = graph.run("AP 最近上新", ctx=ctx(), planner=planner, writer=StubWriter())
+
+    route = next(step for step in result["steps"] if step["kind"] == "route")
+    assert route["supplementary"] == ["official", "weibo", "web"]
+    assert route["dress_brand_only"] is True
+    assert route["dress_region"] == "JP"
+    assert route["query"].startswith("AP")
+    # 只识别到品牌时不该再走「拆词/模型猜系列」的补全。
+    assert planner.calls == 0
+    assert planner.dress_calls == 0
+    # 补查通道并行发出，执行顺序不稳定；只断言都跑了。
+    assert {channel for channel, _ in calls} == {
+        "own", "real", "lolibrary", "official", "weibo", "web",
+    }
 
 
 # --------------------------------------------------------------------- 裙子档案
@@ -1917,6 +1946,9 @@ def test_fallback_all_candidates_rejected_answers_not_found(monkeypatch):
     planner = ScriptedPlanner(expand_script=[["Phantom Series A", "Phantom Series B"]])
     monkeypatch.setattr(channels, "recall", lambda *_a, **_k: [])
     monkeypatch.setattr(dress, "verify_candidate_name", lambda *_a, **_k: None)
+    # 线上内容表可能已经补了 sbw 的中文别名；这个测试只关心「候选全被拒」，
+    # 先隔离本地别名，避免内容数据变化让测试变成另一种场景。
+    monkeypatch.setattr(dress, "load_series_aliases", lambda *_a, **_k: [])
 
     result = graph.run(
         "sbw 现在多少钱", ctx=ctx(), planner=planner, writer=EchoWriter(), history=[]

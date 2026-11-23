@@ -36,6 +36,7 @@
     own: '自有知识库',
     real: '过往相关帖文',
     lolibrary: 'Lolibrary 档案',
+    official: '品牌官网',
     dress: '裙子档案',
     xhs: '小红书',
     weibo: '微博',

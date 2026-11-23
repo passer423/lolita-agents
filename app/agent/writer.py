@@ -43,6 +43,7 @@ _CITATION_RE = re.compile(r"\[(\d+)\]")
 # 档案不是官方：Lolibrary 只标来源名，不再附加「社区整理、可能有错漏」这类长解释。
 SOURCE_KIND_LABELS = {
     "own_content": "自有知识库",
+    "official": "品牌官网",
     "third_party": "档案",
     "realtime": "网络实时内容",
     "upstream_ugc": "网友发言",
@@ -50,8 +51,9 @@ SOURCE_KIND_LABELS = {
 }
 
 # 能当规范的来源。其余一律只作线索——这是「一源一通道」在提示词层的落地：
-# 通道层分开了，结果层又混成一锅，等于白分。
-_AUTHORITATIVE_KINDS = frozenset({"own_content", "third_party"})
+# 通道层分开了，结果层又混成一锅，等于白分。品牌官网是品牌自己发布的
+# 新作/入荷公告，可以当规范。
+_AUTHORITATIVE_KINDS = frozenset({"own_content", "official", "third_party"})
 
 # --------------------------------------------------------------------- 来源归因
 #
@@ -126,6 +128,10 @@ def source_appellation(item: dict) -> str:
     kind = item.get("source_kind")
     if kind == "own_content":
         return APPELLATION_OWN
+    # 品牌官网是结构化来源（registry 里登记的官网情报页），不是按关键词猜的
+    # 「官方」，所以放在店铺判断之前。
+    if kind == "official":
+        return APPELLATION_OFFICIAL
     if kind == "third_party":
         return APPELLATION_ARCHIVE if _is_lolibrary(item) else APPELLATION_COMMUNITY_ARCHIVE
     # 必须排在店家伙官方判断之前：识别文本里可能恰好出现「店铺」「官方」字样，
