@@ -13,6 +13,7 @@
 | `systemd/lolita-agents.service` | `/etc/systemd/system/lolita-agents.service` | 单 worker、并发与超时、可选 MemoryHigh |
 | `nginx/limits.conf` | `/etc/nginx/conf.d/lolita-limits.conf` | `limit_conn_zone` / `limit_req_zone` 定义 |
 | `nginx/lolita.conf` | `/etc/nginx/sites-available/lolita.conf` | 80 跳 443、SSE、对话限流、静态资源不限流 |
+| `nginx/lolita-443.conf` | 同上（与上一行二选一） | 证书就绪后的替换版：参数对齐线上 80 版（读超时 75s），口令段默认注释，替换即可用 |
 
 ## 占位符替换清单
 

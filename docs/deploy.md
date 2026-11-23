@@ -315,7 +315,7 @@ curl -s https://__DOMAIN__/api/kb/status | python3 -m json.tool
 
 ### 3.14 低配档：2C2G（2 GiB）专项配置
 
-目标：在 2 GiB 内存上**单次演示提问不 OOM**。代价要提前接受：同一时刻只服务一个人；首次提问 25–60 秒（加载模型 + swap 换页），之后 8–20 秒；任何并发、OCR、浏览器内核都会把它推过线。
+目标：在 2 GiB 内存上**单次演示提问不 OOM**。代价要提前接受：同一时刻只服务一个人；服务启动后会在后台预热 BGE 与精排（`WARMUP_ON_START=true`，约 26 秒），预热完成后首问约 8–10 秒、之后 5–9 秒；不预热则首次提问 25–60 秒（加载模型 + swap 换页）。任何并发、OCR、浏览器内核都会把它推过线。
 
 可直接拷到服务器的文件都在 [deploy/](../deploy/README.md)：setup 脚本、`.env` 模板、systemd unit、nginx 两份配置；占位符替换清单与执行顺序见该目录的 README。下面只讲取值理由与验证口径。
 
@@ -357,11 +357,11 @@ sudo systemctl daemon-reload && sudo systemctl enable --now lolita-agents
 - SSE 取 `proxy_buffering off`、`proxy_cache off`、`gzip off`、连接 5s、读写 90s；`AGENT_DEADLINE` 若调到 45 秒，读超时同步降到 75 秒，保持"预算 + 30 秒"的关系。
 - 改完 `sudo nginx -t && sudo systemctl reload nginx`。
 
-#### 3.14.4 这档必须关掉的功能（按内存开销取舍）
+#### 3.14.4 这档的取舍：默认开什么、关什么（按内存开销）
 
 | 功能 | 内存/磁盘开销 | 2C2G 处置 |
 |---|---|---|
-| reranker（精排） | 模型 1.08 GB（磁盘）+ 常驻约 1 GB | **必须关**：`RERANKER_ENABLED=false`（默认已是 false，显式写上防止被环境变量带开）；**等待量化后的实测占用再决定是否开启** |
+| reranker（精排，int8 ONNX） | 模型 266 MB（磁盘）；实测单次问答 RSS 1567 MB、峰值 1580 MB | **默认开**：`RERANKER_ENABLED=true`，闲置 120 秒自动卸载回落到约 1.2 GB。必须确认 onnxruntime 与 `onnx/model.int8.onnx` 在位；fp32 torch 回退常驻约 1 GB，2 GiB 上不要走那条路 |
 | OCR（rapidocr） | 包约 181 MB（磁盘）+ 识别时 onnxruntime/模型 300–500 MB | **默认关**：配置里 `ocr_enabled` 默认是 `true`，必须显式 `OCR_ENABLED=false` |
 | 微博直抓（Playwright） | Chromium 约 300 MB（磁盘）+ 系统依赖约 200 MB + 每上下文 300–500 MB | **关**：`WEIBO_DIRECT_ENABLED=false`；它还需要搜索 key 才会触发 |
 | 小红书 | Playwright/外部仓库 + cookie | **关**：`XHS_ENABLED=false`（服务器上本来就不可用） |
@@ -431,7 +431,7 @@ dmesg -T | grep -iE "Out of memory|oom-kill"             # 应能看到 python �
 
 **先做减法，再考虑升配**（顺序执行，每步后复测 3.14.5）：
 
-1. 确认 `OCR_ENABLED=false`、`WEIBO_DIRECT_ENABLED=false`、`RERANKER_ENABLED=false`；若有残留的浏览器进程，`pgrep -af 'chrom|playwright'` 清掉。
+1. 确认 `OCR_ENABLED=false`、`WEIBO_DIRECT_ENABLED=false`；再试 `RERANKER_ENABLED=false`（精排是最重的可选项，关掉能回收约 300–400 MB）；若有残留的浏览器进程，`pgrep -af 'chrom|playwright'` 清掉。
 2. 降 prompt 体积：`WRITER_MAX_TOKENS=1000`、`EVIDENCE_MAX_ITEMS=6`。
 3. swap 从 2 GB 加到 4 GB（磁盘足够，40 GB 盘无压力）：
 
