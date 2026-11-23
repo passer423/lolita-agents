@@ -13,7 +13,7 @@ from app.agent import dress
 from app.agent.channels import RecallContext
 from app.agent.planner import PlannerOutputError, parse_dress_reply
 from app.config import AppSettings
-from app.services import lolibrary_online, web_search
+from app.services import lolibrary_online, web_search, weibo_direct
 
 BRANDS = [
     {"id": "baby", "name": "Baby, the Stars Shine Bright", "region": "JP",
@@ -631,8 +631,120 @@ def test_web_reverse_lookup_extracts_and_verifies(workdir, monkeypatch):
     assert updated["source"] == "search_verified"
     assert updated["verified"] is True
     assert updated["series_en"] == "Starry Night Dream JSK"
+    assert updated["name_source"] == "external"
+    assert updated["matched_alias"] == "星月夜之梦"
     assert trace["matched_title"] == "Starry Night Dream JSK"
     assert "Starry Night Dream JSK" in trace["candidates"]
+
+
+# --------------------------------------------------------------------- 纠错前置
+
+
+def test_normalize_question_fullwidth_space_and_traditional():
+    text, changes = dress.normalize_question("　Ｂａｂｙ　家 的 預約價 多少錢　")
+
+    assert "Baby" in text
+    assert "预约价" in text
+    assert "多少钱" in text
+    assert "Ｂ" not in text
+    assert "\u3000" not in text
+    assert "  " not in text
+    assert changes
+
+
+def test_normalize_protects_brand_and_series_terms():
+    """错字映射不能改到品牌/系列内部；区间外仍要正常纠错。"""
+    brand = dress.Brand(id="york", name="約克", region="JP", aliases=("約克",))
+    text, _ = dress.normalize_question(
+        "約克 的 預約價", brands=[brand], aliases=[]
+    )
+
+    assert "約克" in text
+    assert "预约价" in text
+
+
+def test_normalize_leaves_unregistered_typo_alone():
+    text, changes = dress.normalize_question("群青色的裙子")
+
+    assert text == "群青色的裙子"
+    assert changes == ()
+
+
+def test_resolve_dress_keeps_original_and_alias_trace(workdir):
+    app = make_app(workdir)
+    raw = "Ｂａｂｙ　的 皇家千层公主 多少錢"
+    query = dress.resolve_dress(raw, RecallContext(settings=app))
+
+    assert query is not None
+    assert query.original_question == raw
+    assert "Ｂ" not in query.normalized_question
+    assert "多少钱" in query.normalized_question
+    assert query.series_en == "Mille-feuille Royal pour la Princesse"
+    assert query.matched_alias == "皇家千层公主"
+    assert query.name_source == "local"
+
+
+# --------------------------------------------------------------------- 外部别名发现
+
+
+def test_weibo_reverse_lookup_when_web_disabled(workdir, monkeypatch):
+    """小红书关闭、网页也没开时，微博免登录首屏仍可作为外部发现来源。"""
+    app = make_app(workdir)
+    app.search_enabled = False
+    app.xhs_enabled = False
+    app.weibo_direct_enabled = True
+    ctx = RecallContext(settings=app)
+    pending = dress.resolve_dress("星月夜之梦价格", ctx).to_dict()
+    monkeypatch.setattr(
+        weibo_direct,
+        "search",
+        lambda *a, **k: [web_search.SearchResult(
+            title="星月夜之梦",
+            url="https://m.weibo.cn/detail/1",
+            snippet="Baby 的 Starry Night Dream JSK，2024 年款",
+        )],
+    )
+    detail = lolibrary_online.ArchiveDetail(
+        url="https://lolibrary.org/items/starry-night-dream-jsk",
+        title="Starry Night Dream JSK",
+        brand="Baby, the Stars Shine Bright",
+        category="JSK",
+        release_year="2024",
+        colors=("Blue",),
+    )
+    monkeypatch.setattr(lolibrary_online, "lookup", lambda *a, **k: ([detail], ""))
+
+    updated, trace = dress.resolve_by_web(pending, ctx)
+
+    assert updated["source"] == "search_verified"
+    assert updated["name_source"] == "external"
+    assert trace["sources"] == ["weibo"]
+    assert trace["matched_title"] == "Starry Night Dream JSK"
+
+
+def test_external_candidate_must_verify_against_archive(workdir, monkeypatch):
+    """外部结果抽不到可核实全名时停在原标题，不凭空造系列。"""
+    app = make_app(workdir)
+    app.search_enabled = True
+    app.weibo_direct_enabled = False
+    ctx = RecallContext(settings=app)
+    pending = dress.resolve_dress("星月夜之梦价格", ctx).to_dict()
+    monkeypatch.setattr(
+        web_search,
+        "search",
+        lambda *a, **k: [web_search.SearchResult(
+            title="星月夜之梦",
+            url="https://example.com/post",
+            snippet="这条裙子很好看，适合甜系",
+        )],
+    )
+
+    updated, trace = dress.resolve_by_web(pending, ctx)
+
+    assert updated["source"] == "pending_model"
+    assert updated["series_en"] == ""
+    assert updated["name_source"] == "none"
+    assert trace["candidates"] == []
 
 
 def test_parse_dress_reply_protocol():

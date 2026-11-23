@@ -115,6 +115,34 @@ def core_only(monkeypatch):
 # --------------------------------------------------------------------- 协议解析
 
 
+def test_prepare_normalizes_before_dress_and_recall(monkeypatch):
+    """全半角/空格先纠错，再识别别名；核心召回拿到的是纠错后的问句。"""
+    seen: list[str] = []
+
+    def recall(channel, question, ctx, *, query=""):
+        seen.append(question)
+        return evidence(channel)
+
+    monkeypatch.setattr(channels, "recall", recall)
+    result = graph.run(
+        "Ｂａｂｙ　的 皇家千层公主 多少錢",
+        ctx=ctx(),
+        planner=ScriptedPlanner(),
+        writer=StubWriter(),
+    )
+
+    prep = next(step for step in result["steps"] if step["kind"] == "prep")
+    assert prep["changed"] is True
+    assert "Ｂ" not in prep["normalized"]
+    assert "多少钱" in prep["normalized"]
+    assert prep["changes"]
+
+    dress_step = next(step for step in result["steps"] if step["kind"] == "dress")
+    assert dress_step["alias"] == "皇家千层公主"
+    assert dress_step["name_source"] == "local"
+    assert seen and all("Ｂ" not in question for question in seen)
+
+
 @pytest.mark.parametrize("question, expected", [
     ("这条裙子多少钱", ["xhs", "web"]),
     ("有实拍测评吗", ["xhs", "weibo"]),

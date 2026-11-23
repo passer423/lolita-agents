@@ -32,6 +32,7 @@ def _prepare() -> None:
     os.environ["LLM_API_KEY"] = ""
     os.environ["SEARCH_ENABLED"] = "false"
     os.environ["XHS_ENABLED"] = "false"
+    os.environ["WEIBO_DIRECT_ENABLED"] = "false"
     # 图片识别会真下载 / 真跑 OCR：测试默认关掉，需要它的用例显式打开。
     os.environ["OCR_ENABLED"] = "false"
 
@@ -78,7 +79,7 @@ def client(data_dir):
     with TestClient(app) as test_client:
         response = test_client.post(
             "/api/auth/register",
-            json={"email": "tester@example.com", "password": "test-password-123"},
+            json={"username": "tester", "password": "test-password-123"},
         )
         assert response.status_code == 201, response.text
         test_client.account = response.json()["account"]

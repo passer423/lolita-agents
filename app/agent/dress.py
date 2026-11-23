@@ -21,6 +21,7 @@ import json
 import logging
 import re
 import threading
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import date
 
@@ -114,6 +115,12 @@ class DressQuery:
     is_specific: bool = False
     verified: bool = False
     notes: tuple[str, ...] = ()
+    # 检索前处理轨迹：原问句 → 纠错后问句 → 命中的别名 → 名字来源。
+    original_question: str = ""
+    normalized_question: str = ""
+    normalize_changes: tuple[str, ...] = ()
+    matched_alias: str = ""
+    name_source: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -131,6 +138,11 @@ class DressQuery:
             "is_specific": self.is_specific,
             "verified": self.verified,
             "notes": list(self.notes),
+            "original_question": self.original_question,
+            "normalized_question": self.normalized_question,
+            "normalize_changes": list(self.normalize_changes),
+            "matched_alias": self.matched_alias,
+            "name_source": self.name_source,
         }
 
     @classmethod
@@ -152,6 +164,11 @@ class DressQuery:
             is_specific=bool(data.get("is_specific")),
             verified=bool(data.get("verified")),
             notes=tuple(str(item) for item in (data.get("notes") or [])),
+            original_question=str(data.get("original_question") or ""),
+            normalized_question=str(data.get("normalized_question") or ""),
+            normalize_changes=tuple(str(item) for item in (data.get("normalize_changes") or [])),
+            matched_alias=str(data.get("matched_alias") or ""),
+            name_source=str(data.get("name_source") or ""),
         )
 
 
@@ -327,6 +344,194 @@ def _alias_hit(alias: str, text: str) -> bool:
 def _has_context(text: str) -> bool:
     lowered = text.lower()
     return any(marker in lowered for marker in (*_DRESS_MARKERS, *FIELD_MARKERS))
+
+
+# --------------------------------------------------------------------- 检索前处理
+
+# 只收「明显错字/繁体/全半角」这类不会改变品牌与系列语义的替换。
+# 键值长度保持一致，便于在保护区间外原位替换。
+_TYPO_MAP = {
+    "连衣群": "连衣裙",
+    "裙撑子": "裙撑",
+    "群子": "裙子",
+    "發售": "发售",
+    "預約": "预约",
+    "現貨": "现货",
+    "價格": "价格",
+    "顏色": "颜色",
+    "連衣裙": "连衣裙",
+    "多少錢": "多少钱",
+    "怎麼": "怎么",
+    "發": "发",
+    "價": "价",
+    "預": "预",
+    "約": "约",
+    "現": "现",
+    "貨": "货",
+    "顏": "颜",
+    "碼": "码",
+    "圍": "围",
+    "錢": "钱",
+    "麼": "么",
+    "嗎": "吗",
+    "連": "连",
+    "裝": "装",
+}
+_TYPO_ORDER = tuple(sorted(_TYPO_MAP, key=len, reverse=True))
+_SPACE_RUN = re.compile(r"\s+")
+_ZERO_WIDTH = re.compile(r"[\u200b-\u200d\ufeff]")
+_CJK_GAP = re.compile(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])")
+
+
+def _known_name_terms(
+    brands: list[Brand], aliases: list[SeriesAlias]
+) -> set[str]:
+    """品牌名/别名 + 系列中文名/英文名；纠错时这些片段原样保护。"""
+    terms: set[str] = set()
+    for brand in brands:
+        terms.add(brand.name)
+        terms.update(brand.aliases)
+    for alias in aliases:
+        terms.add(alias.cn)
+        terms.add(alias.en)
+    return {term.strip() for term in terms if len(term.strip()) >= 2}
+
+
+def _protected_spans(text: str, terms: set[str]) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for term in terms:
+        if not term or term.isascii():
+            continue
+        start = 0
+        while True:
+            index = text.find(term, start)
+            if index < 0:
+                break
+            spans.append((index, index + len(term)))
+            start = index + 1
+    return spans
+
+
+def _replace_outside(
+    text: str, spans: list[tuple[int, int]], key: str, value: str
+) -> tuple[str, int]:
+    """只替换保护区间之外的 key；品牌/系列名内部保持原样。"""
+    if key not in text:
+        return text, 0
+    protected = [False] * len(text)
+    for start, end in spans:
+        for index in range(max(0, start), min(len(text), end)):
+            protected[index] = True
+    out: list[str] = []
+    index = 0
+    count = 0
+    while index < len(text):
+        if (
+            not any(protected[index:index + len(key)])
+            and text.startswith(key, index)
+        ):
+            out.append(value)
+            index += len(key)
+            count += 1
+        else:
+            out.append(text[index])
+            index += 1
+    return "".join(out), count
+
+
+def normalize_question(
+    question: str,
+    *,
+    brands: list[Brand] | None = None,
+    aliases: list[SeriesAlias] | None = None,
+) -> tuple[str, tuple[str, ...]]:
+    """纠错前置：全半角、零宽字符、多余空格、已登记的明显错字。
+
+    品牌/系列片段先保护，替换只发生在它们之外；拿不准的字符保持原样，
+    不做通用拼音/编辑距离纠错。
+    """
+    original = question or ""
+    text = unicodedata.normalize("NFKC", original)
+    text = _ZERO_WIDTH.sub("", text)
+    text = _SPACE_RUN.sub(" ", text).strip()
+    text = _CJK_GAP.sub("", text)
+
+    changes: list[str] = []
+    if text != original:
+        changes.append("全半角/空格")
+    terms = _known_name_terms(brands or [], aliases or [])
+    for key in _TYPO_ORDER:
+        value = _TYPO_MAP[key]
+        # 每次替换后重算保护区间：个别替换会改变长度，旧下标会漂移。
+        text, count = _replace_outside(text, _protected_spans(text, terms), key, value)
+        if count:
+            changes.append(f"{key}→{value}")
+    return text, tuple(changes)
+
+
+def prepare_question(question: str, ctx: RecallContext) -> tuple[str, dict]:
+    """graph 的 prep 节点：只做纠错，别名/档案识别仍交给 resolve_dress。"""
+    original = (question or "").strip()
+    text, changes = normalize_question(
+        original,
+        brands=load_brands(ctx.settings),
+        aliases=load_series_aliases(ctx.settings),
+    )
+    return text, {
+        "kind": "prep",
+        "stage": "normalize",
+        "original": original,
+        "normalized": text,
+        "changed": text != original,
+        "changes": list(changes),
+    }
+
+
+def _longest_hit(text: str, candidates: list[str]) -> str:
+    found = [item for item in candidates if item and _alias_hit(item, text)]
+    return max(found, key=len) if found else ""
+
+
+def _brand_match_alias(text: str, brand: Brand | None) -> str:
+    if brand is None:
+        return ""
+    return _longest_hit(text, [brand.name, *brand.aliases])
+
+
+def _series_match_alias(text: str, series: SeriesAlias | None, note: str = "") -> str:
+    if series is None:
+        return ""
+    hit = _longest_hit(text, [series.cn, series.en])
+    if hit:
+        return hit
+    match = re.search(r"「([^」]+)」", note or "")
+    return match.group(1) if match else series.cn
+
+
+def _record_match_alias(text: str, record: dict | None, matched_by: str) -> str:
+    if record is None:
+        return ""
+    if matched_by == "product_number":
+        return str(record.get("product_number") or "")
+    if matched_by == "alias":
+        return _longest_hit(text, _record_aliases(record))
+    return str(record.get("title") or "")
+
+
+LOCAL_NAME_SOURCES = {"series_alias", "brand_alias"}
+EXTERNAL_NAME_SOURCES = {"glossary_verified", "search_verified"}
+
+
+def name_source_of(source: str) -> str:
+    """把内部 source 归成 `local|external|model|none`，供 steps 排查。"""
+    source = str(source or "")
+    if source in EXTERNAL_NAME_SOURCES:
+        return "external"
+    if source == "model":
+        return "model"
+    if source in LOCAL_NAME_SOURCES or source.startswith("catalog_"):
+        return "local"
+    return "none"
 
 
 def _match_brand(question: str, brands: list[Brand]) -> tuple[Brand | None, str]:
@@ -508,6 +713,11 @@ def _with_queries(query: DressQuery) -> DressQuery:
         is_specific=query.is_specific,
         verified=query.verified,
         notes=query.notes,
+        original_question=query.original_question,
+        normalized_question=query.normalized_question,
+        normalize_changes=query.normalize_changes,
+        matched_alias=query.matched_alias,
+        name_source=query.name_source or name_source_of(query.source),
     )
 
 
@@ -645,6 +855,8 @@ def _verified_from_item(
         is_specific=True,
         verified=True,
         notes=current.notes + ("已用 Lolibrary 档案核实",),
+        matched_alias=name or current.matched_alias,
+        name_source="external",
     )
     if name and brand_id:
         remember_series_alias(name, series_en, brand_id, ctx, verified_url=item.url)
@@ -720,11 +932,18 @@ def resolve_by_web(
     *,
     fetcher=None,
 ) -> tuple[dict, dict]:
-    """用中文名搜网页/小红书，从结果里抽英文系列名，再回 Lolibrary 校验。"""
+    """用中文名搜微博首屏/网页，从结果里抽英文系列名，再回 Lolibrary 校验。
+
+    小红书只保留接入位，当前不作为依赖；外部检索失败不影响主流程。
+    """
     current = DressQuery.from_dict(query)
     if current is None or current.series_en or not ctx.settings.lolibrary_online_enabled:
         return query, {}
-    if not (ctx.settings.search_enabled or ctx.settings.xhs_enabled):
+    if not (
+        ctx.settings.search_enabled
+        or ctx.settings.xhs_enabled
+        or ctx.settings.weibo_direct_enabled
+    ):
         return query, {}
     name = _name_text(current.question, load_brands(ctx.settings))
     if len(name) < 2:
@@ -732,17 +951,31 @@ def resolve_by_web(
     queries = [name, f"{name} lolita"][:2]
     results: list = []
     errors: list[str] = []
+    sources: list[str] = []
     if ctx.settings.search_enabled:
         from app.services import web_search
 
+        sources.append("web")
         for text in queries:
             try:
                 results.extend(web_search.search(text, ctx.settings, max_results=3))
             except Exception as exc:  # noqa: BLE001 - 搜索失败继续走模型
                 errors.append(f"{type(exc).__name__}")
+    if ctx.settings.weibo_direct_enabled:
+        from app.services import weibo_direct
+
+        sources.append("weibo")
+        for text in queries:
+            try:
+                results.extend(
+                    weibo_direct.search(text, ctx.settings, max_results=3, timeout=6.0)
+                )
+            except Exception as exc:  # noqa: BLE001 - 微博首屏失败不阻断
+                errors.append(f"weibo:{type(exc).__name__}")
     if ctx.settings.xhs_enabled:
         from app.services import xhs_search
 
+        sources.append("xhs")
         for text in queries:
             try:
                 results.extend(xhs_search.search(text, ctx.settings, max_results=3))
@@ -757,6 +990,7 @@ def resolve_by_web(
     if not candidates:
         return query, {
             "via": "web",
+            "sources": sources,
             "queries": queries,
             "candidates": [],
             "error": "搜索结果里没有可用的英文系列名" if results else "搜索没有返回结果",
@@ -777,6 +1011,7 @@ def resolve_by_web(
             )
             return updated, {
                 "via": "web",
+                "sources": sources,
                 "queries": queries,
                 "candidates": candidates,
                 "matched_title": item.title,
@@ -787,6 +1022,7 @@ def resolve_by_web(
             errors.append(error)
     return query, {
         "via": "web",
+        "sources": sources,
         "queries": queries,
         "candidates": candidates,
         "error": "候选都没在 Lolibrary 命中",
@@ -858,16 +1094,24 @@ def resolve_dress(
     records: list[dict] | None = None,
 ) -> DressQuery | None:
     """离线识别一条裙子的品牌/地区；不该触发时返回 None（不调模型）。"""
-    text = (question or "").strip()
-    if not text:
+    original = (question or "").strip()
+    if not original:
         return None
     brands = load_brands(ctx.settings) if brands is None else brands
     aliases = load_series_aliases(ctx.settings) if aliases is None else aliases
     records = channels.load_catalog(ctx) if records is None else records
+    text, normalize_changes = normalize_question(original, brands=brands, aliases=aliases)
+    if not text:
+        return None
 
     record, matched_by = _match_record(text, records)
     series, series_note = _match_series(text, aliases)
     brand, brand_note = _match_brand(text, brands)
+    matched_alias = (
+        _record_match_alias(text, record, matched_by)
+        or _series_match_alias(text, series, series_note)
+        or _brand_match_alias(text, brand)
+    )
 
     notes: list[str] = [note for note in (brand_note, series_note) if note]
     record_brand_name = str(record.get("brand") or "").strip() if record else ""
@@ -926,6 +1170,11 @@ def resolve_dress(
                 confidence="low",
                 is_specific=False,
                 notes=("本地没有识别出品牌/系列，交给模型兜底",),
+                original_question=original,
+                normalized_question=text,
+                normalize_changes=normalize_changes,
+                matched_alias=matched_alias,
+                name_source="none",
             )
             return _with_queries(pending)
         return None
@@ -951,6 +1200,11 @@ def resolve_dress(
                 confidence="low",
                 is_specific=False,
                 notes=("本地只识别到品牌，具体系列交给模型兜底",),
+                original_question=original,
+                normalized_question=text,
+                normalize_changes=normalize_changes,
+                matched_alias=matched_alias,
+                name_source="none",
             )
             return _with_queries(pending)
         return None
@@ -981,6 +1235,11 @@ def resolve_dress(
         is_specific=is_specific,
         verified=bool(record or series),
         notes=tuple(notes),
+        original_question=original,
+        normalized_question=text,
+        normalize_changes=normalize_changes,
+        matched_alias=matched_alias,
+        name_source=name_source_of(source),
     )
     return _with_queries(query)
 
@@ -1057,6 +1316,13 @@ def merge_model_hint(query: dict, hint: dict, ctx: RecallContext) -> dict:
         is_specific=bool(series_en or current.product_number),
         verified=current.verified,
         notes=tuple(notes),
+        original_question=current.original_question,
+        normalized_question=current.normalized_question,
+        normalize_changes=current.normalize_changes,
+        matched_alias=(hint_series_cn or hint_series or current.matched_alias)
+        if model_used
+        else current.matched_alias,
+        name_source="model" if source == "model" else current.name_source,
     )
     return _with_queries(merged).to_dict()
 

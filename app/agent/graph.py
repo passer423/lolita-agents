@@ -113,6 +113,8 @@ _INTENT_ORDERS = {"operational": _KIND_ORDER_OPERATIONAL}
 
 class AgentState(TypedDict, total=False):
     question: str
+    # 纠错后用于检索的问句；最终回答仍用 question 原话。
+    retrieval_question: str
     history: list[dict]
     # 多路召回的证据，各通道用 reducer 追加；顺序由 _normalize 在收尾时按通道定序。
     evidence: Annotated[list[dict], operator.add]
@@ -585,7 +587,7 @@ def _iter_with_deadline(iterator, deadline_at: float, stop: threading.Event | No
 
 def _channel_query(name: str, state: AgentState) -> str:
     """通道查询词：裙子档案命中时，Lolibrary 用拉丁名，社媒用中文名。"""
-    question = state.get("question", "")
+    question = state.get("retrieval_question") or state.get("question", "")
     dress_query = state.get("dress_query") or {}
     if name == "lolibrary":
         return str(dress_query.get("lolibrary_query") or state.get("query") or question)
@@ -638,7 +640,8 @@ def build_graph(
 
     def _channel_node(name: str):
         def recall_one(state: AgentState) -> dict:
-            question = state["question"]
+            # 纠错后的问句也是通道检索的主问句：品牌/系列被保护过，不会因纠错走样。
+            question = state.get("retrieval_question") or state["question"]
             query = _channel_query(name, state)
             started = time.perf_counter()
             try:
@@ -673,10 +676,18 @@ def build_graph(
     def fanout_core(state: AgentState) -> list[Send]:
         return [Send(name, state) for name in channels.CORE_CHANNELS]
 
+    def prepare(state: AgentState) -> dict:
+        """纠错前置：全半角/空格/登记错字；品牌和系列片段受保护。"""
+        started = time.perf_counter()
+        text, step = dress.prepare_question(state["question"], ctx)
+        step["ms"] = int((time.perf_counter() - started) * 1000)
+        return {"retrieval_question": text, "steps": [step]}
+
     def dress_resolve(state: AgentState) -> dict:
         """先用本地别名/档案识别品牌地区；没有命中就不触发，不调模型。"""
         started = time.perf_counter()
-        query = dress.resolve_dress(state["question"], ctx)
+        question = state.get("retrieval_question") or state["question"]
+        query = dress.resolve_dress(question, ctx)
         if query is None:
             return {}
         data = query.to_dict()
@@ -686,6 +697,9 @@ def build_graph(
             "region": data.get("region", ""),
             "series": data.get("series_en") or data.get("series_cn", ""),
             "source": data.get("source", ""),
+            "alias": data.get("matched_alias", ""),
+            "name_source": data.get("name_source", ""),
+            "normalized": data.get("normalized_question", ""),
             "specific": data.get("is_specific", False),
             "pending": data.get("source") == "pending_model",
             "verified": data.get("verified", False),
@@ -701,7 +715,7 @@ def build_graph(
         模型挂了**不影响补查**——query 退回空串，通道节点用原问句兜底。
         这是拆分带来的第二个好处：模型不再有权力阻止补查。
         """
-        question = state["question"]
+        question = state.get("retrieval_question") or state["question"]
         intent = plan_channels(question)
         dress_query = dict(state.get("dress_query") or {})
         search_traces: list[dict] = []
@@ -759,6 +773,8 @@ def build_graph(
                     "dress_region": dress_query.get("region", ""),
                     "dress_series": dress_query.get("series_en") or dress_query.get("series_cn", ""),
                     "dress_source": dress_query.get("source", ""),
+                    "dress_alias": dress_query.get("matched_alias", ""),
+                    "name_source": dress_query.get("name_source", ""),
                     "dress_verified": bool(dress_query.get("verified")),
                 }
             )
@@ -887,14 +903,16 @@ def build_graph(
     graph = StateGraph(AgentState)
     for name in ALL_CHANNELS:
         graph.add_node(name, _channel_node(name))
+    graph.add_node("prepare", prepare)
     graph.add_node("dress_resolve", dress_resolve)
     graph.add_node("dress_profile", dress_profile)
     graph.add_node("route", route)
     graph.add_node("answer", answer)
     graph.add_node("verify", verify)
 
-    # 先识别裙子档案，再并行扇出核心通道（核心 Lolibrary 用识别出的拉丁系列名）
-    graph.add_edge(START, "dress_resolve")
+    # 先纠错（保护品牌/系列），再识别裙子档案，最后并行扇出核心通道
+    graph.add_edge(START, "prepare")
+    graph.add_edge("prepare", "dress_resolve")
     graph.add_conditional_edges("dress_resolve", fanout_core, list(channels.CORE_CHANNELS))
     for name in channels.CORE_CHANNELS:
         graph.add_edge(name, "route")

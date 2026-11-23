@@ -92,6 +92,8 @@ def _stub_upstream(root: Path) -> Path:
 def test_status_reports_channels_without_key(client, tmp_path, monkeypatch):
     # sys.path 会被生产代码 insert(0)；整份快照给 monkeypatch，测试结束自动还原。
     monkeypatch.setattr(sys, "path", list(sys.path))
+    # 测试基座为了不联网默认关掉微博直抓；这里要验证「默认档位」的展示，显式打开。
+    monkeypatch.setattr(chat_router.settings, "weibo_direct_enabled", True)
 
     def _status():
         return client.get("/api/chat/status").json()

@@ -226,7 +226,8 @@ def test_weibo_direct_is_independent_source_without_search_key(monkeypatch):
 
 
 def test_weibo_status_without_key_reports_direct(monkeypatch):
-    app = AppSettings(search_enabled=False, search_api_key="")
+    # 测试基座默认关掉直抓（不联网）；本用例验证「默认打开」时的状态展示。
+    app = AppSettings(search_enabled=False, search_api_key="", weibo_direct_enabled=True)
     monkeypatch.setattr(weibo_direct, "readiness", lambda _app: (True, ""))
 
     status = channels._weibo_status(app)
