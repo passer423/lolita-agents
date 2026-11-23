@@ -532,10 +532,31 @@ def test_warm_models_touches_both_indexes(monkeypatch):
 
     monkeypatch.setattr(main_module.bridge, "search_kb", record("own"))
     monkeypatch.setattr(main_module.bridge, "search_real", record("real"))
+    monkeypatch.setattr("app.rerank.shared_onnx_reranker", lambda _app: None)
 
     main_module._warm_models()
 
     assert [source for source, _ in calls] == ["own", "real"]
+
+
+def test_warm_models_pulls_reranker_in(monkeypatch):
+    """精排是懒加载的，预热要显式打一次分，否则首问仍付加载时间。"""
+    from app import main as main_module
+
+    monkeypatch.setattr(main_module.bridge, "search_kb", lambda *a, **k: [])
+    monkeypatch.setattr(main_module.bridge, "search_real", lambda *a, **k: [])
+    scored = []
+
+    class Proxy:
+        def predict(self, pairs, batch_size=None):
+            scored.append(list(pairs))
+            return [0.0]
+
+    monkeypatch.setattr("app.rerank.shared_onnx_reranker", lambda _app: Proxy())
+
+    main_module._warm_models()
+
+    assert len(scored) == 1
 
 
 def test_warm_models_never_raises(monkeypatch):
@@ -547,5 +568,6 @@ def test_warm_models_never_raises(monkeypatch):
 
     monkeypatch.setattr(main_module.bridge, "search_kb", boom)
     monkeypatch.setattr(main_module.bridge, "search_real", boom)
+    monkeypatch.setattr("app.rerank.shared_onnx_reranker", lambda _app: None)
 
     main_module._warm_models()  # 不抛就是通过

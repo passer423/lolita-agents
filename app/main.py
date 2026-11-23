@@ -35,6 +35,23 @@ STATIC_DIR = Path(__file__).parent / "static"
 settings.ensure_dirs()
 
 
+def _warm_reranker() -> None:
+    """精排是懒加载的：检索 ``top_k=1`` 时不一定触发，这里显式打一次分。
+
+    只预热 int8 ONNX 后端（默认）。torch 回退在 2 GiB 上本来就吃不下，
+    让它按首次提问的自然路径加载，预热阶段不主动拉起。
+    """
+    if not settings.reranker_enabled:
+        return
+    from app.rerank import shared_onnx_reranker
+
+    proxy = shared_onnx_reranker(settings)
+    if proxy is None:
+        logger.info("预热跳过精排：当前后端不是 int8 ONNX，首次提问时才加载")
+        return
+    proxy.predict([("预热", "预热")])
+
+
 def _warm_models() -> None:
     """预热 BGE 与精排：各跑一次最小检索，**不调用 LLM、不写库**。
 
@@ -48,6 +65,11 @@ def _warm_models() -> None:
             logger.info("预热完成：%s 检索已加载（累计 %.1f 秒）", source, time.perf_counter() - started)
         except Exception as exc:  # noqa: BLE001 - 预热失败不能影响服务启动
             logger.warning("预热 %s 检索失败（不影响服务）：%s", source, exc)
+    try:
+        _warm_reranker()
+        logger.info("预热完成：精排已加载（累计 %.1f 秒）", time.perf_counter() - started)
+    except Exception as exc:  # noqa: BLE001 - 精排预热失败同样不影响服务
+        logger.warning("预热精排失败（不影响服务）：%s", exc)
     logger.info("启动预热结束：%.1f 秒", time.perf_counter() - started)
 
 
