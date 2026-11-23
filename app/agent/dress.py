@@ -1567,7 +1567,7 @@ def build_profile(
         style_candidates.extend(social["style"])
         color_candidates.extend(social["colors"])
 
-    # 国牌社媒没抽到字段时，退回本地档案的历史字段救急；口径仍标「历史原价」。
+    # 国牌社媒没抽到字段时，退回本地档案的历史字段救急；口径仍标「发售价」。
     if current.region == "CN" and archive_item is not None:
         if not social["release"] and archive_item.release_year:
             release_candidates.append({
@@ -1707,7 +1707,7 @@ def _profile_text(profile: dict, archive_error: str = "") -> str:
     parts.append(f"发售：{release}")
 
     if profile.get("price"):
-        label = "历史原价" if profile.get("price_kind") == "archive_original" else "价格（网友提到，未核实）"
+        label = "发售价" if profile.get("price_kind") == "archive_original" else "价格（网友提到，未核实）"
         if profile.get("price_conflict"):
             label = "价格（来源说法不一致）"
         parts.append(f"{label}：{profile['price']}")
@@ -1721,8 +1721,6 @@ def _profile_text(profile: dict, archive_error: str = "") -> str:
     parts.append("配色：" + (" / ".join(profile.get("colors") or []) or "未查到"))
 
     notes = list(profile.get("notes") or [])
-    if profile.get("price_kind") == "archive_original":
-        notes.append("历史原价不代表现价")
     kinds = {profile.get("release_kind"), profile.get("price_kind"), profile.get("style_kind")}
     if "social_unverified" in kinds:
         notes.append("社媒字段未核实")

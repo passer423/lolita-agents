@@ -11,7 +11,7 @@
 ``source_kind`` 是**证据的效力等级**，不是来源分类——写作用它决定哪句能当规范：
 
 * ``own_content``  自己整理的知识库，可作规范；
-* ``third_party``  官方/档案馆数据，可作事实（但不含现价）；
+* ``third_party``  官方/档案馆数据，可作事实（价格按发售价记录）；
 * ``realtime``     网页搜索/小红书的结果摘要，时效信息可用，来源需标注；
 * ``upstream_ugc`` 他人微博发言，**只能写成「有网友提到」，不得当规范**；
 * ``image_text``   原帖配图的机器识别文字，**未校验**，只能写成「图上标着…」。
@@ -426,7 +426,7 @@ def _lolibrary_summary(record: dict) -> str:
     if record.get("release_year"):
         parts.append(f"发售年份 {record['release_year']}")
     if record.get("original_price"):
-        parts.append(f"历史原价 {record['original_price']}")
+        parts.append(f"发售价 {record['original_price']}")
     if record.get("colors"):
         parts.append("配色 " + "/".join(record["colors"]))
     if record.get("notes"):

@@ -512,7 +512,7 @@ ul.plain li { margin-bottom: 2px; }
 .chat-input .primary { width: auto; flex: 0 0 auto; padding: 12px 18px; }
 .chat-chips { padding-bottom: 0; }
 
-/* 裙子档案：结构化字段卡片（历史原价与社媒线索必须能一眼区分） */
+/* 裙子档案：结构化字段卡片（发售价与社媒线索必须能一眼区分） */
 .dress-card {
   margin-top: 8px;
   padding: 10px 12px;

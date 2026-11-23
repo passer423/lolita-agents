@@ -188,7 +188,7 @@
   function dressPrice(dress) {
     if (dress.price_conflict) return '来源说法不一致';
     if (!dress.price) return '未查到';
-    if (dress.price_kind === 'archive_original') return dress.price + '（历史原价）';
+    if (dress.price_kind === 'archive_original') return dress.price + '（发售价）';
     if (dress.price_kind === 'social_unverified') return dress.price + '（网友提到，未核实）';
     return dress.price;
   }
@@ -216,7 +216,6 @@
     if (dress.verified === true && dress.source === 'model_verified') {
       notes.push('已用 Lolibrary 档案核实');
     }
-    if (dress.price_kind === 'archive_original') notes.push('历史原价，不代表现价');
     if ([dress.release_kind, dress.price_kind, dress.style_kind].indexOf('social_unverified') >= 0) {
       notes.push('社媒字段未核实');
     }

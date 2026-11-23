@@ -375,7 +375,7 @@ def test_prompt_carries_replica_neutrality_and_archive_price_rules():
 
     assert "原版 / 复刻 / 再贩版" in system
     assert "山正" in system
-    assert "历史原价" in system
+    assert "发售价" in system
 
 
 def test_real_ugc_keeps_netizen_wording():

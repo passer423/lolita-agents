@@ -301,7 +301,8 @@ def test_profile_from_local_archive(workdir):
     assert profile["missing"] == []
     assert result["evidence"]["channel"] == "dress"
     assert result["evidence"]["source_kind"] == "third_party"
-    assert "历史原价" in result["evidence"]["text"]
+    assert "发售价" in result["evidence"]["text"]
+    assert "不代表现价" not in result["evidence"]["text"]
 
 
 def test_cn_profile_extracts_social_fields(workdir):
