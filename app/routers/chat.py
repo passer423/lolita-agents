@@ -183,7 +183,9 @@ def chat_status() -> dict:
     """
     return {
         "enabled": settings.llm_enabled,
+        # model 是真实调用标识，留着给探针/排障用；前端只展示 display_name。
         "model": settings.llm_model if settings.llm_enabled else "",
+        "display_name": settings.app_display_name.strip() or "lolitaagent",
         "hint": "" if settings.llm_enabled else (
             "需要在 .env 里配置 LLM_API_KEY"
             "（DeepSeek：LLM_BASE_URL=https://api.deepseek.com/v1、LLM_MODEL=deepseek-chat）"

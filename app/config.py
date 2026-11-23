@@ -69,6 +69,10 @@ class AppSettings(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_model: str = "deepseek-chat"
 
+    # 前端顶栏展示的产品名（"lolitaagent · 用户名"）。只影响展示，不改实际调用的
+    # llm_model、接口入参或日志里的模型标识；换模型时前端不需要跟着改。
+    app_display_name: str = "lolitaagent"
+
     # ---------- 模型分级路由 ----------
     # 按问题类型选写作模型：cheap（默认，全部走便宜档）/ auto（规则判据，
     # 仅洗护/安全与稀薄档案题走强档；可选实验开关）/ strong（强制强档）。

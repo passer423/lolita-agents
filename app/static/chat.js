@@ -836,15 +836,26 @@
     }
   }
 
+  function setSidebar(open) {
+    const side = document.getElementById('thread-side');
+    const backdrop = document.getElementById('thread-backdrop');
+    const toggle = document.getElementById('thread-toggle');
+    if (!side) return;
+    side.classList.toggle('open', open);
+    if (backdrop) backdrop.classList.toggle('show', open);
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
   function renderThreads() {
     const bar = document.getElementById('thread-bar');
     if (!bar) return;
+    // 空态不渲染占位文字或空白块：列表为空时侧栏只剩「新对话」按钮。
     if (!state.threads.length) {
-      bar.innerHTML = '<span class="hint thread-empty">还没有对话，直接提问就会新建一个</span>';
+      bar.innerHTML = '';
       return;
     }
     bar.innerHTML = state.threads.map((thread) =>
-      '<div class="thread-pill' + (thread.id === state.threadId ? ' on' : '') + '">' +
+      '<div class="thread-item' + (thread.id === state.threadId ? ' on' : '') + '">' +
         '<button class="thread-open" data-thread="' + thread.id + '" title="' +
           esc(threadTitle(thread)) + '">' + esc(threadTitle(thread)) + '</button>' +
         '<button class="thread-del" data-del-thread="' + thread.id + '" ' +
@@ -874,6 +885,7 @@
       if (data.thread) upsertThread(data.thread);
       paintMessages(document.getElementById('chat-list'));
       renderThreads();
+      setSidebar(false);   // 窄屏抽屉：选完对话自动收起
       const input = document.getElementById('chat-text');
       if (input) input.focus();
     } catch (error) {
@@ -893,6 +905,7 @@
         String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
       paintMessages(document.getElementById('chat-list'));
       renderThreads();
+      setSidebar(false);   // 窄屏抽屉：新建后直接回到聊天区
       const input = document.getElementById('chat-text');
       if (input) input.focus();
       toast('已新建对话');
@@ -961,44 +974,55 @@
     }
 
     const username = (state.account && state.account.username) || '';
+    // 顶栏只展示产品名，不暴露真实模型标识；展示名由服务端配置下发。
+    const displayName = (status && status.display_name) || 'lolitaagent';
     // 问答是主区域，放最上面；关注项是辅助功能，折叠在下面，
     // 不占首屏、也不需要用户先滑过设置才能提问。
     root.innerHTML =
-      '<div class="card chat-card">' +
-        '<div class="chat-head">' +
-          '<span class="chat-model">' + esc(status.model) +
-            (username ? ' · ' + esc(username) : '') + '</span>' +
-          '<div class="chat-actions">' +
-            '<button class="ghost sm" id="chat-stop" style="display:none" disabled>停止</button>' +
-            '<button class="ghost sm" id="thread-new">新对话</button>' +
-            '<button class="ghost sm" id="chat-logout">登出</button>' +
+      '<div class="chat-shell">' +
+        '<aside class="thread-side card" id="thread-side" aria-label="对话列表">' +
+          '<button class="primary thread-new" id="thread-new">新对话</button>' +
+          '<div class="thread-list" id="thread-bar"></div>' +
+        '</aside>' +
+        '<div class="chat-main">' +
+          '<div class="card chat-card">' +
+            '<div class="chat-head">' +
+              '<span class="chat-model">' + esc(displayName) +
+                (username ? ' · ' + esc(username) : '') + '</span>' +
+              '<div class="chat-actions">' +
+                '<button class="ghost sm thread-toggle" id="thread-toggle" ' +
+                  'aria-expanded="false" aria-controls="thread-side">对话</button>' +
+                '<button class="ghost sm" id="chat-stop" style="display:none" disabled>停止</button>' +
+                '<button class="ghost sm" id="chat-logout">登出</button>' +
+              '</div>' +
+            '</div>' +
+            '<div class="chat-list" id="chat-list"></div>' +
+            '<div class="chat-input">' +
+              '<textarea id="chat-text" rows="1" maxlength="300" ' +
+                'placeholder="例：蕾丝和真丝能机洗吗？"></textarea>' +
+              '<button class="primary" id="chat-send">发送</button>' +
+            '</div>' +
+            '<div class="chips chat-chips">' +
+              ['蕾丝和真丝能机洗吗？', 'AP 最近有什么新款？', 'Baby 缎带与齿轮 预约价多少？'].map((text) =>
+                '<button class="chip" data-q="' + esc(text) + '">' + esc(text) + '</button>').join('') +
+            '</div>' +
           '</div>' +
-        '</div>' +
-        '<div class="thread-bar" id="thread-bar"></div>' +
-        '<div class="chat-list" id="chat-list"></div>' +
-        '<div class="chat-input">' +
-          '<textarea id="chat-text" rows="1" maxlength="300" ' +
-            'placeholder="例：蕾丝和真丝能机洗吗？"></textarea>' +
-          '<button class="primary" id="chat-send">发送</button>' +
-        '</div>' +
-        '<div class="chips chat-chips">' +
-          ['蕾丝和真丝能机洗吗？', 'AP 最近有什么新款？', 'Baby 缎带与齿轮 预约价多少？'].map((text) =>
-            '<button class="chip" data-q="' + esc(text) + '">' + esc(text) + '</button>').join('') +
+          '<details class="card fold" id="follow-panel" style="display:none">' +
+            '<summary>关注项 <span class="badge" id="follow-unread" style="display:none"></span>' +
+              '<span class="fold-hint">每天第一次打开页面时检查</span></summary>' +
+            '<div class="fold-body">' +
+              '<div class="follow-events" id="follow-events"></div>' +
+              '<div class="follow-list" id="follow-list"></div>' +
+              '<div class="follow-actions">' +
+                '<button class="ghost sm" id="follow-check">检查更新</button>' +
+                '<button class="ghost sm" id="follow-read">全部已读</button>' +
+                '<span class="hint" id="follow-status"></span>' +
+              '</div>' +
+            '</div>' +
+          '</details>' +
         '</div>' +
       '</div>' +
-      '<details class="card fold" id="follow-panel" style="display:none">' +
-        '<summary>关注项 <span class="badge" id="follow-unread" style="display:none"></span>' +
-          '<span class="fold-hint">每天第一次打开页面时检查</span></summary>' +
-        '<div class="fold-body">' +
-          '<div class="follow-events" id="follow-events"></div>' +
-          '<div class="follow-list" id="follow-list"></div>' +
-          '<div class="follow-actions">' +
-            '<button class="ghost sm" id="follow-check">检查更新</button>' +
-            '<button class="ghost sm" id="follow-read">全部已读</button>' +
-            '<span class="hint" id="follow-status"></span>' +
-          '</div>' +
-        '</div>' +
-      '</details>';
+      '<div class="thread-backdrop" id="thread-backdrop"></div>';
 
     state.channels = status.channels;
 
@@ -1036,6 +1060,11 @@
     });
     document.getElementById('thread-new').addEventListener('click', newThread);
     document.getElementById('chat-logout').addEventListener('click', logout);
+    document.getElementById('thread-toggle').addEventListener('click', () => {
+      const side = document.getElementById('thread-side');
+      setSidebar(!(side && side.classList.contains('open')));
+    });
+    document.getElementById('thread-backdrop').addEventListener('click', () => setSidebar(false));
 
     // 首屏：有对话就打开最近一个，没有就留空等首问自动新建。
     renderThreads();

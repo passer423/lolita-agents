@@ -91,6 +91,7 @@ def test_anonymous_cannot_reach_user_endpoints(data_dir):
     assert anon.get("/api/chat/runs").status_code == 401
     # 白名单：探针与登录页要能判断模型是否配好
     assert anon.get("/api/chat/status").status_code == 200
+    assert anon.get("/api/chat/status").json()["display_name"] == "lolitaagent"
     assert anon.get("/api/health").status_code == 200
 
 

@@ -49,7 +49,7 @@ html, body {
 /* ---------------------------------------------------------------- 主体 */
 #view {
   padding: var(--pad) var(--pad) calc(78px + env(safe-area-inset-bottom));
-  max-width: 720px;
+  max-width: 1040px;
   margin: 0 auto;
 }
 .loading, .empty { color: var(--muted); text-align: center; padding: 34px 12px; font-size: 14px; }
@@ -419,54 +419,72 @@ ul.plain li { margin-bottom: 2px; }
 .chat-actions { display: flex; align-items: center; gap: 8px; }
 .chat-model { font-size: 12px; color: var(--muted); }
 
-/* 对话切换条：一条对话一个胶囊，横向滚动；窄屏也不换行占高度 */
-.thread-bar {
+/* 桌面：左侧固定对话栏 + 右侧聊天区 */
+.chat-shell {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+.chat-main { min-width: 0; }
+.thread-side {
+  position: sticky;
+  top: calc(env(safe-area-inset-top) + 64px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  max-height: calc(100dvh - 96px);
+}
+.thread-new { width: 100%; padding: 9px 14px; }
+.thread-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  overflow-y: auto;
+}
+.thread-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  overflow-x: auto;
-  padding: 2px 0 4px;
-  border-bottom: 1px dashed var(--line);
-  scrollbar-width: none;
+  min-width: 0;
+  border-radius: 10px;
 }
-.thread-bar::-webkit-scrollbar { display: none; }
-.thread-empty { flex: 0 0 auto; font-size: 12px; }
-.thread-pill {
-  display: flex;
-  align-items: stretch;
-  flex: 0 0 auto;
-  max-width: 220px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: #fff;
-  overflow: hidden;
-}
-.thread-pill.on { border-color: var(--accent); background: var(--accent-soft); }
+.thread-item:hover { background: var(--accent-soft); }
+.thread-item.on { background: var(--accent-soft); }
 .thread-open {
+  flex: 1;
+  min-width: 0;
   border: 0;
   background: none;
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--ink);
-  padding: 6px 2px 6px 12px;
-  max-width: 180px;
+  padding: 8px 4px 8px 10px;
+  text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
 }
-.thread-pill.on .thread-open { color: var(--accent); font-weight: 600; }
+.thread-item.on .thread-open { color: var(--accent); font-weight: 600; }
 .thread-del {
+  align-self: stretch;
   border: 0;
   background: none;
   color: var(--muted);
   font: inherit;
   font-size: 15px;
   line-height: 1;
-  padding: 0 10px 1px 4px;
+  padding: 0 8px 1px 4px;
   cursor: pointer;
 }
 .thread-del:hover { color: var(--accent); }
+
+/* 窄屏抽屉：默认收起，用「对话」按钮唤出 */
+.thread-toggle { display: none; }
+.thread-backdrop { display: none; }
 
 /* 登录 / 注册：跟聊天卡片同一套外观，不另起一页 */
 .auth-card { max-width: 420px; margin: 8vh auto 0; gap: 12px; }
@@ -778,8 +796,35 @@ ul.plain li { margin-bottom: 2px; }
   /* 登录页不居中留白，整屏可用；输入框 16px 避免 iOS 自动放大 */
   .auth-card { max-width: none; margin: 0; }
   .auth-card .auth-field input { font-size: 16px; }
-  .thread-pill { max-width: 72vw; }
-  .thread-open { max-width: 58vw; }
+  /* 窄屏：对话栏变成左侧抽屉，浮在聊天区上方，不挤压正文 */
+  .chat-shell { display: block; }
+  .thread-side {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 50;
+    width: min(80vw, 300px);
+    max-height: none;
+    padding: calc(env(safe-area-inset-top) + 12px) 12px
+             calc(12px + env(safe-area-inset-bottom));
+    border-radius: 0 14px 14px 0;
+    border-left: 0;
+    box-shadow: 0 10px 30px rgba(48, 38, 40, .18);
+    overflow-y: auto;
+    transform: translateX(-105%);
+    visibility: hidden;
+    transition: transform .2s ease, visibility .2s ease;
+  }
+  .thread-side.open { transform: none; visibility: visible; }
+  .thread-toggle { display: inline-flex; }
+  .thread-backdrop.show {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 45;
+    background: rgba(48, 38, 40, .32);
+  }
 
   .toast { max-width: 88vw; }
 }

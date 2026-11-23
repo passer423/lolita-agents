@@ -79,6 +79,8 @@ python -m app.main            # http://127.0.0.1:8787
 
 没有 `LLM_API_KEY` 时，`/api/chat/status` 会明确禁用聊天，`/api/chat` 返回 503。补查通道（xhs / weibo / web）按 `.env` 里各自开关与凭据决定是否可用，缺了就跳过、不猜数据。
 
+页面顶栏的展示名由 `APP_DISPLAY_NAME` 控制（默认 `lolitaagent`，显示为「lolitaagent · 用户名」），只影响前端文案；实际调用仍由 `LLM_MODEL` / `LLM_MODEL_CHEAP` / `LLM_MODEL_STRONG` 决定，`/api/chat/status` 的 `model` 字段与日志里的模型标识都保持真实值。
+
 ## 知识库索引与上游路径
 
 `own` 与 `real` 是**两份独立索引**，状态必须分开看：
