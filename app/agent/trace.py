@@ -74,19 +74,33 @@ def append(record: dict, app: AppSettings | None = None) -> Path | None:
         return None
 
 
-def tail(limit: int = 20, app: AppSettings | None = None) -> list[dict]:
-    """给排查用：读最近 N 条。"""
+def tail(
+    limit: int = 20,
+    app: AppSettings | None = None,
+    *,
+    account_id: int | None = None,
+) -> list[dict]:
+    """给排查用：读最近 N 条。
+
+    传 ``account_id`` 时只返回该账号的 run。轨迹文件是全局的，但**不能**把
+    别人的问题原文回给另一个登录用户；早期没有账号归属的行一律不返回。
+    """
     path = trace_path(app)
     if not path.exists():
         return []
-    lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
+    # 先多读一些：按账号过滤后可能不够 limit 条。
+    keep = max(limit * 5, limit) if account_id is not None else limit
+    lines = path.read_text(encoding="utf-8").splitlines()[-keep:]
     records: list[dict] = []
     for line in lines:
         try:
-            records.append(json.loads(line))
+            record = json.loads(line)
         except json.JSONDecodeError:
             continue
-    return records
+        if account_id is not None and record.get("account_id") != account_id:
+            continue
+        records.append(record)
+    return records[-limit:] if account_id is not None else records
 
 
 # --------------------------------------------------------------------- 成本汇总

@@ -1049,6 +1049,7 @@ def _finish(
     }
     trace.append(
         {
+            "account_id": ctx.account_id,
             "question": question,
             "answer": payload["answer"][:400],
             "refused": payload["refused"],
@@ -1307,6 +1308,7 @@ def stream(
     }
     trace.append(
         {
+            "account_id": ctx.account_id,
             "question": question,
             "answer": text[:400],
             "refused": payload["refused"],

@@ -80,9 +80,10 @@ class ChannelUnavailable(RuntimeError):
 
 @dataclass(slots=True)
 class RecallContext:
-    """一次召回所需的上下文（单用户：只有配置）。"""
+    """一次召回所需的上下文（配置 + 可选账号归属，后者只用于轨迹隔离）。"""
 
     settings: AppSettings = field(default_factory=lambda: default_settings)
+    account_id: int | None = None
 
 
 def _clip(text: str, limit: int | None = None) -> str:

@@ -2,9 +2,12 @@
 'use strict';
 
 (function () {
-  const MAX_HISTORY = 8;          // 与服务端 writer.MAX_HISTORY_TURNS 对齐
-
-  const state = { messages: [], busy: false, abort: null, channels: null };
+  // messages 是当前对话的消息；threads 是账号下的对话列表。
+  // 历史只从服务端读，浏览器不再把 history 当唯一来源。
+  const state = {
+    messages: [], busy: false, abort: null, channels: null,
+    account: null, threads: [], threadId: null,
+  };
 
   const esc = (value) => String(value == null ? '' : value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -309,21 +312,13 @@
     host.innerHTML = '';
     if (!state.messages.length) {
       host.innerHTML = '<div class="hint" style="text-align:center;padding:18px 0">' +
-        '问点什么。它会并行查自有知识库、真实语料和 Lolibrary 档案，' +
-        '需要时再补查小红书、微博和网页。<br>' +
-        '问具体裙子时会先判断日牌/国牌：日牌查 Lolibrary，国牌查小红书和微博；' +
-        '中文译名也认（比如「皇家千层公主」），查不到会如实说明。</div>';
+        '<b>Lolita 圈层问答助手</b><br>' +
+        '把微博真实语料、Lolibrary 档案和自有知识库整理成可检索的知识，只回答 Lo 裙相关的问题。<br>' +
+        '问具体裙子会先判断日牌 / 国牌再分流查证；答案带引用、可点开看原文，查不到会直接说查不到。</div>';
       return;
     }
     state.messages.forEach((message) => host.appendChild(messageNode(message)));
     host.scrollTop = host.scrollHeight;
-  }
-
-  function historyPayload() {
-    return state.messages
-      .filter((message) => !message.error && message.content)
-      .slice(-MAX_HISTORY)
-      .map((message) => ({ role: message.role, content: String(message.content).slice(0, 500) }));
   }
 
   async function ask(question, ui) {
@@ -337,7 +332,6 @@
     }
 
     const userMessage = { role: 'user', content: question };
-    const history = historyPayload();      // 在追加本轮问题之前取，否则问题会被发两遍
     state.messages.push(userMessage);
 
     const answer = { role: 'assistant', content: '', steps: [], evidence: [] };
@@ -357,14 +351,18 @@
       const response = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json; charset=utf-8' },
-        body: JSON.stringify({ message: question, history: history }),
+        // 不传 history：上下文由服务端按 conversation_id 从库里取。
+        // 首问 conversation_id 为 null，服务端会新建对话并在第一帧回传 id。
+        body: JSON.stringify({ message: question, conversation_id: state.threadId }),
         signal: controller.signal,
       });
 
       if (!response.ok) {
         let detail = response.status + ' ' + response.statusText;
         try { const data = await response.json(); if (data.detail) detail = data.detail; } catch (_) { /* 非 JSON */ }
-        throw new Error(detail);
+        const error = new Error(detail);
+        error.status = response.status;
+        throw error;
       }
 
       const reader = response.body.getReader();
@@ -385,7 +383,16 @@
           let event;
           try { event = JSON.parse(line.slice(6)); } catch (_) { continue; }
 
-          if (event.type === 'step') {
+          if (event.type === 'conversation') {
+            // 新对话的 id/首问标题由服务端给，前端只负责挂到列表并高亮。
+            state.threadId = event.id;
+            upsertThread({
+              id: event.id, title: event.title || '新对话',
+              created_at: event.created_at, updated_at: event.updated_at,
+              message_count: event.message_count || 0,
+            });
+            renderThreads();
+          } else if (event.type === 'step') {
             steps.push(event);
             answer.steps = steps;
             if (!answer.content) {
@@ -421,10 +428,18 @@
 
       answer.ms = Math.round(performance.now() - started);
       paintMessages(ui.list);
+      refreshThreads();          // 更新标题/条数/排序，不打断当前气泡
     } catch (error) {
       if (error && error.name === 'AbortError') {
         answer.stopped = true;
         answer.content = (answer.content ? answer.content + '\n\n' : '') + '（已停止生成）';
+      } else if (error && error.status === 401) {
+        // 登录态过期：不要在页面里留一个「出错了」的气泡，直接回登录页。
+        state.busy = false;
+        state.abort = null;
+        toast('登录已过期，请重新登录');
+        renderAuth('login');
+        return;
       } else {
         answer.error = true;
         answer.content = '出错了：' + error.message;
@@ -450,9 +465,20 @@
     if (!response.ok) {
       let detail = response.status + ' ' + response.statusText;
       try { const data = await response.json(); if (data.detail) detail = data.detail; } catch (_) { /* 非 JSON */ }
-      throw new Error(detail);
+      const error = new Error(detail);
+      error.status = response.status;   // 调用方靠它区分「登录过期」和其它失败
+      throw error;
     }
     return response.json();
+  }
+
+  function authExpired(error) {
+    if (error && error.status === 401) {
+      toast('登录已过期，请重新登录');
+      renderAuth('login');
+      return true;
+    }
+    return false;
   }
 
   // ---------------------------------------------------------------- 关注项（D2 形态甲）
@@ -710,29 +736,212 @@
         checkFollows(true);
       }
     } catch (error) {
+      if (authExpired(error)) return;
       const list = document.getElementById('follow-list');
       if (list) list.innerHTML = '<div class="notice warn">关注项载入失败：' + esc(error.message) + '</div>';
     }
   }
 
-  // 首屏回填服务端会话记忆：只有 role/content，没有证据与召回过程，
-  // 因此按普通文本渲染，也不生成空的参考来源块。拉不到就按空对话处理。
-  async function loadHistory() {
-    try {
-      const payload = await getJSON('/api/chat/history?limit=' + MAX_HISTORY);
-      const restored = (payload.messages || []).map((message) => ({
-        role: message.role,
-        content: message.content,
-        restored: true,
-      }));
-      if (!restored.length) return;
-      state.messages = restored.concat(state.messages);
-      // 用户已经在提问就别重绘，否则会把正在流式输出的气泡冲掉
-      if (!state.busy) paintMessages(document.getElementById('chat-list'));
-    } catch (error) { /* 历史拉不到不影响提问 */ }
+  // ---------------------------------------------------------------- 登录 / 注册
+
+  function renderAuth(mode) {
+    const root = view();
+    mode = mode === 'register' ? 'register' : 'login';
+    state.account = null;
+    state.threads = [];
+    state.threadId = null;
+    state.messages = [];
+
+    root.innerHTML =
+      '<div class="card chat-card auth-card">' +
+        '<h2 class="auth-title">' + (mode === 'register' ? '注册账号' : '登录') + '</h2>' +
+        '<p class="hint">账号用来保存你的对话与关注项，换浏览器登录同一账号即可恢复；' +
+          '未登录时看不到任何历史。</p>' +
+        '<div class="auth-tabs">' +
+          '<button class="chip' + (mode === 'login' ? ' on' : '') + '" data-auth-mode="login">登录</button>' +
+          '<button class="chip' + (mode === 'register' ? ' on' : '') + '" data-auth-mode="register">注册</button>' +
+        '</div>' +
+        '<label class="auth-field"><span>邮箱</span>' +
+          '<input id="auth-email" type="email" autocomplete="username" inputmode="email" ' +
+            'placeholder="you@example.com"></label>' +
+        '<label class="auth-field"><span>密码</span>' +
+          '<input id="auth-pass" type="password" autocomplete="' +
+            (mode === 'register' ? 'new-password' : 'current-password') + '" ' +
+            'placeholder="至少 8 位"></label>' +
+        '<button class="primary auth-submit" id="auth-submit">' +
+          (mode === 'register' ? '注册并登录' : '登录') + '</button>' +
+        '<div class="auth-msg hint" id="auth-msg"></div>' +
+      '</div>';
+
+    const email = document.getElementById('auth-email');
+    const pass = document.getElementById('auth-pass');
+    const msg = document.getElementById('auth-msg');
+    const submit = document.getElementById('auth-submit');
+
+    root.querySelectorAll('[data-auth-mode]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const keep = email.value;
+        renderAuth(button.dataset.authMode);
+        // 切模式时保留已输入的邮箱，少打一遍
+        const node = document.getElementById('auth-email');
+        if (node) { node.value = keep; node.focus(); }
+      });
+    });
+
+    async function doSubmit() {
+      const value = email.value.trim();
+      if (!value || !pass.value) { msg.textContent = '请填写邮箱和密码'; return; }
+      submit.disabled = true;
+      msg.textContent = mode === 'register' ? '正在注册…' : '正在登录…';
+      try {
+        const response = await fetch('/api/auth/' + mode, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: JSON.stringify({ email: value, password: pass.value }),
+        });
+        let data = {};
+        try { data = await response.json(); } catch (_) { /* 非 JSON */ }
+        if (!response.ok) {
+          msg.textContent = data.detail || ('失败：' + response.status);
+          submit.disabled = false;
+          return;
+        }
+        state.account = data.account || null;
+        boot();
+      } catch (error) {
+        msg.textContent = '网络错误：' + error.message;
+        submit.disabled = false;
+      }
+    }
+
+    submit.addEventListener('click', doSubmit);
+    pass.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); doSubmit(); }
+    });
+    email.focus();
   }
 
-  async function render() {
+  // ---------------------------------------------------------------- 对话列表
+
+  function threadTitle(thread) {
+    return (thread && thread.title) || '新对话';
+  }
+
+  function upsertThread(thread) {
+    const index = state.threads.findIndex((item) => item.id === thread.id);
+    if (index >= 0) {
+      state.threads[index] = Object.assign({}, state.threads[index], thread);
+    } else {
+      state.threads.unshift(thread);
+    }
+  }
+
+  function renderThreads() {
+    const bar = document.getElementById('thread-bar');
+    if (!bar) return;
+    if (!state.threads.length) {
+      bar.innerHTML = '<span class="hint thread-empty">还没有对话，直接提问就会新建一个</span>';
+      return;
+    }
+    bar.innerHTML = state.threads.map((thread) =>
+      '<div class="thread-pill' + (thread.id === state.threadId ? ' on' : '') + '">' +
+        '<button class="thread-open" data-thread="' + thread.id + '" title="' +
+          esc(threadTitle(thread)) + '">' + esc(threadTitle(thread)) + '</button>' +
+        '<button class="thread-del" data-del-thread="' + thread.id + '" ' +
+          'title="删除这个对话">×</button>' +
+      '</div>').join('');
+
+    bar.querySelectorAll('[data-thread]').forEach((button) => {
+      button.addEventListener('click', () => openThread(Number(button.dataset.thread)));
+    });
+    bar.querySelectorAll('[data-del-thread]').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        deleteThread(Number(button.dataset.delThread));
+      });
+    });
+  }
+
+  async function openThread(id) {
+    if (state.busy) { toast('正在生成，停止后再切换对话'); return; }
+    if (id === state.threadId) return;
+    try {
+      const data = await getJSON('/api/threads/' + id + '/messages?limit=100');
+      state.threadId = id;
+      state.messages = (data.messages || []).map((message) => ({
+        role: message.role, content: message.content, restored: true,
+      }));
+      if (data.thread) upsertThread(data.thread);
+      paintMessages(document.getElementById('chat-list'));
+      renderThreads();
+      const input = document.getElementById('chat-text');
+      if (input) input.focus();
+    } catch (error) {
+      if (!authExpired(error)) toast('打开对话失败：' + error.message);
+    }
+  }
+
+  async function newThread() {
+    if (state.busy) { toast('正在生成，停止后再新建对话'); return; }
+    try {
+      const data = await getJSON('/api/threads', { method: 'POST' });
+      const thread = data.thread;
+      state.threadId = thread.id;
+      state.messages = [];
+      upsertThread(thread);
+      state.threads.sort((a, b) =>
+        String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+      paintMessages(document.getElementById('chat-list'));
+      renderThreads();
+      const input = document.getElementById('chat-text');
+      if (input) input.focus();
+      toast('已新建对话');
+    } catch (error) {
+      if (!authExpired(error)) toast('新建对话失败：' + error.message);
+    }
+  }
+
+  async function deleteThread(id) {
+    if (state.busy) { toast('正在生成，停止后再删除对话'); return; }
+    if (!window.confirm('删除这个对话？聊天记录会一起删掉。')) return;
+    try {
+      await getJSON('/api/threads/' + id, { method: 'DELETE' });
+      state.threads = state.threads.filter((thread) => thread.id !== id);
+      if (state.threadId === id) {
+        state.threadId = null;
+        state.messages = [];
+        if (state.threads.length) {
+          await openThread(state.threads[0].id);
+        } else {
+          paintMessages(document.getElementById('chat-list'));
+        }
+      }
+      renderThreads();
+    } catch (error) {
+      if (!authExpired(error)) toast('删除对话失败：' + error.message);
+    }
+  }
+
+  async function refreshThreads() {
+    try {
+      const data = await getJSON('/api/threads');
+      state.threads = data.threads || [];
+      renderThreads();
+    } catch (_) { /* 列表刷新失败不影响当前对话 */ }
+  }
+
+  async function logout() {
+    // 生成中登出：先停掉流，别让后台请求在登录页上继续改状态。
+    if (state.abort) state.abort.abort();
+    state.busy = false;
+    state.abort = null;
+    try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (_) { /* 网络失败也清本地 */ }
+    renderAuth('login');
+  }
+
+  // ---------------------------------------------------------------- 主界面
+
+  async function renderChat() {
     const root = view();
     let status = null;
     try {
@@ -745,21 +954,27 @@
 
     if (!status.enabled) {
       root.innerHTML = '<div class="card"><h2>助手还没启用</h2>' +
-        '<div class="notice warn">' + esc(status.hint || '需要配置模型') + '</div></div>';
+        '<div class="notice warn">' + esc(status.hint || '需要配置模型') + '</div>' +
+        '<div class="auth-actions"><button class="ghost sm" id="chat-logout">登出</button></div></div>';
+      document.getElementById('chat-logout').addEventListener('click', logout);
       return;
     }
 
+    const email = (state.account && state.account.email) || '';
     // 问答是主区域，放最上面；关注项是辅助功能，折叠在下面，
     // 不占首屏、也不需要用户先滑过设置才能提问。
     root.innerHTML =
       '<div class="card chat-card">' +
         '<div class="chat-head">' +
-          '<span class="chat-model">' + esc(status.model) + '</span>' +
+          '<span class="chat-model">' + esc(status.model) +
+            (email ? ' · ' + esc(email) : '') + '</span>' +
           '<div class="chat-actions">' +
             '<button class="ghost sm" id="chat-stop" style="display:none" disabled>停止</button>' +
-            '<button class="ghost sm" id="chat-clear">清空对话</button>' +
+            '<button class="ghost sm" id="thread-new">新对话</button>' +
+            '<button class="ghost sm" id="chat-logout">登出</button>' +
           '</div>' +
         '</div>' +
+        '<div class="thread-bar" id="thread-bar"></div>' +
         '<div class="chat-list" id="chat-list"></div>' +
         '<div class="chat-input">' +
           '<textarea id="chat-text" rows="1" maxlength="300" ' +
@@ -819,17 +1034,16 @@
         send();
       });
     });
-    document.getElementById('chat-clear').addEventListener('click', () => {
-      state.messages = [];
-      paintMessages(ui.list);
-      // 只清内存的话，刷新后服务端记忆又会被回填
-      fetch('/api/chat/history', { method: 'DELETE' }).catch(() => {
-        toast('服务端历史没清掉，刷新后可能还会出现');
-      });
-    });
+    document.getElementById('thread-new').addEventListener('click', newThread);
+    document.getElementById('chat-logout').addEventListener('click', logout);
 
-    // 会话记忆：首屏把服务端最近几轮补回来（纯文本气泡）
-    loadHistory();
+    // 首屏：有对话就打开最近一个，没有就留空等首问自动新建。
+    renderThreads();
+    if (!state.threadId && state.threads.length) {
+      openThread(state.threads[0].id);
+    } else {
+      paintMessages(ui.list);
+    }
     // 关注项（形态甲）：打开页面时载入；有历史关注项才显示面板，不提供手动新增
     loadFollows();
 
@@ -850,7 +1064,7 @@
         const statusNode = document.getElementById('follow-status');
         if (statusNode) statusNode.textContent = '已全部标为已读';
       } catch (error) {
-        toast('操作失败：' + error.message);
+        if (!authExpired(error)) toast('操作失败：' + error.message);
       }
     });
 
@@ -860,5 +1074,30 @@
     ui.input.focus();
   }
 
-  render();
+  async function boot() {
+    let me = null;
+    try {
+      const response = await fetch('/api/auth/me');
+      if (response.status === 401) { renderAuth('login'); return; }
+      me = await response.json();
+      if (!response.ok) throw new Error((me && me.detail) || ('失败：' + response.status));
+    } catch (error) {
+      view().innerHTML = '<div class="card"><div class="notice warn">登录状态未知：' +
+        esc(error.message) + '</div></div>';
+      return;
+    }
+    state.account = me.account || null;
+    state.threadId = null;
+    state.messages = [];
+    try {
+      const data = await getJSON('/api/threads');
+      state.threads = data.threads || [];
+    } catch (error) {
+      if (authExpired(error)) return;
+      state.threads = [];
+    }
+    renderChat();
+  }
+
+  boot();
 })();

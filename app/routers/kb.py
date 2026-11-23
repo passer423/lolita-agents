@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from app import bridge, jobs
+from app import accounts, bridge, jobs
 from app.config import settings
 from app.routers.jobs import public as job_public
 from app.services import job_runner
@@ -80,11 +80,13 @@ def rebuild_kb(request: Request, payload: RebuildIn | None = None):
         raise HTTPException(status_code=503, detail="后台队列未运行：请重启服务")
     rebuild = bool(payload.rebuild) if payload is not None else True
     mode = "full" if rebuild else "incremental"
+    account_id = accounts.account_of(request)["id"]
     try:
         job, created = runner.enqueue(
             "kb.rebuild",
-            idempotency_key=f"kb.rebuild:{mode}",
-            payload={"rebuild": rebuild},
+            # 带账号：任务查询按账号隔离，两个账号各自的重建请求不能互相顶掉。
+            idempotency_key=f"kb.rebuild:{mode}:{account_id}",
+            payload={"rebuild": rebuild, "account_id": account_id},
             max_attempts=1,
         )
     except jobs.QueueUnavailable as exc:

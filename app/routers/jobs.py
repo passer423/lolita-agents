@@ -10,11 +10,16 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from app import jobs
+from app import accounts, jobs
 from app.config import settings
 from app.services import job_runner
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+
+
+def _owned(job: dict | None, account_id: int) -> bool:
+    """任务归属看 ``payload.account_id``；没有归属的旧任务对谁都不展示。"""
+    return job is not None and (job.get("payload") or {}).get("account_id") == account_id
 
 
 def public(job: dict) -> dict:
@@ -54,10 +59,14 @@ def list_jobs(
 ) -> dict:
     if status and status not in jobs.STATUSES:
         raise HTTPException(status_code=422, detail=f"未知状态：{status}")
+    account_id = accounts.account_of(request)["id"]
     runner = job_runner.current()
-    records = jobs.list_jobs(
-        settings.db_path, kind=kind, status=status, limit=limit
-    )
+    # 先多取一些再按账号过滤：任务结果里含关注项/索引细节，不能跨账号看到。
+    records = [
+        job
+        for job in jobs.list_jobs(settings.db_path, kind=kind, status=status, limit=200)
+        if _owned(job, account_id)
+    ][:limit]
     return {
         "worker_alive": bool(runner and runner.alive),
         "count": len(records),
@@ -66,9 +75,10 @@ def list_jobs(
 
 
 @router.get("/{job_id}")
-def get_job(job_id: int) -> dict:
+def get_job(job_id: int, request: Request) -> dict:
+    account_id = accounts.account_of(request)["id"]
     job = jobs.get(settings.db_path, job_id)
-    if job is None:
+    if not _owned(job, account_id):
         raise HTTPException(status_code=404, detail="任务不存在")
     return public(job)
 
@@ -76,8 +86,9 @@ def get_job(job_id: int) -> dict:
 @router.post("/{job_id}/retry")
 def retry_job(job_id: int, request: Request) -> JSONResponse:
     """手动重跑：克隆成新任务。中断/失败都不会自动重跑，靠这里显式触发。"""
+    account_id = accounts.account_of(request)["id"]
     job = jobs.get(settings.db_path, job_id)
-    if job is None:
+    if not _owned(job, account_id):
         raise HTTPException(status_code=404, detail="任务不存在")
     if job["status"] in jobs.ACTIVE_STATUSES:
         raise HTTPException(status_code=409, detail="任务还在排队或运行中，不能重试")
@@ -98,9 +109,10 @@ def retry_job(job_id: int, request: Request) -> JSONResponse:
 
 
 @router.delete("/{job_id}")
-def cancel_job(job_id: int) -> dict:
+def cancel_job(job_id: int, request: Request) -> dict:
+    account_id = accounts.account_of(request)["id"]
     job = jobs.get(settings.db_path, job_id)
-    if job is None:
+    if not _owned(job, account_id):
         raise HTTPException(status_code=404, detail="任务不存在")
     if not jobs.cancel(settings.db_path, job_id):
         raise HTTPException(

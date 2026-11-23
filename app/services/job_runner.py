@@ -115,11 +115,18 @@ class JobContext:
 def _handle_follows_scan(job: dict, ctx: JobContext) -> dict:
     from app.services import follow_watch
 
+    account_id = (job.get("payload") or {}).get("account_id")
+    if not isinstance(account_id, int):
+        # 关注项按账号隔离：没有归属的任务无法安全执行（会扫到全库或写错人）。
+        raise RuntimeError("follows.scan 任务缺少 account_id，已拒绝执行")
+
     def progress(fields: dict) -> None:
         ctx.progress(**fields)
 
     try:
-        return follow_watch.scan(ctx.app, progress=progress, stop=ctx.stop_event)
+        return follow_watch.scan(
+            ctx.app, account_id, progress=progress, stop=ctx.stop_event
+        )
     except follow_watch.ScanBusy as exc:
         # 同步入口（?wait=1）正在跑同一件事：按临时故障退避再试，别直接判失败。
         raise JobTransient(str(exc)) from exc

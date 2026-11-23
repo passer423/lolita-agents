@@ -339,14 +339,19 @@ def test_chat_persists_and_reloads_history(client, monkeypatch):
 
     seen = _capture_runs(monkeypatch)
 
-    assert client.post("/api/chat", json={"message": "第一条"}).status_code == 200
+    first = client.post("/api/chat", json={"message": "第一条"})
+    assert first.status_code == 200
+    thread_id = first.json()["conversation_id"]
     assert seen[0] == []
-    assert db.recent_conversations(settings.db_path) == [
-        {"role": "user", "content": "第一条"},
-        {"role": "assistant", "content": "答1"},
+    assert [(m["role"], m["content"]) for m in db.thread_messages(
+        settings.db_path, client.account["id"], thread_id
+    )] == [
+        ("user", "第一条"),
+        ("assistant", "答1"),
     ]
 
-    client.post("/api/chat", json={"message": "第二条"})
+    # 第二轮必须带 conversation_id：不带就是「新开一个对话」，不该偷看上一轮。
+    client.post("/api/chat", json={"message": "第二条", "conversation_id": thread_id})
     assert seen[1] == [
         {"role": "user", "content": "第一条"},
         {"role": "assistant", "content": "答1"},
@@ -367,10 +372,15 @@ def test_chat_strips_citations_from_loaded_history(client, monkeypatch):
     from app import db
     from app.config import settings
 
-    db.add_exchange(settings.db_path, "上一轮", "[1] 装洗衣袋。")
+    thread = db.create_thread(settings.db_path, client.account["id"], "上一轮")
+    db.add_thread_exchange(
+        settings.db_path, client.account["id"], thread["id"], "上一轮", "[1] 装洗衣袋。"
+    )
     seen = _capture_runs(monkeypatch)
 
-    client.post("/api/chat", json={"message": "那这条呢"})
+    client.post(
+        "/api/chat", json={"message": "那这条呢", "conversation_id": thread["id"]}
+    )
 
     assert seen[0][-1] == {"role": "assistant", "content": "装洗衣袋。"}
 
@@ -380,21 +390,23 @@ def test_clear_history_endpoint_removes_memory(client, monkeypatch):
     from app.config import settings
 
     _capture_runs(monkeypatch)
-    client.post("/api/chat", json={"message": "第一条"})
+    first = client.post("/api/chat", json={"message": "第一条"})
+    thread_id = first.json()["conversation_id"]
 
-    response = client.delete("/api/chat/history")
+    response = client.delete("/api/chat/history", params={"conversation_id": thread_id})
 
     assert response.status_code == 200
     assert response.json()["removed"] == 2
-    assert db.recent_conversations(settings.db_path) == []
+    assert db.thread_messages(settings.db_path, client.account["id"], thread_id) == []
 
 
 def test_history_endpoint_returns_messages_in_time_order(client):
     from app import db
     from app.config import settings
 
-    db.add_exchange(settings.db_path, "第一条", "答1")
-    db.add_exchange(settings.db_path, "第二条", "答2")
+    thread = db.create_thread(settings.db_path, client.account["id"], "历史")
+    db.add_thread_exchange(settings.db_path, client.account["id"], thread["id"], "第一条", "答1")
+    db.add_thread_exchange(settings.db_path, client.account["id"], thread["id"], "第二条", "答2")
 
     response = client.get("/api/chat/history")
 
@@ -411,8 +423,9 @@ def test_history_endpoint_honours_limit_and_rejects_overflow(client):
     from app import db
     from app.config import settings
 
-    db.add_exchange(settings.db_path, "第一条", "答1")
-    db.add_exchange(settings.db_path, "第二条", "答2")
+    thread = db.create_thread(settings.db_path, client.account["id"], "历史")
+    db.add_thread_exchange(settings.db_path, client.account["id"], thread["id"], "第一条", "答1")
+    db.add_thread_exchange(settings.db_path, client.account["id"], thread["id"], "第二条", "答2")
 
     assert client.get("/api/chat/history", params={"limit": 2}).json() == {"messages": [
         {"role": "user", "content": "第二条"},
@@ -431,7 +444,10 @@ def test_history_endpoint_keeps_citation_markers_as_text(client):
     from app import db
     from app.config import settings
 
-    db.add_exchange(settings.db_path, "怎么洗", "[1] 装袋，[2] 冷水。")
+    thread = db.create_thread(settings.db_path, client.account["id"], "引用")
+    db.add_thread_exchange(
+        settings.db_path, client.account["id"], thread["id"], "怎么洗", "[1] 装袋，[2] 冷水。"
+    )
 
     assert client.get("/api/chat/history").json()["messages"][-1] == {
         "role": "assistant",
@@ -443,7 +459,8 @@ def test_clear_then_history_endpoint_is_empty(client):
     from app import db
     from app.config import settings
 
-    db.add_exchange(settings.db_path, "第一条", "答1")
+    thread = db.create_thread(settings.db_path, client.account["id"], "历史")
+    db.add_thread_exchange(settings.db_path, client.account["id"], thread["id"], "第一条", "答1")
 
     assert client.delete("/api/chat/history").status_code == 200
 
@@ -464,9 +481,12 @@ def test_stream_persists_final_answer(client, monkeypatch):
     response = client.post("/api/chat/stream", json={"message": "怎么洗"})
 
     assert response.status_code == 200
-    assert db.recent_conversations(settings.db_path) == [
-        {"role": "user", "content": "怎么洗"},
-        {"role": "assistant", "content": "最终[1]"},
+    thread = db.list_threads(settings.db_path, client.account["id"])[0]
+    assert [(m["role"], m["content"]) for m in db.thread_messages(
+        settings.db_path, client.account["id"], thread["id"]
+    )] == [
+        ("user", "怎么洗"),
+        ("assistant", "最终[1]"),
     ]
 
 
@@ -485,6 +505,7 @@ def test_runs_endpoint_returns_latest_records_with_steps(client):
     for index in range(3):
         trace.append(
             {
+                "account_id": client.account["id"],
                 "question": f"q{index}",
                 "steps": [{"kind": "recall", "channel": "own", "ms": 5 + index}],
             },

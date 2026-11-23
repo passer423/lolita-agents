@@ -65,6 +65,7 @@ class ScanBusy(RuntimeError):
 def _recall_with_timeout(
     follow: dict,
     app: AppSettings,
+    account_id: int,
     timeout: float | None,
 ) -> list[dict]:
     """在独立线程里跑召回，最多等 ``timeout`` 秒。
@@ -79,7 +80,7 @@ def _recall_with_timeout(
             evidence = channels.recall(
                 follow["source"],
                 follow["subject"],
-                RecallContext(settings=app),
+                RecallContext(settings=app, account_id=account_id),
             )
             box.put(("ok", evidence))
         except Exception as exc:  # noqa: BLE001 - 原样带回调用方分类
@@ -177,6 +178,7 @@ def _diff_summary(old: list[dict], new: list[dict]) -> str:
 def _check_one(
     follow: dict,
     app: AppSettings,
+    account_id: int,
     *,
     timeout: float | None = None,
 ) -> dict:
@@ -186,7 +188,7 @@ def _check_one(
         "source": follow["source"],
     }
     try:
-        evidence = _recall_with_timeout(follow, app, timeout)
+        evidence = _recall_with_timeout(follow, app, account_id, timeout)
     except RecallTimeout as exc:
         # 超时可能只是这一轮慢；基线保持原样，下次扫描继续和旧快照比。
         return {
@@ -208,7 +210,10 @@ def _check_one(
     items = _items(evidence)
     old = _load_state(follow.get("last_state"))
     db.update_follow_state(
-        app.db_path, follow["id"], json.dumps({"items": items}, ensure_ascii=False)
+        app.db_path,
+        account_id,
+        follow["id"],
+        json.dumps({"items": items}, ensure_ascii=False),
     )
 
     if old is None:
@@ -222,7 +227,7 @@ def _check_one(
     if not summary:
         return {**result, "status": "unchanged", "detail": f"{len(items)} 条，无变化"}
 
-    event = db.add_follow_event(app.db_path, follow["id"], summary)
+    event = db.add_follow_event(app.db_path, account_id, follow["id"], summary)
     return {**result, "status": "updated", "detail": summary, "event_id": event["id"]}
 
 
@@ -236,11 +241,15 @@ def _status_counts(results: list[dict]) -> dict[str, int]:
 
 def scan(
     app: AppSettings,
+    account_id: int,
     *,
     progress: Callable[[dict], None] | None = None,
     stop: threading.Event | None = None,
 ) -> dict:
-    """扫描所有关注项。队列的 ``follows.scan`` 任务直接调这里。
+    """扫描**一个账号**的关注项。队列的 ``follows.scan`` 任务直接调这里。
+
+    关注项按账号隔离，后台任务必须带 ``account_id``：不能拿任务队列当跨账号
+    的旁路，扫到别人的关键词或把结果写进别人的面板。
 
     ``progress`` 每查完一项收到一次快照：``total / done / current / statuses``。
     这些数都是**已经发生的事实**，没有预估、没有百分比——剩余项要多久取决于
@@ -252,7 +261,7 @@ def scan(
     if not _check_lock.acquire(blocking=False):
         raise ScanBusy("已有一轮关注项扫描在进行")
     try:
-        follows = db.list_follows(app.db_path)
+        follows = db.list_follows(app.db_path, account_id)
         deadline = (
             time.monotonic() + app.follow_check_deadline
             if app.follow_check_deadline > 0
@@ -291,7 +300,9 @@ def scan(
                     )
                     if remaining is not None:
                         timeout = remaining if timeout is None else min(timeout, remaining)
-                    results.append(_check_one(follow, app, timeout=timeout))
+                    results.append(
+                        _check_one(follow, app, account_id, timeout=timeout)
+                    )
             if progress is not None:
                 progress(
                     {
@@ -309,28 +320,28 @@ def scan(
                 item["status"] in ("timeout", "skipped") for item in results
             ),
             "interrupted": interrupted,
-            "events": db.list_follow_events(app.db_path, limit=20),
-            "unread": db.unread_follow_events(app.db_path),
+            "events": db.list_follow_events(app.db_path, account_id, limit=20),
+            "unread": db.unread_follow_events(app.db_path, account_id),
         }
     finally:
         _check_lock.release()
 
 
-def check_all(app: AppSettings) -> dict:
+def check_all(app: AppSettings, account_id: int) -> dict:
     """同步入口（``?wait=1`` 与 ``QUEUE_MODE=inline`` 用）。
 
     已有扫描在跑就直接返回 busy，不排队——这里保持旧接口的形状，前端/脚本
     不需要知道队列的存在。
     """
     try:
-        return scan(app)
+        return scan(app, account_id)
     except ScanBusy:
         return {
             "busy": True,
             "checked_at": db.now(),
             "results": [],
             "partial": False,
-            "events": db.list_follow_events(app.db_path, limit=20),
-            "unread": db.unread_follow_events(app.db_path),
+            "events": db.list_follow_events(app.db_path, account_id, limit=20),
+            "unread": db.unread_follow_events(app.db_path, account_id),
         }
 

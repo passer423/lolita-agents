@@ -1,9 +1,18 @@
-"""助手（agent）接口：多路召回 → 一次性结果 + SSE 流式。
+"""助手（agent）接口：多路召回 → 一次性结果 + SSE 流式，外加对话管理。
 
 召回编排在 ``app/agent/graph.py``（LangGraph），这里只负责：
+* 登录账号与对话线程的解析（一个账号下多个对话，互不可见）；
 * 把 HTTP 请求翻译成 graph 的输入；
 * 规划器/写作器的生命周期与错误映射（503 / 502）；
-* SSE 分帧。
+* SSE 分帧与落库。
+
+## 对话怎么存
+
+``chat_threads`` 一行一个对话（标题取首问摘要），``thread_messages`` 存消息。
+首问时客户端不传 ``conversation_id``，服务端建线程并在 SSE **第一帧**发
+``{"type":"conversation","id":..,"title":..}``，前端据此把新对话挂到侧栏。
+之后的轮次带 ``conversation_id``，模型上下文从该线程的消息里取——不再相信
+浏览器传来的历史。
 
 ## 为什么流式用 POST + 手写 SSE，而不是 EventSource
 
@@ -25,7 +34,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from app import db
+from app import accounts, db
 from app.agent import channels, graph, trace
 from app.agent.channels import RecallContext
 from app.agent.planner import DeepSeekPlanner, PlannerUnavailable
@@ -34,14 +43,23 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+threads_router = APIRouter(prefix="/api/threads", tags=["chat"])
 
 # 召回 / 写作都安静超过这个时长就发一个 SSE 注释帧。
 # 反向代理与手机网络会把长时间无字节的连接掐掉；心跳也让前端知道服务还活着。
 HEARTBEAT_SECONDS = 10.0
 
+DEFAULT_THREAD_TITLE = "新对话"
+
 
 def _sse(payload: dict) -> str:
     return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+
+def _title_from(question: str) -> str:
+    """首问摘要当标题：折叠空白、截 30 字（含中文标点），足够辨认。"""
+    text = " ".join((question or "").split())
+    return text[:30] or DEFAULT_THREAD_TITLE
 
 
 class ChatTurn(BaseModel):
@@ -51,10 +69,11 @@ class ChatTurn(BaseModel):
 
 class ChatIn(BaseModel):
     message: str = Field(..., min_length=1, max_length=300)
-    # 多轮：``None`` = 服务端从会话记忆里补最近几轮；显式 ``[]`` = 开新对话，
-    # 不加载旧上下文（清空请用 DELETE /api/chat/history）。
+    # 服务端会话记忆优先：带了 conversation_id 就从该对话取最近几轮。
+    # 显式传 history 仍支持（老客户端 / 测试），但不会再被浏览器端当作唯一来源。
     # **编号只在单轮内有效**：落库与回填时都会剥掉 [n]（见 sanitize_history）。
     history: list[ChatTurn] | None = Field(default=None, max_length=16)
+    conversation_id: int | None = Field(default=None, ge=1)
 
     @field_validator("message")
     @classmethod
@@ -92,42 +111,76 @@ def _make_writer(app=settings):
     return DeepSeekWriter(app)
 
 
-def _history_of(payload: ChatIn, app=settings) -> list[dict]:
-    """客户端没传历史（``None``）时从服务端会话记忆补最近几轮。
+def _ensure_thread(account: dict, conversation_id: int | None, question: str) -> dict:
+    """拿到本轮要写入的对话；``None`` 时新建，标题直接取首问摘要。
 
-    显式传空列表是「开新对话」，不是「没传」——否则用户永远摆脱不掉旧上下文。
-    两条路径都要过 ``sanitize_history``：落库的历史同样可能带上一轮的 [n]。
+    指定了别人的 conversation_id 一律 404：不能让它变成"猜 id 就能读别人会话"。
     """
-    if payload.history is None:
-        raw = db.recent_conversations(app.db_path, limit=MAX_HISTORY_TURNS)
-    else:
+    if conversation_id is None:
+        return db.create_thread(settings.db_path, account["id"], _title_from(question))
+    thread = db.get_thread(settings.db_path, account["id"], conversation_id)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="对话不存在或不属于当前账号")
+    if not thread["title"] or thread["title"] == DEFAULT_THREAD_TITLE:
+        db.set_thread_title(settings.db_path, account["id"], thread["id"], _title_from(question))
+        thread["title"] = _title_from(question)
+    return thread
+
+
+def _history_of(payload: ChatIn, account: dict, thread: dict) -> list[dict]:
+    """模型上下文：优先服务端线程，显式 ``history``（含 ``[]``）则照用。
+
+    显式传空列表是「本轮不带上下文」，不是「没传」——保留这个语义是为了
+    兼容老客户端；新前端只传 conversation_id，由服务端取历史。
+    两条路径都要过 ``sanitize_history``：历史里可能带上一轮的 [n]。
+    """
+    if payload.history is not None:
         raw = [turn.model_dump() for turn in payload.history]
+    else:
+        raw = db.thread_messages(
+            settings.db_path, account["id"], thread["id"], limit=MAX_HISTORY_TURNS
+        )
     return sanitize_history(raw)
 
 
-def _remember(question: str, answer: str, app=settings) -> None:
-    """把本轮问答写进会话记忆。失败只 warning：记不住不等于答不了。"""
+def _remember(account: dict, thread: dict, question: str, answer: str) -> None:
+    """把本轮问答写进线程。失败只 warning：记不住不等于答不了。"""
     answer = (answer or "").strip()
     if not answer:
         return
     try:
-        db.add_exchange(
-            app.db_path,
+        db.add_thread_exchange(
+            settings.db_path,
+            account["id"],
+            thread["id"],
             question,
             answer,
-            keep=app.conversation_retention_messages,
+            keep=settings.conversation_retention_messages,
         )
     except Exception as exc:  # noqa: BLE001 - 持久化失败不能影响已经给出的回答
-        logger.warning("会话记忆写入失败（不影响回答）：%s", exc)
+        logger.warning("对话写入失败（不影响回答）：%s", exc)
 
 
-def _ctx(app=settings) -> RecallContext:
-    return RecallContext(settings=app)
+def _ctx(account: dict) -> RecallContext:
+    return RecallContext(settings=settings, account_id=account["id"])
+
+
+def _thread_payload(thread: dict) -> dict:
+    return {
+        "id": thread["id"],
+        "title": thread["title"] or DEFAULT_THREAD_TITLE,
+        "created_at": thread["created_at"],
+        "updated_at": thread["updated_at"],
+        "message_count": thread.get("message_count", 0),
+    }
 
 
 @router.get("/status")
 def chat_status() -> dict:
-    """前端靠它决定"能不能聊"、哪些召回通道开着。"""
+    """前端靠它决定"能不能聊"、哪些召回通道开着。
+
+    这是公开接口（登录页也要判断模型是否配好），不含任何用户数据。
+    """
     return {
         "enabled": settings.llm_enabled,
         "model": settings.llm_model if settings.llm_enabled else "",
@@ -147,7 +200,15 @@ def chat_status() -> dict:
 
 
 @router.post("")
-def chat(payload: ChatIn) -> dict:
+def chat(payload: ChatIn, request: Request) -> dict:
+    account = accounts.account_of(request)
+    # 先校验对话归属，再检查模型是否配好：拿别人的 id 应该 404，
+    # 而不是因为服务没配 key 被 503 盖住（也避免把「存在性」泄露成另一种错）。
+    thread = (
+        _ensure_thread(account, payload.conversation_id, payload.message)
+        if payload.conversation_id is not None
+        else None
+    )
     try:
         planner = _make_planner(settings)
     except PlannerUnavailable as exc:
@@ -160,24 +221,31 @@ def chat(payload: ChatIn) -> dict:
     except PlannerUnavailable:
         writer = None
 
+    if thread is None:
+        thread = _ensure_thread(account, None, payload.message)
+    history = _history_of(payload, account, thread)
+
     try:
         result = graph.run(
             payload.message,
-            ctx=_ctx(settings),
+            ctx=_ctx(account),
             planner=planner,
             writer=writer,
-            history=_history_of(payload),
+            history=history,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    _remember(payload.message, str(result.get("answer") or ""))
+    _remember(account, thread, payload.message, str(result.get("answer") or ""))
+    accounts.maybe_prune(settings)
+    result["conversation_id"] = thread["id"]
+    result["conversation_title"] = thread["title"]
     return result
 
 
 @router.post("/stream")
 async def chat_stream(payload: ChatIn, request: Request):
-    """SSE：召回阶段逐通道推进度，再推答案增量，最后推 final。
+    """SSE：先发 conversation 帧，再逐通道进度、答案增量，最后 final。
 
     图的消费放在后台线程（``graph.stream`` 是同步生成器），事件经
     ``asyncio.Queue`` 回到事件循环：这样等待期间还能发心跳、还能
@@ -186,6 +254,12 @@ async def chat_stream(payload: ChatIn, request: Request):
     客户端断开（点「停止」或关页面）时置位 ``stop``：graph 在下一个 chunk
     边界收尾，不再消费上游结果，也不再有线程继续逐字拉模型。
     """
+    account = accounts.account_of(request)
+    thread = (
+        _ensure_thread(account, payload.conversation_id, payload.message)
+        if payload.conversation_id is not None
+        else None
+    )
     try:
         planner = _make_planner(settings)
     except PlannerUnavailable as exc:
@@ -196,9 +270,15 @@ async def chat_stream(payload: ChatIn, request: Request):
     except PlannerUnavailable:
         writer = None
 
-    history = _history_of(payload)
+    if thread is None:
+        thread = _ensure_thread(account, None, payload.message)
+    history = _history_of(payload, account, thread)
+    thread_payload = _thread_payload(thread)
 
     async def generate():
+        # 第一帧就把对话身份告诉前端：新建时它还没有 id，靠这帧挂到侧栏。
+        yield _sse({"type": "conversation", **thread_payload})
+
         loop = asyncio.get_running_loop()
         events: asyncio.Queue = asyncio.Queue()
         stop = threading.Event()
@@ -210,7 +290,7 @@ async def chat_stream(payload: ChatIn, request: Request):
             try:
                 for event in graph.stream(
                     payload.message,
-                    ctx=_ctx(settings),
+                    ctx=_ctx(account),
                     planner=planner,
                     writer=writer,
                     history=history,
@@ -218,7 +298,9 @@ async def chat_stream(payload: ChatIn, request: Request):
                 ):
                     # 只在拿到 final 后落库：中途断开的半截回答不该进入下一轮上下文。
                     if event.get("type") == "final":
-                        _remember(payload.message, str(event.get("answer") or ""))
+                        _remember(
+                            account, thread, payload.message, str(event.get("answer") or "")
+                        )
                     deliver(("event", event))
                     if stop.is_set():
                         break
@@ -251,6 +333,8 @@ async def chat_stream(payload: ChatIn, request: Request):
                 yield _sse(value)
         finally:
             stop.set()
+            # 流结束（成功或失败）时顺手做一次节流清理；不阻塞收尾。
+            accounts.maybe_prune(settings)
 
     return StreamingResponse(
         generate(),
@@ -266,29 +350,87 @@ async def chat_stream(payload: ChatIn, request: Request):
 
 @router.get("/history")
 def chat_history(
-    limit: int = Query(MAX_HISTORY_TURNS, ge=1, le=MAX_HISTORY_TURNS)
+    request: Request,
+    limit: int = Query(MAX_HISTORY_TURNS, ge=1, le=MAX_HISTORY_TURNS),
+    conversation_id: int | None = Query(None, ge=1),
 ) -> dict:
-    """最近几轮会话记忆，按时间正序。
+    """某个对话最近的几条消息，按时间正序。
 
+    不传 ``conversation_id`` 时取当前账号最近的对话（兼容老前端）。
     只回 ``role``/``content``：历史消息没有证据与召回过程，前端按普通文本渲染，
-    ``[n]`` 不做成可点角标。上限与模型上下文共用 ``MAX_HISTORY_TURNS``，
-    避免前端看到模型看不到的历史。
+    ``[n]`` 不做成可点角标。
     """
-    return {"messages": db.recent_conversations(settings.db_path, limit=limit)}
+    account = accounts.account_of(request)
+    if conversation_id is None:
+        latest = db.latest_thread(settings.db_path, account["id"])
+        if latest is None:
+            return {"messages": []}
+        conversation_id = latest["id"]
+    messages = db.thread_messages(
+        settings.db_path, account["id"], conversation_id, limit=limit
+    )
+    # 保持老响应形状（role/content）：created_at 是内部字段，前端回填不需要。
+    return {
+        "messages": [{"role": item["role"], "content": item["content"]} for item in messages]
+    }
 
 
 @router.delete("/history")
-def clear_history() -> dict:
-    """清空服务端会话记忆（= 开新对话）。关注项与排查轨迹不受影响。"""
-    return {"removed": db.clear_conversations(settings.db_path)}
+def clear_history(
+    request: Request, conversation_id: int | None = Query(None, ge=1)
+) -> dict:
+    """删掉一个对话（传 id）或本账号全部对话（不传）。关注项不受影响。"""
+    account = accounts.account_of(request)
+    if conversation_id is not None:
+        return {"removed": db.delete_thread(settings.db_path, account["id"], conversation_id)}
+    return {"removed": db.clear_threads(settings.db_path, account["id"])}
 
 
 @router.get("/runs")
-def chat_runs(limit: int = Query(10, ge=1, le=100)) -> dict:
-    """最近几次 run 的轨迹。排查"它为什么没找到"靠这个，而不是靠猜。
-
-    轨迹里是完整的原始问题与回答，属于隐私数据——本服务默认只监听本机，
-    按 README 用 Tailscale 开给手机时请自行注意。
-    """
-    records = trace.tail(limit, settings)
+def chat_runs(request: Request, limit: int = Query(10, ge=1, le=100)) -> dict:
+    """最近几次 run 的轨迹，只含当前账号。排查"它为什么没找到"靠这个。"""
+    account = accounts.account_of(request)
+    records = trace.tail(limit, settings, account_id=account["id"])
     return {"count": len(records), "runs": records}
+
+
+# ------------------------------------------------------------------ 对话管理
+
+
+@threads_router.get("")
+def list_threads(request: Request) -> dict:
+    account = accounts.account_of(request)
+    threads = db.list_threads(settings.db_path, account["id"])
+    return {"threads": [_thread_payload(item) for item in threads]}
+
+
+@threads_router.post("", status_code=201)
+def create_thread(request: Request) -> dict:
+    account = accounts.account_of(request)
+    thread = db.create_thread(settings.db_path, account["id"], DEFAULT_THREAD_TITLE)
+    accounts.maybe_prune(settings)
+    return {"thread": _thread_payload(thread)}
+
+
+@threads_router.get("/{thread_id}/messages")
+def thread_messages(
+    thread_id: int,
+    request: Request,
+    limit: int = Query(db.KEEP_MESSAGES_PER_THREAD, ge=1, le=db.KEEP_MESSAGES_PER_THREAD),
+) -> dict:
+    account = accounts.account_of(request)
+    thread = db.get_thread(settings.db_path, account["id"], thread_id)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="对话不存在或不属于当前账号")
+    messages = db.thread_messages(
+        settings.db_path, account["id"], thread_id, limit=limit
+    )
+    return {"thread": _thread_payload(thread), "messages": messages}
+
+
+@threads_router.delete("/{thread_id}")
+def remove_thread(thread_id: int, request: Request) -> dict:
+    account = accounts.account_of(request)
+    if db.get_thread(settings.db_path, account["id"], thread_id) is None:
+        raise HTTPException(status_code=404, detail="对话不存在或不属于当前账号")
+    return {"removed": db.delete_thread(settings.db_path, account["id"], thread_id)}

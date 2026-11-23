@@ -16,7 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import __version__, bridge, db
+from app import __version__, accounts, bridge, db
 from app import auth as access_control
 from app.agent import channels
 from app.config import settings
@@ -76,6 +76,14 @@ def _warm_models() -> None:
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     db.init_db(settings.db_path)
+    try:
+        removed = db.prune_user_data(settings.db_path)
+        if any(removed.values()):
+            logger.info(
+                "启动清理：对话 %s 个、登录会话 %s 个", removed["threads"], removed["sessions"]
+            )
+    except Exception as exc:  # noqa: BLE001 - 清理失败不该挡住服务启动
+        logger.warning("启动清理失败（不影响服务）：%s", exc)
     logger.info("数据目录：%s", settings.data_dir)
     logger.info("自有知识库索引：%s", settings.kb_index_dir)
 
@@ -129,12 +137,17 @@ app = FastAPI(
     default_response_class=UTF8JSONResponse,
 )
 
+# 账号门禁：除白名单外的 /api/* 一律要求登录（见 app/accounts.py）。
+# 放在 AccessControl 内层：先过可选的 API key/JWT，再过账号会话。
+app.add_middleware(accounts.AccountGate, settings=settings)
 # 可选访问控制：默认 AUTH_MODE=off，行为与以前完全一致；配置错误会在构造期
 # 直接抛错，而不是静默放行或静默拒绝。
 app.add_middleware(access_control.AccessControl, settings=settings)
 
 # 1) API 先注册
+app.include_router(accounts.router)
 app.include_router(chat.router)
+app.include_router(chat.threads_router)
 app.include_router(follows.router)
 app.include_router(kb.router)
 app.include_router(jobs.router)

@@ -92,7 +92,7 @@ python -m app.main            # http://127.0.0.1:8787
 
 1. 改 `.env` 的 `LOLITA_RAG_ROOT`；
 2. `python scripts/build_kb_index.py --rebuild` 重建自有索引；加 `--notify` 会顺带通知正在跑的服务重载；
-3. 起服务后看 `GET /api/kb/status`：每份索引的 `ready` / `chunks` / `built_at` / `error`，以及上游的 `root` / `exists` 都在这里；
+3. 起服务后看 `GET /api/health`：每份索引的 `ready` / `chunks` / `built_at` / `error` 都在这里（公开探针，不用登录）；更细的 `GET /api/kb/status` 需要登录后查看；
 4. 不想重启服务时 `POST /api/kb/reload` 手动重载（`build_kb_index.py --notify` 自动做这一步）。
 
 `real` 是可选的：上游没有索引时该通道返回空，不影响其它通道；但 `own` 的构建本身也依赖上游代码，所以 `LOLITA_RAG_ROOT` 不能省。
@@ -104,8 +104,9 @@ lolita-agents/
 ├── app/
 │   ├── config.py          应用配置（DATA_DIR / 召回与补查开关）
 │   ├── bridge.py          ★ 与上游管线的桥：search_kb（own）/ search_real（real）双索引
-│   ├── db.py              SQLite：follows / follow_events / conversations / meta
-│   ├── main.py            FastAPI 入口（chat / follows / kb 路由 + 静态挂载）
+│   ├── db.py              SQLite：accounts / sessions / 对话线程 / follows / meta
+│   ├── accounts.py        邮箱账号、scrypt 密码哈希、cookie 会话与全站账号门禁
+│   ├── main.py            FastAPI 入口（auth / chat / follows / kb 路由 + 静态挂载）
 │   ├── agent/             ★ LangGraph 编排 + 召回 + 规划 + 写作
 │   │   ├── graph.py         StateGraph：核心通道扇出 → route → 补查扇出 → answer → verify
 │   │   ├── channels.py      六通道统一入口 recall(channel, question, ctx)
@@ -115,7 +116,7 @@ lolita-agents/
 │   │   └── trace.py         轨迹落盘
 │   ├── services/          web_search / xhs_search / xhs_spider / imagefetch /
 │   │                      follow_watch / lolibrary_online
-│   ├── routers/           chat（问答）/ follows（关注项）/ kb（索引状态与重载）
+│   ├── routers/           chat（问答与对话）/ follows（关注项）/ kb（索引状态与重载）
 │   └── static/            index.html + chat.js（单页聊天，零依赖）
 ├── content/kb/            ★ 自有知识库（纯文本 md，进 git）
 ├── data/                  ← 不进 git，运行时数据（kbindex / lolibrary / app.db / traces）
@@ -192,21 +193,32 @@ START ──fanout──▶ own ─┐
 
 ## 关注项：页面内检查（形态甲）
 
-- 存储：`follows`（关键词 + 来源 + 上次快照）与 `follow_events`（更新事件 + 未读标记）。
+- 存储：`follows`（账号 + 关键词 + 来源 + 上次快照）与 `follow_events`（更新事件 + 未读标记），全部按 `account_id` 隔离；旧的无归属行保留但任何账号都查不到。
 - 入口：**不固定展示、不提供手动新增**。只有当用户问的是未发售 / 预约中的裙子，回答下方才会出现「持续关注」提议（`follow_suggestion`：问题命中交易/上新意图 + 问题或证据含预约/发售字眼）；用户点按钮才建关注项，面板也才出现。
 - 触发：**每天第一次打开页面时自动检查一次**（本地日期记在 localStorage），页面一直开着也不会重复请求；随时可手动「检查更新」。**后端没有常驻定时任务**，页面关掉就停——这是形态甲的明确取舍，不假装实时。
 - 判定：第一次检查只记基线；之后新增 / 内容变化 / 减少各写一条事件。
 - 通道不可用 **≠** 没有更新：不写事件、不覆盖基线，界面显示原因（与「skip 不是 empty」同一条纪律）。
-- 接口：`GET/POST /api/follows`、`DELETE /api/follows/{id}`、`POST /api/follows/check`、`POST /api/follows/events/read`。
+- 接口：`GET/POST /api/follows`、`DELETE /api/follows/{id}`、`POST /api/follows/check`、`POST /api/follows/events/read`。全部要求登录，只返回/操作当前账号的关注项。
 
-## 会话记忆
+## 账号与对话
 
-- 存储：`data/app.db` 的 `conversations` 表，一问一答同事务写入。
-- 回填：请求**不传** `history` 时，服务端自动补最近几轮；显式传 `history: []` 表示开新对话，不加载旧上下文。
-- 编号：落库与回填都会剥掉 assistant 内容里的 `[n]`——编号只在单轮内有效，上一轮的 `[1]` 指向的是上一轮证据。
-- 保留：只留最近 `CONVERSATION_RETENTION_MESSAGES` 条消息（默认 100 条 ≈ 50 轮，一问一答算 2 条），超出即删最旧的；设为 `<=0` 关闭自动清理。
-- 清理：`DELETE /api/chat/history` 清空会话记忆（返回删除条数），不影响关注项与排查轨迹。
-- 只落最终回答：流式回答中途断开时不写库，半截回答不会进入下一轮上下文。
+- **注册 / 登录**：`POST /api/auth/register`、`/api/auth/login`、`/api/auth/logout`，`GET /api/auth/me`。邮箱 + 密码，密码只存 `hashlib.scrypt`（每用户随机 salt，格式 `scrypt$N$r$p$salt$hash`），不存明文、不做可逆加密。
+- **登录态**：服务端会话。cookie `lolita_session` 是随机 token，库里只存其 SHA-256；`HttpOnly` + `SameSite=Lax`，HTTPS（或 `X-Forwarded-Proto: https`）时加 `Secure`。绝对有效期 30 天，刷新页面不用重登；登出或过期后服务端删/拒掉该 token，接口返回 401。
+- **门禁**：默认拒绝。除 `/api/health`、`/api/chat/status` 与 `/api/auth/*` 外，所有 `/api/*` 都由 `AccountGate` 中间件校验 cookie，未登录直接 401；不是前端藏按钮。
+- **多对话**：`GET/POST /api/threads`、`GET /api/threads/{id}/messages`、`DELETE /api/threads/{id}`。标题取首问摘要（折叠空白、截 30 字）。流式请求第一帧返回 `{"type":"conversation","id":...}`，前端据此把新对话挂到侧栏。
+- **上下文**：带 `conversation_id` 的请求从该线程取最近 `MAX_HISTORY_TURNS` 条；服务端不会跨线程/跨账号取历史。显式传 `history` 仍兼容，但新前端不再传。
+- **编号**：落库与回填都会剥掉 assistant 内容里的 `[n]`——编号只在单轮内有效。
+- **只落最终回答**：流式回答中途断开时不写库，半截回答不会进入下一轮上下文。
+- **保留与清理**（`data/app.db`，WAL）：
+  - 每账号保留最近 20 个对话，每对话保留最近 100 条消息；
+  - 全库最多 500 个对话，超过按 `updated_at` 删最旧；
+  - 90 天未更新的对话在启动时、以及写入后节流（≥5 分钟一次）清理；
+  - 过期登录会话删除，每账号只留最近 10 个会话；
+  - `DELETE /api/chat/history` 可清一个对话（带 `conversation_id`）或本账号全部对话，不影响关注项。
+- **开销**：账号行约 200 B；登录会话行约 200 B（每账号 ≤10）；一条消息按 1–2 KB 估，单账号上限 20×100 条 ≈ 2–4 MB，全库上限 500 个对话 ≈ 50–100 MB（含 WAL 的临时膨胀）。SQLite 每请求开关连接，常驻内存主要是页缓存（默认几 MB），不随账号数线性增长。
+- **旧数据**：早期全局 `conversations` 表与 `follows.account_id IS NULL` 的行保留在库里，代码不再读写，也不会展示给任何账号。
+- **未做**：邮箱验证、找回密码、第三方登录、账号注销、管理后台。注册是开放的，公网部署请用 nginx 限制 `/api/auth/register` 与 `/api/auth/login` 的频率。
+- **nginx 限流**：`deploy/nginx/limits.conf` 新增 `auth_req`（登录/注册 5r/m/IP，`burst=3`，超出 429）；`/api/chat` 仍是 1 并发 + 6r/m/IP。对话列表、切换、删除走 `/api/threads`，不吃聊天配额。多个账号共用一个出口 IP 时共享配额（2C2G 上这是保护内存的取舍）；演示多人同网时可把 `limit_conn` 调到 2、`rate` 调到 12r/m，代价是内存翻倍。
 
 ## 边界与纪律
 

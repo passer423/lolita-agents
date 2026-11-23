@@ -65,9 +65,21 @@ def data_dir():
 
 @pytest.fixture()
 def client(data_dir):
+    """已登录的客户端。
+
+    账号门禁是默认拒绝的：除白名单外所有 /api/* 都必须带会话。这里统一注册
+    一个测试账号并复用 TestClient 的 cookie jar，业务用例不必每个都写登录。
+    ``client.account`` 暴露当前账号，便于直接造线程/任务数据。
+    """
     from fastapi.testclient import TestClient
 
     from app.main import app
 
     with TestClient(app) as test_client:
+        response = test_client.post(
+            "/api/auth/register",
+            json={"email": "tester@example.com", "password": "test-password-123"},
+        )
+        assert response.status_code == 201, response.text
+        test_client.account = response.json()["account"]
         yield test_client

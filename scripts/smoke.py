@@ -1,6 +1,14 @@
 """端到端冒烟：确认服务起得来、关键接口还在。
 
-覆盖首页、``/api/chat/status``、未配 key 时 ``/api/chat`` 的 503、``/api/follows``。
+覆盖首页、``/api/chat/status``、账号门禁（未登录 401）、以及登录后的
+``/api/threads`` / ``/api/chat`` 503 / ``/api/follows``。
+账号门禁是默认拒绝的，所以要用真实账号测登录后的路径，先设置：
+
+    $env:SMOKE_EMAIL = "you@example.com"
+    $env:SMOKE_PASSWORD = "..."
+    python scripts/smoke.py
+
+不设置这两个变量时，只验证「未登录一律 401」和公开探针。
 用法（先另开一个终端把服务跑起来）：
 
     python -m app.main
@@ -25,7 +33,8 @@ import urllib.request
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8787"
 TIMEOUT_SECONDS = 15.0
-HOME_TITLE = "<title>Lolita 问答助手</title>"
+HOME_TITLE = "<title>Lo裙问答助手</title>"
+COOKIE = ""
 
 
 def request(
@@ -39,6 +48,8 @@ def request(
     url = base_url.rstrip("/") + path
     body = None
     headers = {"Accept": "application/json"}
+    if COOKIE:
+        headers["Cookie"] = COOKIE
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -84,9 +95,50 @@ def check_chat_status(base_url: str) -> dict:
     return data
 
 
+def login(base_url: str) -> bool:
+    """用 SMOKE_EMAIL / SMOKE_PASSWORD 登录，拿到会话 cookie。没配置就返回 False。"""
+    global COOKIE
+    email = os.environ.get("SMOKE_EMAIL", "").strip()
+    password = os.environ.get("SMOKE_PASSWORD", "")
+    if not email or not password:
+        return False
+    url = base_url.rstrip("/") + "/api/auth/login"
+    body = json.dumps({"email": email, "password": password}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as response:
+            raw = response.headers.get("Set-Cookie") or ""
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(
+            f"登录失败：{exc.code} {exc.read().decode('utf-8', 'replace')[:200]}"
+        ) from exc
+    COOKIE = raw.split(";", 1)[0]
+    return bool(COOKIE)
+
+
+def check_threads(base_url: str) -> str:
+    path = "/api/threads"
+    status, body = request(base_url, path)
+    if not COOKIE:
+        assert status == 401, f"未登录期望 401，实际 {status}"
+        return "401（未登录被账号门禁挡住，符合预期）"
+    assert status == 200, f"期望 200，实际 {status}"
+    data = parse_json(body, path)
+    assert isinstance(data.get("threads"), list), "缺少 threads 数组"
+    return f"200，{len(data['threads'])} 个对话"
+
+
 def check_chat_503(base_url: str) -> str:
     path = "/api/chat"
     status, body = request(base_url, path, method="POST", payload={"message": "冒烟测试"})
+    if not COOKIE:
+        assert status == 401, f"未登录期望 401，实际 {status}"
+        return "401（未登录；配置 SMOKE_EMAIL/SMOKE_PASSWORD 可验证 503）"
     assert status == 503, f"未配 key 时期望 503，实际 {status}"
     data = parse_json(body, path)
     assert data.get("detail"), "503 响应缺少 detail（没有告诉调用方缺什么）"
@@ -96,6 +148,9 @@ def check_chat_503(base_url: str) -> str:
 def check_follows(base_url: str) -> str:
     path = "/api/follows"
     status, body = request(base_url, path)
+    if not COOKIE:
+        assert status == 401, f"未登录期望 401，实际 {status}"
+        return "401（未登录，关注项不对外可见）"
     assert status == 200, f"期望 200，实际 {status}"
     data = parse_json(body, path)
     follows = data.get("follows")
@@ -120,6 +175,10 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.reconfigure(encoding="utf-8")
 
     print(f"冒烟目标：{base_url}")
+    if login(base_url):
+        print("已登录：后续受保护接口按登录态检查")
+    else:
+        print("未配置 SMOKE_EMAIL / SMOKE_PASSWORD：只验证公开接口与未登录 401")
     failures = 0
 
     def run(label: str, func) -> None:
@@ -148,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         run("未配置 key 时 /api/chat 返回 503", lambda: check_chat_503(base_url))
 
+    run("/api/threads 账号门禁", lambda: check_threads(base_url))
     run("/api/follows", lambda: check_follows(base_url))
 
     if failures:

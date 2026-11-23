@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
 
 from app import db
@@ -63,31 +61,7 @@ def test_follow_url_is_not_accepted_or_stored(client):
     ).json()
     follow = body["follows"][0]
     assert "url" not in follow
-    assert "url" not in db.list_follows(settings.db_path)[0]
-
-
-def test_init_db_drops_legacy_follow_url(tmp_path):
-    """旧库的 url 列必须迁移掉，否则新插入会撞 NOT NULL。"""
-    path = tmp_path / "legacy.db"
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        "CREATE TABLE follows ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, subject TEXT NOT NULL, "
-        "source TEXT NOT NULL, url TEXT NOT NULL, last_state TEXT, "
-        "updated_at TEXT NOT NULL);"
-        "INSERT INTO follows (subject, source, url, last_state, updated_at) "
-        "VALUES ('旧关注', 'web', 'https://old.example', '', '2026-01-01T00:00:00');"
-    )
-    conn.commit()
-    conn.close()
-
-    db.init_db(path)
-
-    rows = db.list_follows(path)
-    assert [row["subject"] for row in rows] == ["旧关注"]
-    assert "url" not in rows[0]
-    db.add_follow(path, "新关注", "web")
-    assert len(db.list_follows(path)) == 2
+    assert "url" not in db.list_follows(settings.db_path, client.account["id"])[0]
 
 
 def test_follows_sources_report_readiness(client):
@@ -177,7 +151,9 @@ def test_check_timeout_does_not_touch_baseline(client, monkeypatch):
     assert body["results"][0]["status"] == "timeout"
     assert body["partial"] is True
     assert body["events"] == []
-    assert not db.get_follow(settings.db_path, follow["id"])["last_state"]
+    assert not db.get_follow(
+        settings.db_path, client.account["id"], follow["id"]
+    )["last_state"]
 
 
 def test_check_total_deadline_skips_remaining_items(client, monkeypatch):

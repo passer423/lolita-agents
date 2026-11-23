@@ -256,7 +256,7 @@ def test_retry_endpoint_requeues_failed_job(client, monkeypatch):
         settings.db_path,
         "kb.rebuild",
         idempotency_key="kb.rebuild:full",
-        payload={"rebuild": True},
+        payload={"rebuild": True, "account_id": client.account["id"]},
     )
     jobs.claim(settings.db_path)
     jobs.fail(settings.db_path, job["id"], "失败", retryable=False)

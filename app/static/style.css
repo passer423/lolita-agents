@@ -419,6 +419,74 @@ ul.plain li { margin-bottom: 2px; }
 .chat-actions { display: flex; align-items: center; gap: 8px; }
 .chat-model { font-size: 12px; color: var(--muted); }
 
+/* 对话切换条：一条对话一个胶囊，横向滚动；窄屏也不换行占高度 */
+.thread-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 0 4px;
+  border-bottom: 1px dashed var(--line);
+  scrollbar-width: none;
+}
+.thread-bar::-webkit-scrollbar { display: none; }
+.thread-empty { flex: 0 0 auto; font-size: 12px; }
+.thread-pill {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  max-width: 220px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  overflow: hidden;
+}
+.thread-pill.on { border-color: var(--accent); background: var(--accent-soft); }
+.thread-open {
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink);
+  padding: 6px 2px 6px 12px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.thread-pill.on .thread-open { color: var(--accent); font-weight: 600; }
+.thread-del {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 10px 1px 4px;
+  cursor: pointer;
+}
+.thread-del:hover { color: var(--accent); }
+
+/* 登录 / 注册：跟聊天卡片同一套外观，不另起一页 */
+.auth-card { max-width: 420px; margin: 8vh auto 0; gap: 12px; }
+.auth-title { margin: 2px 0 0; font-size: 18px; }
+.auth-card .hint { line-height: 1.6; }
+.auth-tabs { display: flex; gap: 8px; }
+.auth-field { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); }
+.auth-field input {
+  font: inherit;
+  font-size: 15px;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+}
+.auth-submit { width: 100%; padding: 11px 16px; }
+.auth-msg { min-height: 18px; color: var(--accent); }
+.auth-actions { display: flex; justify-content: flex-end; }
+
 /* 问答是主页面的主区域：给足首屏高度，输入框始终在卡片底部可见 */
 .chat-list {
   min-height: min(42vh, 380px);
@@ -707,6 +775,12 @@ ul.plain li { margin-bottom: 2px; }
   .follow-event .head { font-size: 11.5px; }
   .follow-actions { gap: 8px; }
 
+  /* 登录页不居中留白，整屏可用；输入框 16px 避免 iOS 自动放大 */
+  .auth-card { max-width: none; margin: 0; }
+  .auth-card .auth-field input { font-size: 16px; }
+  .thread-pill { max-width: 72vw; }
+  .thread-open { max-width: 58vw; }
+
   .toast { max-width: 88vw; }
 }
 
@@ -723,6 +797,8 @@ ul.plain li { margin-bottom: 2px; }
   }
   button.ghost.sm, a.ghost.sm { min-height: 38px; }
   .chat-input .primary { min-height: 46px; }
+  .thread-open { min-height: 40px; padding-top: 0; padding-bottom: 0; }
+  .thread-del { min-width: 34px; }
 
   /* 引用编号视觉不变，热区向四周扩 9px */
   .cite::after {
