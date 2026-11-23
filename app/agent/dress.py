@@ -199,8 +199,23 @@ class DressQuery:
 # --------------------------------------------------------------------- 数据加载
 
 
+def scope_regions(app: AppSettings | None = None) -> set[str] | None:
+    """当前品牌范围允许的地区；None 表示不限制（BRAND_SCOPE=all）。"""
+    app = app or default_settings
+    scope = str(getattr(app, "brand_scope", "jp") or "jp").strip().lower()
+    if scope in ("all", "*", "any"):
+        return None
+    if scope == "jp":
+        return {"JP"}
+    return {scope.upper()}
+
+
 def load_brands(app: AppSettings | None = None) -> list[Brand]:
-    """读品牌/地区注册表；文件缺失或坏掉返回空表，不阻断问答。"""
+    """读品牌/地区注册表；文件缺失或坏掉返回空表，不阻断问答。
+
+    BRAND_SCOPE=jp 时只返回日牌；国牌条目仍留在 brands.json 里，
+    只是不参与识别与检索。
+    """
     app = app or default_settings
     path = app.brands_path
     try:
@@ -231,6 +246,9 @@ def load_brands(app: AppSettings | None = None) -> list[Brand]:
                 xhs_account_name=str(account.get("nickname") or "").strip(),
             )
         )
+    allowed = scope_regions(app)
+    if allowed is not None:
+        brands = [brand for brand in brands if brand.region in allowed]
     return brands
 
 
@@ -250,24 +268,48 @@ def _read_alias_file(path) -> list[dict]:
     return [item for item in entries or [] if isinstance(item, dict)]
 
 
+def _out_of_scope_brand_ids(app: AppSettings) -> set[str]:
+    """当前范围外（默认国牌）的品牌 id：用在别名表过滤上，文件本身不动。"""
+    allowed = scope_regions(app)
+    if allowed is None:
+        return set()
+    try:
+        raw = json.loads(app.brands_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    entries = raw.get("brands") if isinstance(raw, dict) else raw
+    blocked: set[str] = set()
+    for item in entries or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        region = str(item.get("region") or "UNKNOWN").strip().upper()
+        if name and region not in allowed:
+            blocked.add(str(item.get("id") or name).strip())
+    return blocked
+
+
 def load_series_aliases(app: AppSettings | None = None) -> list[SeriesAlias]:
     """读系列级中文译名表：人工表优先，其次模型核实后学到的运行时缓存。
 
     同一个中文名以人工表为准；学到的条目只在人工表没有时生效。
+    BRAND_SCOPE=jp 时，挂靠国牌的别名不参与识别；文件本身不动。
     """
     app = app or default_settings
+    blocked = _out_of_scope_brand_ids(app)
     aliases: list[SeriesAlias] = []
     seen: set[str] = set()
     for path in (app.dress_aliases_path, app.learned_aliases_path):
         for item in _read_alias_file(path):
             cn = str(item.get("cn") or "").strip()
             en = str(item.get("en") or "").strip()
+            brand_id = str(item.get("brand") or "").strip()
             if not cn or not en or cn in seen:
                 continue
+            if brand_id and brand_id in blocked:
+                continue
             seen.add(cn)
-            aliases.append(
-                SeriesAlias(cn=cn, en=en, brand_id=str(item.get("brand") or "").strip())
-            )
+            aliases.append(SeriesAlias(cn=cn, en=en, brand_id=brand_id))
     aliases.sort(key=lambda item: len(item.cn), reverse=True)
     return aliases
 

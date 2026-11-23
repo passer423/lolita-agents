@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from eval.run import load_golden
+from eval.run import is_out_of_scope, load_golden
 
 
 def _path(tmp_path: Path) -> Path:
@@ -62,6 +62,25 @@ def test_rejects_duplicate_id_with_line_number(tmp_path: Path) -> None:
     assert f"{_path(tmp_path)}:2" in message
     assert "id 缺失或重复" in message
     assert "'own-01'" in message
+
+
+def test_scope_marking_keeps_total_and_skips_cn_when_jp() -> None:
+    """线上只做日牌：国牌价格题与整条关闭通道题要单列，不删题、不改题面。"""
+    path = Path(__file__).resolve().parent.parent / "eval" / "golden.jsonl"
+    items = load_golden(path)
+
+    assert len(items) == 60
+    skipped = [item for item in items if is_out_of_scope(item, "jp")]
+    assert {item["id"] for item in skipped} == {
+        "price-01", "price-02", "price-03", "price-04",
+        "xhs-01", "xhs-02", "xhs-03",
+        "weibo-01", "weibo-02", "weibo-03",
+    }
+    assert len(skipped) == 10
+    assert all(item.get("query") for item in skipped)
+    # all 模式恢复国牌题；整条通道题仍然跳过。
+    cn_only = [item for item in items if item.get("scope") == "cn"]
+    assert all(not is_out_of_scope(item, "all") for item in cn_only)
 
 
 def test_rejects_missing_id(tmp_path: Path) -> None:

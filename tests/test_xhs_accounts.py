@@ -443,7 +443,9 @@ def test_unknown_brand_or_no_account_leaves_results_untouched(tmp_path, monkeypa
 
 
 def test_brand_for_question_maps_dress_to_brand():
-    brand, series = xhs_accounts.brand_for_question("四时花价格", AppSettings())
+    brand, series = xhs_accounts.brand_for_question(
+        "四时花价格", AppSettings(brand_scope="all")
+    )
 
     assert brand is not None and brand.id == "sheep-orchid"
     assert series == ("四时花", "Four Seasons Flower")

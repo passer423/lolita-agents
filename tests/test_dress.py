@@ -47,8 +47,12 @@ GLOSSARY = [
 ]
 
 
-def make_app(workdir, *, brands=None, aliases=None, records=None, glossary=None) -> AppSettings:
-    app = AppSettings(data_dir=workdir / "data", content_dir=workdir / "content")
+def make_app(
+    workdir, *, brands=None, aliases=None, records=None, glossary=None, brand_scope="jp"
+) -> AppSettings:
+    app = AppSettings(
+        data_dir=workdir / "data", content_dir=workdir / "content", brand_scope=brand_scope
+    )
     app.ensure_dirs()
     (app.content_dir / "dress").mkdir(parents=True, exist_ok=True)
     app.brands_path.write_text(
@@ -215,6 +219,7 @@ def test_series_alias_tolerates_one_char_typo(workdir):
 def test_catalog_chinese_alias_resolves_cn(workdir):
     app = make_app(
         workdir,
+        brand_scope="all",
         records=[record(
             slug="cn-four-seasons-flower-op",
             url="https://lolibrary.org/items/cn-four-seasons-flower-op",
@@ -237,8 +242,21 @@ def test_catalog_chinese_alias_resolves_cn(workdir):
     assert query.source.startswith("catalog_")
 
 
+def test_brand_scope_jp_keeps_cn_entries_but_does_not_use_them(workdir):
+    """默认日牌范围：国牌条目/别名仍留在文件里，但不参与识别。"""
+    jp = make_app(workdir / "jp", brand_scope="jp")
+    assert {brand.id for brand in dress.load_brands(jp)} == {"baby", "ap"}
+    pending = dress.resolve_dress("四时花 预约价是多少", RecallContext(settings=jp))
+    assert pending is not None and pending.brand == "" and pending.region == "UNKNOWN"
+
+    full = make_app(workdir / "all", brand_scope="all")
+    assert "sheep-orchid" in {brand.id for brand in dress.load_brands(full)}
+    query = dress.resolve_dress("四时花 预约价是多少", RecallContext(settings=full))
+    assert query is not None and query.brand == "Sheep Orchid"
+
+
 def test_care_question_does_not_trigger(workdir):
-    app = make_app(workdir)
+    app = make_app(workdir, brand_scope="all")
     assert dress.resolve_dress("四时花怎么洗", RecallContext(settings=app)) is None
 
 
@@ -342,7 +360,7 @@ def test_profile_from_local_archive(workdir):
 
 
 def test_cn_profile_extracts_social_fields(workdir):
-    app = make_app(workdir)
+    app = make_app(workdir, brand_scope="all")
     ctx = RecallContext(settings=app)
     query = dress.resolve_dress("四时花 预约价是多少", ctx)
     evidence = [{
@@ -365,7 +383,7 @@ def test_cn_profile_extracts_social_fields(workdir):
 
 
 def test_price_extraction_does_not_swallow_years(workdir):
-    app = make_app(workdir)
+    app = make_app(workdir, brand_scope="all")
     ctx = RecallContext(settings=app)
     query = dress.resolve_dress("四时花 预约价是多少", ctx)
     evidence = [{
@@ -384,7 +402,7 @@ def test_price_extraction_does_not_swallow_years(workdir):
 
 def test_price_extraction_ignores_giveaway_and_shipping_mentions(workdir):
     """「现金100元/人」这类抽奖/运费旁述不是裙子价格，不能占掉唯一的价格位。"""
-    app = make_app(workdir)
+    app = make_app(workdir, brand_scope="all")
     ctx = RecallContext(settings=app)
     query = dress.resolve_dress("四时花 预约价是多少", ctx)
     evidence = [{
@@ -402,7 +420,7 @@ def test_price_extraction_ignores_giveaway_and_shipping_mentions(workdir):
 
 def test_price_extraction_keeps_preorder_and_deposit_next_to_noise(workdir):
     """同一分句才算旁述：前面一句提到运费，不影响后一句的预约价/定金。"""
-    app = make_app(workdir)
+    app = make_app(workdir, brand_scope="all")
     ctx = RecallContext(settings=app)
     query = dress.resolve_dress("四时花 预约价是多少", ctx)
     evidence = [{

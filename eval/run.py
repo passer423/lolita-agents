@@ -270,6 +270,49 @@ def load_golden(path: Path) -> list[dict]:
     return items
 
 
+def is_out_of_scope(item: dict, brand_scope: str) -> bool:
+    """金标条目的 ``scope`` 是否超出当前线上范围。
+
+    * 没有 scope：照旧参与（核心通道题不受影响）；
+    * scope=cn：只有 BRAND_SCOPE=all 时才参与；
+    * scope=channel：整条通道当前关闭（如 xhs），始终跳过。
+    """
+    scope = str(item.get("scope") or "").strip().lower()
+    if not scope:
+        return False
+    current = str(brand_scope or "jp").strip().lower()
+    if scope == "channel":
+        return True
+    if scope == "cn":
+        return current not in ("all", "*", "any")
+    return scope != current
+
+
+def scope_rows(out_of_scope: list[dict], rows: list[dict]) -> list[dict]:
+    """把范围外条目的 baseline merged 结果整理成「单列命中」清单。"""
+    by_item = {
+        row["item_id"]: row
+        for row in rows
+        if row["config"] == "baseline" and row["view"] == "merged"
+    }
+    listing: list[dict] = []
+    for item in out_of_scope:
+        row = by_item.get(item["id"]) or {}
+        listing.append(
+            {
+                "id": item["id"],
+                "channel": item["channel"],
+                "scope": item.get("scope") or "",
+                "query": item["query"],
+                "status": row.get("status") or "not_run",
+                "rank": row.get("rank", ""),
+                "hit@1": row.get("hit@1", ""),
+                "reason": row.get("reason", ""),
+            }
+        )
+    return listing
+
+
 def clip(text: str) -> str:
     text = (text or "").strip()
     return text if len(text) <= EVIDENCE_TEXT_LIMIT else text[:EVIDENCE_TEXT_LIMIT] + "…"
@@ -886,6 +929,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--online", action="store_true", help="同时跑 xhs / weibo / web（联网）")
     parser.add_argument(
+        "--brand-scope",
+        default="",
+        choices=("", "jp", "all"),
+        help="品牌范围；空 = 读 BRAND_SCOPE（默认 jp）。范围外条目跳过并单列命中",
+    )
+    parser.add_argument(
         "--compare",
         default="",
         help="对比历史 summary.json；传 latest 自动找 --out 下最新一份",
@@ -909,6 +958,10 @@ def main(argv: list[str] | None = None) -> int:
         if missing:
             raise SystemExit(f"子集 {args.subset} 里的条目不存在：{', '.join(missing)}")
         items = [by_id[item_id] for item_id in SUBSETS[args.subset]]
+    brand_scope = (args.brand_scope or default_settings.brand_scope or "jp").strip().lower()
+    total_items = len(items)
+    out_of_scope = [item for item in items if is_out_of_scope(item, brand_scope)]
+    items = [item for item in items if not is_out_of_scope(item, brand_scope)]
     retriever = Retriever(online=args.online)
 
     generated_at = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -923,6 +976,15 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = summarize(all_rows, configs)
     deltas = config_deltas(all_rows, configs)
+    # 范围外条目：不计入通过率，仍用 baseline 跑一次，单列命中条数。
+    scope_listing = (
+        scope_rows(
+            out_of_scope,
+            run_config(out_of_scope, "baseline", CONFIGS["baseline"], retriever, args.cite_k),
+        )
+        if out_of_scope
+        else []
+    )
     gate = evaluate_gate(
         summary,
         all_rows,
@@ -955,6 +1017,10 @@ def main(argv: list[str] | None = None) -> int:
         "generated_at": generated_at,
         "golden_path": str(golden_path),
         "golden_items": len(items),
+        "golden_total": total_items,
+        "brand_scope": brand_scope,
+        "skipped_out_of_scope": len(out_of_scope),
+        "out_of_scope": scope_listing,
         "subset": args.subset,
         "online": args.online,
         "citation_k": args.cite_k,
@@ -989,6 +1055,9 @@ def main(argv: list[str] | None = None) -> int:
         previous_legacy=_is_legacy_report(previous),
         subset=args.subset,
         gate=gate,
+        brand_scope=brand_scope,
+        total_items=total_items,
+        out_of_scope=scope_listing,
     )
     (out_dir / "report.md").write_text(report, encoding="utf-8")
 
@@ -1002,6 +1071,15 @@ def main(argv: list[str] | None = None) -> int:
                 f"definition@1={fmt(row['definition@1'])} "
                 f"(旧口径 cite@3={row['citation_accuracy@3']:.3f})"
             )
+    if out_of_scope:
+        evaluated_scope = [row for row in scope_listing if row["status"] == "ok"]
+        hits_scope = [row for row in evaluated_scope if str(row.get("hit@1")) in ("1", "1.0")]
+        print(
+            f"范围：brand_scope={brand_scope}；金标 {total_items} 条，"
+            f"跳过范围外 {len(out_of_scope)} 条，实际评测 {len(items)} 条；"
+            f"范围外命中 {len(hits_scope)}/{len(evaluated_scope)}（另有 "
+            f"{len(out_of_scope) - len(evaluated_scope)} 条离线/通道关闭跳过）"
+        )
     print(f"\n报告目录：{out_dir}")
     if gate["enabled"] or gate.get("error"):
         if gate["passed"]:
@@ -1045,12 +1123,19 @@ def _render_report(
     previous_legacy: bool = False,
     subset: str = "all",
     gate: dict | None = None,
+    brand_scope: str = "jp",
+    total_items: int = 0,
+    out_of_scope: list[dict] | None = None,
 ) -> str:
+    out_of_scope = out_of_scope or []
+    evaluated_items = len(items)
+    total_items = total_items or evaluated_items
     lines = [
         "# RAG 检索评测报告",
         "",
         f"- 生成时间：{generated_at}",
-        f"- 金标集：`{golden_path}`（{len(items)} 条）",
+        f"- 金标集：`{golden_path}`（共 {total_items} 条）",
+        f"- 品牌范围：`{brand_scope}`；跳过范围外 {len(out_of_scope)} 条，实际评测 {evaluated_items} 条",
         f"- 子集：{_subset_label(subset, items)}",
         f"- 配置：{', '.join(configs)}",
         f"- 实时通道：{'开启（--online）' if online else '关闭（离线核心通道）'}",
@@ -1073,6 +1158,8 @@ def _render_report(
             f"{fmt(row['definition@1'])} | "
             f"{fmt(row['answer_supported_rate'])} |"
         )
+
+    lines += _out_of_scope_section(out_of_scope)
 
     lines += [
         "",
@@ -1217,6 +1304,33 @@ def _render_report(
         "",
     ]
     return "\n".join(lines)
+
+
+def _out_of_scope_section(out_of_scope: list[dict]) -> list[str]:
+    """范围外条目的单列清单：不计入通过率，只报命中条数。"""
+    if not out_of_scope:
+        return []
+    evaluated = [row for row in out_of_scope if row["status"] == "ok"]
+    hits = [row for row in evaluated if str(row.get("hit@1")) in ("1", "1.0")]
+    skipped = len(out_of_scope) - len(evaluated)
+    lines = [
+        "",
+        "## 范围外条目（不计入通过率）",
+        "",
+        f"- 共 {len(out_of_scope)} 条；可评 {len(evaluated)} 条，命中 {len(hits)} 条；"
+        f"离线/通道关闭跳过 {skipped} 条",
+        "",
+        "| 条目 | 通道 | scope | 状态 | rank | 说明 |",
+        "|---|---|---|---|---|---|",
+    ]
+    for row in out_of_scope:
+        status = "命中" if str(row.get("hit@1")) in ("1", "1.0") else row["status"]
+        note = str(row.get("reason") or "").replace("|", "/")[:80]
+        lines.append(
+            f"| {row['id']} | {row['channel']} | {row['scope']} | {status} | "
+            f"{row.get('rank', '')} | {note} |"
+        )
+    return lines
 
 
 def _definition_section(rows: list[dict]) -> list[str]:

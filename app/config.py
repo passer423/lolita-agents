@@ -63,6 +63,12 @@ class AppSettings(BaseSettings):
     # 内容目录（自有知识库 content/kb，进 git）。做成字段同样是为了测试隔离。
     content_dir: Path = APP_ROOT / "content"
 
+    # ---------- 品牌范围 ----------
+    # jp = 线上只识别/检索日牌；all = 全部品牌（含国牌、OTHER）。
+    # 国牌的品牌条目、别名和 xhs_account 登记仍留在文件里，只是不参与识别与检索。
+    # 需要通过 BRAND_SCOPE=all 才恢复国牌路径，不靠改数据文件。
+    brand_scope: str = "jp"
+
     lolita_rag_root: Path = DEFAULT_RAG_ROOT
 
     llm_api_key: str = ""
@@ -196,6 +202,9 @@ class AppSettings(BaseSettings):
     # 360，且 360 结果不带链接，只当文本线索。需要 Playwright + Edge/Chromium。
     web_browser_enabled: bool = True
     web_browser_timeout: float = 25.0
+    # 网页作为「最后手段」兜底时的硬超时：它只在官网/微博都没拿到证据时才跑，
+    # 再让它按 25 秒拖就没有意义。实际取 min(本值, web_browser_timeout)。
+    web_fallback_timeout: float = 6.0
     web_browser_max_results: int = 5
 
     # 微博应急直抓：付费搜索不可用时作为独立来源；搜索可用时先走搜索，

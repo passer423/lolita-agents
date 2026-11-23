@@ -129,6 +129,8 @@ class AgentState(TypedDict, total=False):
     recalled: Annotated[list[str], operator.add]
     # planner 在 route 节点写入：要追加的实时通道 + 精简检索词（非 reducer，整值覆盖）
     supplementary: list[str]
+    # 补查通道是否拿到任何证据（web 作为最后手段的闸门用）
+    supplementary_hits: Annotated[int, operator.add]
     query: str
     # 裙子档案：dress_resolve 写入识别结果，dress_profile 写入整合后的字段。
     dress_query: dict
@@ -681,7 +683,10 @@ def build_graph(
                 }
             if progress is not None:
                 progress.channel_done(name, evidence, step)
-            return {"evidence": evidence, "steps": [step], "recalled": [name]}
+            update: dict = {"evidence": evidence, "steps": [step], "recalled": [name]}
+            if name in channels.SUPPLEMENTARY_CHANNELS:
+                update["supplementary_hits"] = 1 if evidence else 0
+            return update
 
         return recall_one
 
@@ -942,15 +947,36 @@ def build_graph(
         return result
 
     def fanout_after_route(state: AgentState) -> list[Send]:
-        """route 之后的条件边：有补查就 Send 到实时通道，否则直接去整合档案。
+        """route 之后的条件边：有补查就 Send 到实时通道，否则去网页闸门。
 
         注意：``Send`` 只能在**条件边函数**里返回（节点里返回会报 InvalidUpdateError），
         所以这里不是图节点，而是 ``add_conditional_edges`` 的 path 函数。
         """
-        names = [name for name in state.get("supplementary", []) if name in channels.SUPPLEMENTARY_CHANNELS]
+        names = [
+            name
+            for name in state.get("supplementary", [])
+            if name in channels.SUPPLEMENTARY_CHANNELS and name != "web"
+        ]
         if not names:
-            return [Send("dress_profile", state)]
+            # web 不在这里并行跑：先过闸门，等官网/微博都空才补。
+            return [Send("web_gate", state)]
         return [Send(name, state) for name in names]
+
+    def web_gate(state: AgentState) -> dict:
+        """补查通道汇合点；真正的决策在 after_web_gate。"""
+        return {}
+
+    def after_web_gate(state: AgentState) -> list[Send] | str:
+        """网页只在「本轮想要 web、前面补查全空、web 还没跑」时才补。"""
+        wanted = set(state.get("supplementary") or [])
+        recalled = set(state.get("recalled") or [])
+        if (
+            "web" in wanted
+            and "web" not in recalled
+            and not state.get("supplementary_hits")
+        ):
+            return [Send("web", state)]
+        return "dress_profile"
 
     def dress_profile(state: AgentState) -> dict:
         """把召回结果整合成结构化档案；没有识别结果时直接跳过。"""
@@ -1083,12 +1109,16 @@ def build_graph(
         graph.add_edge(name, "fallback_expand")
     # 核心全 0 且疑似缩写/未知系列时，模型只扩展候选名并校验后再补一轮检索
     graph.add_edge("fallback_expand", "route")
-    # route 之后：有补查就追加实时通道，否则直接去整合档案
+    # route 之后：先跑官网/微博等补查，全部为空才让 web 兜底
     graph.add_conditional_edges(
-        "route", fanout_after_route, [*channels.SUPPLEMENTARY_CHANNELS, "dress_profile"]
+        "route",
+        fanout_after_route,
+        [*channels.SUPPLEMENTARY_CHANNELS, "web_gate", "dress_profile"],
     )
     for name in channels.SUPPLEMENTARY_CHANNELS:
-        graph.add_edge(name, "dress_profile")
+        graph.add_edge(name, "web_gate")
+    graph.add_node("web_gate", web_gate)
+    graph.add_conditional_edges("web_gate", after_web_gate, ["web", "dress_profile"])
     graph.add_edge("dress_profile", "answer")
     graph.add_edge("answer", "verify")
     graph.add_edge("verify", END)

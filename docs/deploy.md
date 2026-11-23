@@ -208,7 +208,9 @@ DAILY_QUOTA=20
 LLM_PRICE_TABLE={"deepseek-chat": {"prompt_per_1k": 0.002, "completion_per_1k": 0.008}}
 LLM_PRICE_CURRENCY=CNY
 
+BRAND_SCOPE=jp
 XHS_ENABLED=false
+WEB_FALLBACK_TIMEOUT=6
 SEARCH_ENABLED=false
 WEIBO_DIRECT_ENABLED=false
 OCR_ENABLED=false
@@ -216,6 +218,7 @@ OCR_ENABLED=false
 
 - `DATA_DIR` 用绝对路径，避免 systemd 工作目录变化导致找不到索引。
 - 配额能生效的前提是模型在 `LLM_PRICE_TABLE` 里；未定价模型会被跳过配额。
+- `BRAND_SCOPE=jp`：国牌条目、别名、xhs 账号仍留在数据文件里，但不参与识别与检索；`all` 才全开。评测集不删题，范围外条目跳过并单列命中。
 - 小红书/搜索/微博直抓在服务器上不可用（见第七节），显式关掉，状态接口会带原因显示 not ready。
 - 2C2G 档把 `WRITER_MAX_TOKENS` 降到 1200、`EVIDENCE_MAX_ITEMS` 降到 8、`AGENT_DEADLINE` 降到 45，并额外关掉 `WEB_BROWSER_ENABLED`；以 `deploy/env/2c2g.env.example` 为准。
 

@@ -67,6 +67,9 @@ CHANNEL_SOURCE_KIND = {
 
 # real 通道：纯 bm25 命中排第一且领先第二名多少分时才放行（见 _recall_real）。
 _REAL_BM25_TOP_MARGIN = 0.25
+# real 进上下文的片段：只留首条、正文截短，减少 writer 被他人发言带偏的机会。
+_REAL_MAX_ITEMS = 1
+_REAL_TEXT_LIMIT = 220
 
 EVIDENCE_TEXT_LIMIT = 300
 LOLIBRARY_TOP_K = 3
@@ -322,7 +325,10 @@ def _recall_real(
         and (len(hits) == 1 or top.get("score", 0.0) - hits[1].get("score", 0.0) >= _REAL_BM25_TOP_MARGIN)
     ):
         semantic = [top, *semantic]
-    return _kb_evidence("real", semantic, limit)
+    # real 是他人发言，进证据的片段越短越不容易被 writer 当成事实整段复述。
+    # 只收紧「进上下文的片段数/长度」，不改召回与排序（评测量的是 rank@1）。
+    evidence_limit = _REAL_TEXT_LIMIT if limit is None else limit
+    return _kb_evidence("real", semantic[:_REAL_MAX_ITEMS], evidence_limit)
 
 
 # --------------------------------------------------------------------- lolibrary
@@ -386,14 +392,43 @@ _GENERIC_TERMS = {
 }
 
 
-def _brand_targets(question: str) -> tuple[set[str], str]:
+def _out_of_scope_brand_names(app) -> set[str]:
+    """当前品牌范围外的品牌全称（小写）：别名不参与检索，文件本身不动。"""
+    from app.agent import dress
+
+    allowed = dress.scope_regions(app)
+    if allowed is None:
+        return set()
+    try:
+        raw = json.loads(app.brands_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    entries = raw.get("brands") if isinstance(raw, dict) else raw
+    blocked: set[str] = set()
+    for item in entries or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        region = str(item.get("region") or "UNKNOWN").strip().upper()
+        if name and region not in allowed:
+            blocked.add(name.lower())
+    return blocked
+
+
+def _brand_targets(question: str, app=None) -> tuple[set[str], str]:
     """找出问题里点名的品牌，返回 ``(品牌全称小写集合, 去掉中文别名后的文本)``。
 
     中文别名必须整词替换掉：否则「安琪」会被 `_query_terms` 拆成「安」「琪」
     两个单字继续参与打分，而别名本身永远拼不出来（这正是加中文别名前的老问题）。
+    ``app`` 的品牌范围外的别名不参与识别（默认国牌不参与）。
     """
+    blocked = _out_of_scope_brand_names(app) if app is not None else set()
     lowered = (question or "").lower()
-    targets = {BRAND_ALIASES[token] for token in _LATIN_RE.findall(lowered) if token in BRAND_ALIASES}
+    targets = {
+        BRAND_ALIASES[token]
+        for token in _LATIN_RE.findall(lowered)
+        if token in BRAND_ALIASES and BRAND_ALIASES[token].lower() not in blocked
+    }
 
     cjk_aliases = sorted(
         (alias for alias in BRAND_ALIASES if _CJK_RE.search(alias)),
@@ -401,7 +436,7 @@ def _brand_targets(question: str) -> tuple[set[str], str]:
         reverse=True,
     )
     for alias in cjk_aliases:
-        if alias in lowered:
+        if alias in lowered and BRAND_ALIASES[alias].lower() not in blocked:
             targets.add(BRAND_ALIASES[alias])
             lowered = lowered.replace(alias, " ")
     return {target.lower() for target in targets}, lowered
@@ -479,7 +514,7 @@ def load_catalog(ctx: RecallContext) -> list[dict]:
 def _recall_lolibrary(
     question: str, ctx: RecallContext, query: str = "", limit: int | None = None
 ) -> list[dict]:
-    brand_targets, text = _brand_targets(query or question)
+    brand_targets, text = _brand_targets(query or question, ctx.settings)
     # 别名已经展开成品牌全称，不能再当文本词打分（"ap" 会命中 "Cape"）。
     terms = [t for t in _query_terms(text) if t not in BRAND_ALIASES]
     if not terms and not brand_targets:
@@ -900,6 +935,12 @@ def _recall_web(
     from app.services import web_search
 
     text = query or question
+    # 网页是最后手段：硬超时取 min(兜底上限, 浏览器总超时)，避免一个兜底通道
+    # 再把整轮问答拖到十几秒。
+    timeout = min(
+        max(1.0, float(ctx.settings.web_fallback_timeout)),
+        max(1.0, float(ctx.settings.web_browser_timeout)),
+    )
     configured, _ = web_search.paid_config_status(ctx.settings)
     if not configured or web_search.quota_blocked(ctx.settings):
         # 最近一次真实调用已经失败：短窗口内直接跳过，不再让每个请求白等约 19 秒。
@@ -908,7 +949,7 @@ def _recall_web(
             raise ChannelUnavailable(f"网页通道按最近一次实际失败降级：{reason}")
         # 无 key / 配额失效：Bing 浏览器主路，失败或为空才用 360 文本兜底。
         results = web_search.search_no_key(
-            text, ctx.settings, max_results=ctx.settings.search_max_results
+            text, ctx.settings, max_results=ctx.settings.search_max_results, timeout=timeout
         )
     else:
         try:
@@ -918,7 +959,7 @@ def _recall_web(
         except web_search.SearchQuotaExhausted:
             logger.warning("网页搜索配额耗尽，改用 Bing 浏览器检索")
             results = web_search.search_no_key(
-                text, ctx.settings, max_results=ctx.settings.search_max_results
+                text, ctx.settings, max_results=ctx.settings.search_max_results, timeout=timeout
             )
     return _search_evidence("web", results, limit)
 

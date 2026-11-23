@@ -290,8 +290,28 @@ def test_ap_news_routes_official_then_weibo_then_web(monkeypatch):
     assert planner.dress_calls == 0
     # 补查通道并行发出，执行顺序不稳定；只断言都跑了。
     assert {channel for channel, _ in calls} == {
-        "own", "real", "lolibrary", "official", "weibo", "web",
+        "own", "real", "lolibrary", "official", "weibo",
     }
+    # 官网已经拿到证据：web 是最后手段，不该再跑。
+    assert "web" not in {channel for channel, _ in calls}
+
+
+def test_web_runs_only_after_supplementary_channels_are_empty(monkeypatch):
+    """官网/微博都没拿到证据时，web 才作为最后手段补一次。"""
+    monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
+    calls: list[str] = []
+
+    def recall(channel, question, ctx, *, query=""):
+        calls.append(channel)
+        if channel in ("own", "real", "lolibrary"):
+            return evidence(channel)
+        return []
+
+    monkeypatch.setattr(channels, "recall", recall)
+    graph.run("AP 最近上新", ctx=ctx(), planner=ScriptedPlanner(), writer=StubWriter())
+
+    assert calls.index("web") > calls.index("official")
+    assert calls.index("web") > calls.index("weibo")
 
 
 # --------------------------------------------------------------------- 裙子档案
@@ -341,7 +361,7 @@ def test_dress_cn_forces_xhs_and_weibo(monkeypatch):
     planner = ScriptedPlanner([])
     result = graph.run(
         "四时花 预约价是多少",
-        ctx=ctx(),
+        ctx=RecallContext(settings=settings.model_copy(update={"brand_scope": "all"})),
         planner=planner,
         writer=StubWriter(),
     )
@@ -361,7 +381,9 @@ def test_dress_cn_forces_xhs_and_weibo(monkeypatch):
 
 def test_dress_unknown_region_queries_both(monkeypatch, workdir):
     monkeypatch.setattr(trace, "append", lambda *_a, **_k: None)
-    app = AppSettings(data_dir=workdir / "data", content_dir=workdir / "content")
+    app = AppSettings(
+        data_dir=workdir / "data", content_dir=workdir / "content", brand_scope="all"
+    )
     app.ensure_dirs()
     (app.content_dir / "dress").mkdir(parents=True, exist_ok=True)
     app.brands_path.write_text(json.dumps({
@@ -388,7 +410,9 @@ def test_dress_unknown_region_queries_both(monkeypatch, workdir):
     route = next(step for step in result["steps"] if step["kind"] == "route")
     assert route["supplementary"] == ["xhs", "weibo", "web"]
     assert route["dress_region"] == "UNKNOWN"
-    assert {"xhs", "weibo", "web"} <= set(calls)
+    assert {"xhs", "weibo"} <= set(calls)
+    # 微博已经拿到证据，web 是最后手段，不跑。
+    assert "web" not in set(calls)
     assert result["dress"]["region"] == "UNKNOWN"
 
 
@@ -705,7 +729,10 @@ def test_channel_unavailable_is_skipped_not_guessed(monkeypatch):
     )
     planner = ScriptedPlanner([])
 
-    result = graph.run("四时花 预约价", ctx=ctx(), planner=planner, writer=StubWriter())
+    result = graph.run(
+        "四时花 预约价", ctx=RecallContext(settings=settings.model_copy(update={"brand_scope": "all"})),
+        planner=planner, writer=StubWriter(),
+    )
 
     assert "xhs" not in {item["channel"] for item in result["evidence"]}
     assert any(step["kind"] == "skip" and step["channel"] == "xhs" for step in result["steps"])
@@ -972,8 +999,9 @@ def test_run_deadline_returns_partial_evidence(monkeypatch):
     )
 
     assert result["stopped_reason"] == "deadline"
-    # 同一步里已经返回的 web 证据不能因为 xhs 卡住而被扣住
-    assert {item["channel"] for item in result["evidence"]} == {"own", "real", "lolibrary", "web"}
+    # 同一步里已经返回的核心证据不能因为 xhs 卡住而被扣住；web 是最后手段，
+    # 前面已经有证据时不会跑。
+    assert {item["channel"] for item in result["evidence"]} == {"own", "real", "lolibrary"}
     timeout_steps = [step for step in result["steps"] if step["kind"] == "timeout"]
     assert timeout_steps and "xhs" in timeout_steps[0]["pending"]
     assert "部分通道超时" in result["answer"]
@@ -1154,7 +1182,8 @@ def test_real_channel_drops_bm25_only_hits(monkeypatch):
 
     result = channels.recall("real", "Baby 秋日私语 JSK 现在多少钱", ctx())
 
-    assert [item["ref"] for item in result] == ["b", "c"]
+    # real 进上下文的片段收紧到 1 条：只留排序最靠前、且带向量的命中。
+    assert [item["ref"] for item in result] == ["b"]
     assert all("vector" in item["retriever"] for item in result)
 
 

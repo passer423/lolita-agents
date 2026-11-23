@@ -28,9 +28,11 @@ Lolita 垂直领域的问答 agent：**多路召回 → 生成回答 → 关注�
 | `own` | 自有知识库 `content/kb` | 每次并行 | 入索引 |
 | `real` | 上游真实语料索引 | 每次并行 | 入索引 |
 | `lolibrary` | Lolibrary 档案 `data/lolibrary/catalog.jsonl` | 每次并行 | 入缓存（可重建） |
-| `xhs` | 小红书（Playwright 或 Spider_XHS，可选） | planner 按需追加 | 否（临时证据） |
+| `xhs` | 小红书（Playwright 或 Spider_XHS，可选） | **默认关闭**：代码与配置保留，`XHS_ENABLED=true` 才启用 | 否（临时证据） |
 | `weibo` | 微博实时（网页搜索限定微博域） | planner 按需追加 | 否（临时证据） |
-| `web` | 网页搜索（博查 / 智谱，可选） | planner 按需追加 | 否（临时证据） |
+| `web` | 网页搜索（博查 / 智谱，可选） | 官网/微博都没拿到证据时才兜底（`WEB_FALLBACK_TIMEOUT=6` 秒硬超时） | 否（临时证据） |
+
+**品牌范围**默认 `BRAND_SCOPE=jp`：`content/brands.json` 里的国牌条目、`content/dress/aliases.json` 的国牌译名、`xhs_account` 登记都保留，但不参与识别与检索；`BRAND_SCOPE=all` 才恢复国牌路径。评测集不删题，`scope=cn` 的条目跳过并单独列出命中条数，不计入通过率分母。
 
 实时通道的结果**只作本次回答的临时证据**，不落盘、不入索引。每条证据带 `channel` 来源 + 原始链接。
 
@@ -50,7 +52,7 @@ python scripts/import_lolibrary.py --brand angelic-pretty --brand baby-the-stars
 | 识别结果 | 查询 |
 |---|---|
 | 日牌 | Lolibrary 档案（本地优先；字段不全时在线补条目详情；不补查社媒） |
-| 国牌 | 小红书 + 微博（Lolibrary 核心通道仍会跑，只作身份补充） |
+| 国牌 | 小红书 + 微博（默认 `BRAND_SCOPE=jp` 时不识别，`all` 才生效） |
 | 未识别 / 其他地区 | 两边都查，并明确标「地区未识别」 |
 
 识别顺序：商品编号 → 档案标题/中文别名 → `content/dress/aliases.json` 系列译名（如「皇家千层公主」→ Baby 的 Mille-feuille Royal pour la Princesse、「甜心梦幻拿铁」→ Sweetheart Dreamy Latte）→ `content/brands.json` 品牌别名；以上都没命中时，**让模型兜底识别中文名**，再用 Lolibrary 搜索校验品牌与标题。系列译名支持一字容错（皇/黄这类同音误写）；只写名字、不带价格/发售等词也会先查别名、再交给模型。品牌表与译名表都在 `content/` 下，可手动补——模型对冷门社区叫法不稳定，常用名字仍应优先补进别名表。
@@ -138,9 +140,10 @@ lolita-agents/
 
 ```
 START ──fanout──▶ own ─┐
-             ├─▶ real ─┼──▶ route ──(有补查)──fanout──▶ xhs ─┐
-             └─▶ lolibrary┘                              ├─▶ weibo ─┼─▶ answer ─▶ verify ─▶ END
-                                                          └─▶ web  ──┘   (没补查直接 answer)
+             ├─▶ real ─┼──▶ route ──(有补查)──fanout──▶ official ─┐
+             └─▶ lolibrary┘                              ├─▶ weibo ──┼─▶ web_gate ─(都空才补)─▶ web ─┐
+                                                          └───────────┘                                  ├─▶ answer ─▶ verify ─▶ END
+                                                                     (没补查直接 answer)
 ```
 
 - 核心通道每次提问都并行召回；`Send` 在条件边函数里扇出（图节点里返回 `Send` 会报 `InvalidUpdateError`）。
@@ -171,7 +174,7 @@ START ──fanout──▶ own ─┐
 
 ### real 通道为什么只认向量路
 
-`real` 只保留 `retriever` 含 `vector` 的命中（纯 BM25 命中 = 字面重合，不构成「语料里有答案」），`TOP_K` 默认 1。这条保守策略做过一次 20 条代表性问题（16 条 real 金标 + 4 条同类问题）的对比：严格（k=1 + 向量路）在 16 条金标上 **0 条空召回**；放宽到「k=3 + 含 BM25」只在空召回时补上关键词重合的噪声——问「AP 茶会限定二手现在什么价」捞到「来茶会舞一曲」的视频描述，问「国牌大码现货有哪些推荐」捞到「急收大码」的出物帖，都不是答案。结论：**保留严格策略**，不为空召回放宽；真实语料是他人发言，宁可漏也不把道听途说当事实。
+`real` 只保留 `retriever` 含 `vector` 的命中（纯 BM25 命中 = 字面重合，不构成「语料里有答案」），`TOP_K` 默认 1。进上下文的片段再收紧到 **1 条、正文 220 字**（只影响喂给 writer 的证据长度，不改召回与排序）。这条保守策略做过一次 20 条代表性问题（16 条 real 金标 + 4 条同类问题）的对比：严格（k=1 + 向量路）在 16 条金标上 **0 条空召回**；放宽到「k=3 + 含 BM25」只在空召回时补上关键词重合的噪声——问「AP 茶会限定二手现在什么价」捞到「来茶会舞一曲」的视频描述，问「国牌大码现货有哪些推荐」捞到「急收大码」的出物帖，都不是答案。结论：**保留严格策略**，不为空召回放宽；真实语料是他人发言，宁可漏也不把道听途说当事实。
 
 ## 模型分级路由（默认关闭）
 
