@@ -54,6 +54,25 @@ def test_duplicate_url_keeps_stronger_source_kind():
     assert ordered[0]["title"] == "自有条目"
 
 
+def test_duplicate_url_same_kind_keeps_richer_text():
+    """同一 URL、同为 third_party 时留正文更全的一条。
+
+    「Baby 的 White Rabbit Bunny Ear Bonnet 是什么」里，lolibrary 通道的摘要只有
+    「品牌｜品类」，裙子档案正文带发售年份和历史原价；按通道顺序留摘要，作者就只能
+    说「价格没写」。
+    """
+    summary = _item("lolibrary", "third_party", url="https://lolibrary.org/items/x", title="摘要")
+    summary["text"] = "Baby, the Stars Shine Bright｜Hair Accessory"
+    archive = _item("dress", "third_party", url="https://lolibrary.org/items/x", title="裙子档案")
+    archive["text"] = "品牌：Baby, the Stars Shine Bright｜发售：2026｜历史原价：¥17380 JPY"
+
+    ordered = graph._normalize([summary, archive], [])
+
+    assert len(ordered) == 1
+    assert ordered[0]["channel"] == "dress"
+    assert "历史原价" in ordered[0]["text"]
+
+
 def test_ref_used_when_url_missing():
     items = [
         _item("own", "own_content", ref="kb-1", title="旧"),

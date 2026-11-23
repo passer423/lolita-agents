@@ -180,6 +180,15 @@ def _rank(
     )
 
 
+def _text_len(item: dict) -> int:
+    """同一 URL 的多个版本，用正文长度判断哪条信息更全。
+
+    裙子档案也是 ``third_party``，但正文比 lolibrary 通道的一行摘要多出年份、
+    历史原价和配色；效力同级时按通道顺序留摘要，会让作者看到「价格没写」。
+    """
+    return len(str(item.get("text") or ""))
+
+
 def _normalize(
     evidence: list[dict],
     supplementary: list[str] | tuple[str, ...] = (),
@@ -202,7 +211,8 @@ def _normalize(
     证据的 ``intent`` 字段上（``channels.question_intent``），所以评测复用
     本函数时也走同一套权重。
 
-    去重按 URL/ref，保留排序更靠前的版本（来源效力更强的留下）。``limit > 0``
+    去重按 URL/ref，保留排序更靠前的版本（来源效力更强的留下）；效力同级时
+    保留正文更长的一条，避免裙子档案被同一 URL 的通道摘要挤掉。``limit > 0``
     时限制总条数，但补查通道**整体豁免**：它们是用户这个问题才触发的，不能被
     核心通道的长列表挤掉；豁免后允许略超上限。
     """
@@ -217,9 +227,20 @@ def _normalize(
             anonymous.append(item)
             continue
         current = best.get(key)
-        if current is None or _rank(item, extra, kind_order) < _rank(
-            current, extra, kind_order
-        ):
+        if current is None:
+            best[key] = item
+            continue
+        item_rank = _rank(item, extra, kind_order)
+        current_rank = _rank(current, extra, kind_order)
+        if item_rank[:2] != current_rank[:2]:
+            better = item_rank[:2] < current_rank[:2]
+        elif _text_len(item) != _text_len(current):
+            # 来源效力同级（同为 third_party 的档案 vs 通道摘要）：留信息更全的版本，
+            # 通道固定顺序只在正文一样长时才用来定序。
+            better = _text_len(item) > _text_len(current)
+        else:
+            better = item_rank[2] < current_rank[2]
+        if better:
             best[key] = item
 
     ordered = sorted(
