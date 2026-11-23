@@ -21,6 +21,7 @@
 html, body {
   margin: 0;
   padding: 0;
+  -webkit-text-size-adjust: 100%;   /* iOS 横屏/大字号时别自作主张放大正文 */
   background: var(--bg);
   color: var(--ink);
   font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
@@ -422,6 +423,8 @@ ul.plain li { margin-bottom: 2px; }
 .chat-list {
   min-height: min(42vh, 380px);
   max-height: 62vh;
+  min-height: min(42dvh, 380px);   /* 支持 dvh 时跟着可视高度走，软键盘弹出不会把输入框挤下去 */
+  max-height: 62dvh;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -442,6 +445,7 @@ ul.plain li { margin-bottom: 2px; }
   line-height: 1.7;
   white-space: normal;
   word-break: break-word;
+  overflow-wrap: anywhere;   /* 长英文串/链接别把气泡顶出屏幕 */
 }
 .msg.user .bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
 .msg.assistant .bubble { background: var(--accent-soft); color: var(--ink); border-bottom-left-radius: 4px; }
@@ -475,7 +479,7 @@ ul.plain li { margin-bottom: 2px; }
 
 .steps { font-size: 11.5px; color: var(--muted); }
 .steps summary { cursor: pointer; }
-.step { padding: 2px 0 2px 8px; }
+.step { padding: 2px 0 2px 8px; overflow-wrap: anywhere; }
 .step-sum { display: block; color: var(--muted); opacity: .85; }
 
 .evidence { display: flex; flex-direction: column; gap: 6px; }
@@ -485,9 +489,10 @@ ul.plain li { margin-bottom: 2px; }
   color: var(--muted);
   letter-spacing: .04em;
 }
-.ev { font-size: 11.5px; color: var(--muted); line-height: 1.55; scroll-margin-top: 24px; }
+.ev { font-size: 11.5px; color: var(--muted); line-height: 1.55; scroll-margin-top: 24px; overflow-wrap: anywhere; }
 .ev-n { color: var(--accent); font-weight: 600; margin-right: 4px; }
 .ev-title { font-weight: 600; }
+.ev-link { margin-top: 2px; font-size: 11px; color: var(--accent); word-break: break-all; }
 .ev-text { opacity: .9; }
 .ev.flash { background: var(--accent-soft); border-radius: 8px; padding: 6px 8px; }
 
@@ -533,7 +538,7 @@ ul.plain li { margin-bottom: 2px; }
 }
 .dress-row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
 .dress-row span { flex: 0 0 auto; color: var(--muted); }
-.dress-row b { min-width: 0; font-weight: 500; color: var(--ink); text-align: right; }
+.dress-row b { min-width: 0; font-weight: 500; color: var(--ink); text-align: right; overflow-wrap: anywhere; }
 .dress-note { margin-top: 6px; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
 .dress-src { margin-top: 4px; font-size: 11px; color: var(--muted); word-break: break-all; }
 
@@ -648,3 +653,87 @@ ul.plain li { margin-bottom: 2px; }
 }
 .follow-suggest span { flex: 1 1 160px; min-width: 0; }
 .follow-suggest .ghost.sm { padding: 5px 10px; font-size: 12.5px; }
+
+/* ---------------------------------------------------------------- 窄屏（手机） */
+/* 同一套 DOM，只收紧外边距、放开正文，不做第二套移动端页面。
+   断点取 600px：375/390 都是整屏铺满，桌面仍是 720px 居中卡片。 */
+@media (max-width: 600px) {
+  :root { --pad: 10px; }
+
+  /* 卡片去掉左右外框贴边，把 14px 的左右留白还给正文 */
+  #view { padding: 8px 0 calc(20px + env(safe-area-inset-bottom)); }
+  #view > .card {
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0;
+    margin-bottom: 8px;
+  }
+  #view > .card:not(.fold) { padding: 12px; }
+
+  /* 长回答：正文 15px，行高略松，读起来不挤 */
+  .bubble { font-size: 15px; line-height: 1.75; padding: 10px 12px; }
+  .msg { max-width: 94%; }
+  .chat-head { flex-wrap: wrap; row-gap: 6px; }
+
+  /* 对话区高度跟着可视视口走，给下方输入区留出空间 */
+  .chat-list {
+    min-height: min(34vh, 300px);
+    max-height: min(56vh, 520px);
+    min-height: min(34dvh, 300px);
+    max-height: min(56dvh, 520px);
+  }
+
+  /* iOS 焦点落到 <16px 的输入框会自动放大页面：这里固定 16px 避免跳动 */
+  .chat-input textarea { font-size: 16px; }
+  .chat-input textarea { scroll-margin-bottom: calc(12px + env(safe-area-inset-bottom)); }
+  .chat-input { gap: 8px; }
+  .chat-input .primary { padding: 12px 20px; }
+
+  /* 指纹/触屏上引用编号的点击热区比视觉框大 */
+  .cite { position: relative; }
+
+  /* 引用来源：长标题与长 URL 一律在块内折行 */
+  .evidence summary { padding: 4px 0; }
+  .ev-link { font-size: 11.5px; }
+
+  /* 关注项摘要在 375 宽下允许换行，箭头仍然贴右 */
+  .fold > summary { flex-wrap: wrap; row-gap: 2px; padding: 12px; }
+  .fold-body { padding: 0 12px 12px; }
+
+  .follow-event .head { font-size: 11.5px; }
+  .follow-actions { gap: 8px; }
+
+  .toast { max-width: 88vw; }
+}
+
+/* 触屏（手机/平板）：把可点元素抬到手指能点中的高度。
+   只在粗指针设备生效，桌面鼠标的点击密度保持原样。 */
+@media (pointer: coarse) {
+  .chip { min-height: 38px; padding: 8px 14px; font-size: 13.5px; }
+  .chip.small { min-height: 32px; }
+  button.ghost, a.ghost {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+  }
+  button.ghost.sm, a.ghost.sm { min-height: 38px; }
+  .chat-input .primary { min-height: 46px; }
+
+  /* 引用编号视觉不变，热区向四周扩 9px */
+  .cite::after {
+    content: '';
+    position: absolute;
+    inset: -9px -6px;
+  }
+
+  .steps summary, .evidence summary {
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+
+  .follow-del {
+    padding: 8px 10px;
+    margin: -8px -6px -8px 0;
+  }
+}

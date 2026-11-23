@@ -826,6 +826,15 @@
     // 关注项（形态甲）：打开页面时载入；有历史关注项才显示面板，不提供手动新增
     loadFollows();
 
+    // iOS Safari：键盘弹起时 visualViewport 变矮、布局视口不变，dvh 不一定跟着缩。
+    // 输入框有焦点时把它最小幅度滚进可视区，避免被键盘挡住（Android 上是无害的空操作）。
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', () => {
+        if (document.activeElement !== ui.input) return;
+        ui.input.scrollIntoView({ block: 'nearest' });
+      });
+    }
+
     document.getElementById('follow-check').addEventListener('click', () => checkFollows(false));
     document.getElementById('follow-read').addEventListener('click', async () => {
       try {
