@@ -18,6 +18,14 @@
       .replace(/\n/g, '<br>');
   };
 
+  // 引用链接必须是可点的 <a>：只渲染纯文本时，读者点的是文字，不是链接。
+  // 只给 http(s) 加锚点，内部 ref（real-1 之类）保持纯文本。
+  const linkHtml = (url) => {
+    const text = esc(url);
+    if (!/^https?:\/\//i.test(url || '')) return text;
+    return '<a href="' + text + '" target="_blank" rel="noopener noreferrer">' + text + '</a>';
+  };
+
   // 召回通道名 → 人话（过程里别直接甩英文通道名）
   // real 不能叫「真实语料」：它其实是采集来的他人发言，叫"真实"会让人以为是
   // 权威来源。界面必须让用户一眼看出哪条是网友说的。
@@ -224,7 +232,7 @@
         '<div class="dress-row"><span>' + label + '</span><b>' + esc(value) + '</b></div>').join('') +
       '</div>' +
       (notes.length ? '<div class="dress-note">' + esc(notes.join('；')) + '</div>' : '') +
-      (dress.url ? '<div class="dress-src">来源：' + esc(dress.url) + '</div>' : '') +
+      (dress.url ? '<div class="dress-src">来源：' + linkHtml(dress.url) + '</div>' : '') +
       '</div>';
   }
 
@@ -259,7 +267,7 @@
           '<div class="ev" data-n="' + item.n + '"><span class="ev-n">[' + item.n + ']</span>' +
           '<span class="ev-title">' + esc(CHANNEL_LABELS[item.channel] || item.channel) + ' · ' +
           esc(item.title) + '</span>' +
-          (item.url ? '<div class="ev-link">' + esc(item.url) + '</div>' : '') +
+          (item.url ? '<div class="ev-link">' + linkHtml(item.url) + '</div>' : '') +
           '<div class="ev-text">' + esc(item.text) + '</div></div>').join('');
       wrap.appendChild(evidence);
 

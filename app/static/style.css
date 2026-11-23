@@ -493,6 +493,8 @@ ul.plain li { margin-bottom: 2px; }
 .ev-n { color: var(--accent); font-weight: 600; margin-right: 4px; }
 .ev-title { font-weight: 600; }
 .ev-link { margin-top: 2px; font-size: 11px; color: var(--accent); word-break: break-all; }
+.ev-link a { color: inherit; text-decoration: none; }
+.ev-link a:hover { text-decoration: underline; }
 .ev-text { opacity: .9; }
 .ev.flash { background: var(--accent-soft); border-radius: 8px; padding: 6px 8px; }
 
@@ -541,6 +543,8 @@ ul.plain li { margin-bottom: 2px; }
 .dress-row b { min-width: 0; font-weight: 500; color: var(--ink); text-align: right; overflow-wrap: anywhere; }
 .dress-note { margin-top: 6px; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
 .dress-src { margin-top: 4px; font-size: 11px; color: var(--muted); word-break: break-all; }
+.dress-src a { color: inherit; text-decoration: none; }
+.dress-src a:hover { text-decoration: underline; }
 
 /* ---------------------------------------------------------------- 身材参数 */
 /* 这部分由 profile.js 挂到「我的」页，样式单独一段 */
