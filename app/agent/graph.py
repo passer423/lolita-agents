@@ -70,10 +70,10 @@ from typing import Annotated, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
-from app.agent import channels, conflicts, cost, dress, routing, trace
+from app.agent import channels, conflicts, cost, dress, history_memory, routing, trace
 from app.agent.channels import ALL_CHANNELS, ChannelUnavailable, RecallContext
 from app.agent.planner import PlannerOutputError, plan_channels, plan_intents
-from app.agent.writer import sanitize_history
+from app.agent.writer import HISTORY_FETCH_MESSAGES, sanitize_history
 
 logger = logging.getLogger(__name__)
 
@@ -1198,6 +1198,15 @@ def _finish(
     return payload
 
 
+def _history_for_context(
+    history: list[dict] | None, ctx: RecallContext
+) -> list[dict]:
+    """历史先压成结构化要点；压不出来（空/无字段/不更短）就退回 sanitize 原文。"""
+    sanitized = sanitize_history(history, limit=HISTORY_FETCH_MESSAGES)
+    compacted = history_memory.compress(sanitized, ctx.settings)
+    return compacted if compacted is not None else sanitized
+
+
 def run(
     question: str,
     *,
@@ -1221,12 +1230,14 @@ def run(
     # 路由在召回之前定：规则判不出来时可能有一次极小判断，它也吃整体预算。
     route = routing.decide(question, ctx.settings)
     progress = _Progress()
+    # 历史在进图之前就压成要点：planner / dress / writer 共用同一份，避免各取一段原文。
+    memory = _history_for_context(history, ctx)
     graph = build_graph(planner, writer, ctx, stream=False, progress=progress, route=route)
     state, timed_out = _invoke_with_deadline(
         graph,
         {
             "question": question,
-            "history": sanitize_history(history),
+            "history": memory,
             "evidence": [],
             "steps": [],
             "recalled": [],
@@ -1245,7 +1256,7 @@ def run(
     duration_ms = int((time.perf_counter() - started) * 1000)
     return _finish(
         question, state, ctx=ctx, planner=planner, writer=writer,
-        history=history, duration_ms=duration_ms, route=route,
+        history=memory, duration_ms=duration_ms, route=route,
     )
 
 
@@ -1280,6 +1291,8 @@ def stream(
     # 与 run() 同一套路由；轻量判断也吃整体预算。
     route = routing.decide(question, ctx.settings)
     progress = _Progress(events=True)
+    # 与非流式共用同一份压缩要点；写作阶段也用它，不再回头读 raw history。
+    memory = _history_for_context(history, ctx)
     graph = build_graph(planner, writer, ctx, stream=True, progress=progress, route=route)
 
     result: dict = {}
@@ -1290,7 +1303,7 @@ def stream(
             result["state"] = graph.invoke(
                 {
                     "question": question,
-                    "history": sanitize_history(history),
+                    "history": memory,
                     "evidence": [],
                     "steps": [],
                     "recalled": [],
@@ -1369,7 +1382,7 @@ def stream(
                 writer.stream(
                     question,
                     numbered,
-                    sanitize_history(history),
+                    sanitize_history(memory),
                     model=route.model,
                 ),
                 deadline_at if deadline_at is not None else float("inf"),

@@ -36,6 +36,7 @@ import json
 import logging
 from dataclasses import dataclass
 
+from app.agent import history_memory
 from app.config import AppSettings
 
 logger = logging.getLogger(__name__)
@@ -111,16 +112,66 @@ def plan_channels(question: str) -> list[str]:
     return [name for name in _CHANNEL_ORDER if name in picked]
 
 
+#: 检索辅助看多少轮历史：history 是消息列表，1 轮 = 用户 + 助手两条。
+#: 缩写扩展最需要早期上下文，给 6 轮；检索词改写/裙子识别 4 轮就够。
+EXPAND_HISTORY_TURNS = 6
+QUERY_HISTORY_TURNS = 4
+DRESS_HISTORY_TURNS = 4
+#: 单条历史消息进提示词前的上限，防止长答案把辅助提示词撑大。
+HISTORY_TURN_MAX_CHARS = 400
+
+
+def tail_turns(history: list[dict] | None, turns: int) -> list[dict]:
+    """取最近 N 轮并截断单条长度；保证提示词成本有上界。"""
+    if not history or turns <= 0:
+        return []
+    window = history[-turns * 2:]
+    result: list[dict] = []
+    for turn in window:
+        content = str(turn.get("content") or "").strip()
+        if not content:
+            continue
+        if len(content) > HISTORY_TURN_MAX_CHARS:
+            content = content[:HISTORY_TURN_MAX_CHARS] + "…"
+        result.append({"role": turn.get("role"), "content": content})
+    return result
+
+
+def history_context(
+    history: list[dict] | None, turns: int, heading: str
+) -> str:
+    """把历史渲染成提示词片段：压缩要点优先，否则回退最近 N 轮原文。
+
+    ``graph`` 进图前会把历史压成一条带 :data:`history_memory.MARKER` 的消息；
+    这里识别到它就直接用全文（它已经包含近期原文），不再按轮数重复截取。
+    """
+    if not history:
+        return ""
+    compacted = [
+        str(turn.get("content") or "")
+        for turn in history
+        if str(turn.get("content") or "").startswith(history_memory.MARKER)
+    ]
+    if compacted:
+        lines = "\n".join(compacted)
+        return f"\n对话历史要点（压缩，只用于理解「它」「这条」这类指代）：\n{lines}\n"
+    window = tail_turns(history, turns)
+    if not window:
+        return ""
+    lines = "\n".join(
+        f"{'用户' if turn.get('role') == 'user' else '助手'}：{turn.get('content', '')}"
+        for turn in window
+    )
+    return f"\n{heading}：\n{lines}\n"
+
+
 def build_query_prompt(question: str, history: list[dict] | None = None) -> str:
     """拼给模型看的检索词提取提示词。"""
-    context = ""
-    turns = (history or [])[-2:]
-    if turns:
-        lines = "\n".join(
-            f"{'用户' if turn.get('role') == 'user' else '助手'}：{turn.get('content', '')}"
-            for turn in turns
-        )
-        context = f"\n最近两轮对话（只用于理解「它」「这条」这类指代）：\n{lines}\n"
+    context = history_context(
+        history,
+        QUERY_HISTORY_TURNS,
+        f"最近 {QUERY_HISTORY_TURNS} 轮对话（只用于理解「它」「这条」这类指代）",
+    )
     return f"""把下面这个问题压成一个**检索词**，给小红书 / 微博 / 网页搜索用。
 
 用户问题：
@@ -142,14 +193,12 @@ def build_query_prompt(question: str, history: list[dict] | None = None) -> str:
 
 def build_expand_prompt(question: str, history: list[dict] | None = None) -> str:
     """核心通道全 0 命中时的保守扩展提示词：只要候选，不要断言。"""
-    turns = (history or [])[-2:]
-    context = ""
-    if turns:
-        lines = "\n".join(
-            f"{'用户' if turn.get('role') == 'user' else '助手'}：{turn.get('content', '')}"
-            for turn in turns
-        )
-        context = f"\n最近两轮对话（仅用于理解指代）：\n{lines}\n"
+    context = history_context(
+        history,
+        EXPAND_HISTORY_TURNS,
+        f"最近 {EXPAND_HISTORY_TURNS} 轮对话（仅用于理解指代；"
+        f"如果缩写在这些对话里出现过完整名称，优先采用）",
+    )
     return f"""用户的问题可能包含一个缩写或未知的裙子系列名。请只给出它可能的**完整名称候选**，
 供系统逐个回档案核验；不要下结论，不要解释，不要写「就是」。
 用户问题：
@@ -164,7 +213,8 @@ def build_expand_prompt(question: str, history: list[dict] | None = None) -> str
 1. 每个候选是完整的裙子系列名或缩写的明确展开，3–80 字；
 2. 最多 5 个，按可能性排序；不确定就返回空数组；
 3. 禁止编造品牌或系列；没有把握时宁可不给；
-4. 不要输出句子、理由或「可能是」这类断言。
+4. 如果更早对话里出现过这个缩写的完整名称，优先采用那个名称；
+5. 不要输出句子、理由或「可能是」这类断言。
 """
 
 
@@ -203,14 +253,11 @@ class DressHint:
 
 def build_dress_prompt(question: str, history: list[dict] | None = None) -> str:
     """裙子识别提示词：只还原品牌/系列名，不碰价格、日期、配色。"""
-    context = ""
-    turns = (history or [])[-2:]
-    if turns:
-        lines = "\n".join(
-            f"{'用户' if turn.get('role') == 'user' else '助手'}：{turn.get('content', '')}"
-            for turn in turns
-        )
-        context = f"\n最近两轮对话（只用于理解「它」「这条」这类指代）：\n{lines}\n"
+    context = history_context(
+        history,
+        DRESS_HISTORY_TURNS,
+        f"最近 {DRESS_HISTORY_TURNS} 轮对话（只用于理解「它」「这条」这类指代）",
+    )
     return f"""识别下面问题里提到的那条 Lolita 裙子，只输出一个 JSON 对象，不要任何其它文字。
 
 用户问题：

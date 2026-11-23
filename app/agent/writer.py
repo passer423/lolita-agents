@@ -33,6 +33,9 @@ WRITER_TIMEOUT = 60.0
 
 # 多轮：最多带几轮历史、每条多长。上下文是有限资源，历史无限增长就是给自己制造噪声。
 MAX_HISTORY_TURNS = 8
+#: 给检索辅助（缩写扩展 / 检索词改写 / 裙子识别）取多少条历史。
+#: 6 轮 = 12 条，写作阶段仍按 MAX_HISTORY_TURNS 再截一次。
+HISTORY_FETCH_MESSAGES = 12
 MAX_HISTORY_CHARS = 500
 
 # 引用编号只在**本轮**内有效。历史里的 ``[n]`` 指向上一轮的证据，
@@ -1408,7 +1411,7 @@ def number_consensus(question: str, evidence: list[dict]) -> dict:
     return result
 
 
-def sanitize_history(raw) -> list[dict]:
+def sanitize_history(raw, limit: int = MAX_HISTORY_TURNS) -> list[dict]:
     """只留最近若干轮，截断过长内容，丢掉角色不对的项。
 
     客户端传什么都可能——历史是**不可信输入**，而且直接进上下文（成本与安全都在这里）。
@@ -1434,7 +1437,7 @@ def sanitize_history(raw) -> list[dict]:
             if not content:
                 continue
         cleaned.append({"role": role, "content": content[:MAX_HISTORY_CHARS]})
-    return cleaned[-MAX_HISTORY_TURNS:]
+    return cleaned[-limit:]
 
 
 class DeepSeekWriter:
