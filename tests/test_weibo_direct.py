@@ -6,8 +6,12 @@
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -181,6 +185,8 @@ def test_quota_1113_switches_weibo_to_direct(monkeypatch):
 def test_search_status_degrades_while_quota_blocked(monkeypatch):
     app = AppSettings(search_enabled=True, search_api_key="k", search_provider="zhipu")
     monkeypatch.setitem(web_search._QUOTA_BLOCKED_UNTIL, "zhipu", time.time() + 900)
+    # 本机可能恰好有浏览器；关注建议的断言要固定环境，不能随 runner 漂移。
+    monkeypatch.setattr(web_search, "no_key_readiness", lambda _app: (False, "测试环境"))
 
     status = channels._search_status(app)
 
@@ -190,17 +196,193 @@ def test_search_status_degrades_while_quota_blocked(monkeypatch):
     assert channels.follow_source(app) == ""
 
 
-def test_weibo_status_uses_direct_only_when_ready(monkeypatch):
-    app = AppSettings()
-    search = {"enabled": True, "ready": False, "reason": "搜索配额失效（code=1113）"}
+def test_weibo_direct_is_independent_source_without_search_key(monkeypatch):
+    """没有付费 key 时直抓不是兜底，而是主路；且不得调用付费搜索。"""
+    app = AppSettings(search_enabled=False, search_api_key="", weibo_direct_enabled=True)
+    paid_calls: list[int] = []
+
+    def fake_paid(*_args, **_kwargs):
+        paid_calls.append(1)
+        return []
+
+    monkeypatch.setattr(web_search, "search", fake_paid)
+    monkeypatch.setattr(
+        weibo_direct,
+        "search",
+        lambda *_a, **_k: [
+            web_search.SearchResult(
+                title="四时花预约价",
+                url="https://m.weibo.cn/detail/1",
+                content="四时花长款预约价 578，现货 598",
+            )
+        ],
+    )
+
+    items = channels.recall("weibo", "四时花 价格", RecallContext(settings=app))
+
+    assert paid_calls == []
+    assert items[0]["channel"] == "weibo"
+    assert items[0]["url"] == "https://m.weibo.cn/detail/1"
+
+
+def test_weibo_status_without_key_reports_direct(monkeypatch):
+    app = AppSettings(search_enabled=False, search_api_key="")
+    monkeypatch.setattr(weibo_direct, "readiness", lambda _app: (True, ""))
+
+    status = channels._weibo_status(app)
+
+    assert status["enabled"] is True
+    assert status["ready"] is True
+    assert status["mode"] == "direct"
+    assert "直抓" in status["reason"]
+
+    monkeypatch.setattr(weibo_direct, "readiness", lambda _app: (False, "未安装 playwright"))
+    blocked = channels._weibo_status(app)
+    assert blocked["ready"] is False
+    assert blocked["mode"] == "direct"
+    assert "未安装 playwright" in blocked["reason"]
+
+
+def test_weibo_status_uses_direct_when_quota_blocked(monkeypatch):
+    app = AppSettings(search_enabled=True, search_api_key="k", search_provider="zhipu")
     monkeypatch.setattr(web_search, "quota_blocked", lambda *_a, **_k: True)
 
     monkeypatch.setattr(weibo_direct, "readiness", lambda _app: (True, ""))
-    ready = channels._weibo_status(search, app)
+    ready = channels._weibo_status(app)
     assert ready["ready"] is True
-    assert "直抓" in ready["reason"]
+    assert ready["mode"] == "direct"
+    assert "配额失效" in ready["reason"]
 
     monkeypatch.setattr(weibo_direct, "readiness", lambda _app: (False, "未安装 playwright"))
-    blocked = channels._weibo_status(search, app)
+    blocked = channels._weibo_status(app)
     assert blocked["ready"] is False
+    assert blocked["mode"] == "direct"
     assert "未安装 playwright" in blocked["reason"]
+
+
+def test_web_channel_uses_no_key_search_without_paid_key(monkeypatch):
+    app = AppSettings(search_enabled=False, search_api_key="", web_browser_enabled=True)
+    calls: list[str] = []
+
+    def fake_no_key(*_args, **_kwargs):
+        calls.append("no_key")
+        return [
+            web_search.SearchResult(
+                title="四时花预约价",
+                url="https://example.com/1",
+                content="长款 578 元",
+                provider="bing_browser",
+            )
+        ]
+
+    monkeypatch.setattr(web_search, "search_no_key", fake_no_key)
+    monkeypatch.setattr(
+        web_search,
+        "search",
+        lambda *_a, **_k: pytest.fail("没有 key 时不应调用付费搜索"),
+    )
+
+    items = channels.recall("web", "四时花 价格", RecallContext(settings=app))
+
+    assert calls == ["no_key"]
+    assert items[0]["url"] == "https://example.com/1"
+
+
+def test_web_status_uses_browser_without_key(monkeypatch):
+    app = AppSettings(search_enabled=False, search_api_key="", web_browser_enabled=True)
+    monkeypatch.setattr(web_search, "no_key_readiness", lambda _app: (True, ""))
+
+    status = channels._web_status(app)
+
+    assert status["enabled"] is True
+    assert status["ready"] is True
+    assert status["mode"] == "browser"
+    assert "Bing" in status["reason"]
+
+    monkeypatch.setattr(web_search, "no_key_readiness", lambda _app: (False, "找不到可用浏览器"))
+    blocked = channels._web_status(app)
+    assert blocked["ready"] is False
+    assert blocked["mode"] == "browser"
+    assert "找不到可用浏览器" in blocked["reason"]
+
+
+def test_web_status_respects_switch_when_no_paid_key():
+    app = AppSettings(search_enabled=False, search_api_key="", web_browser_enabled=False)
+
+    status = channels._web_status(app)
+
+    assert status["ready"] is False
+    assert status["mode"] == "unavailable"
+    assert "WEB_BROWSER_ENABLED=false" in status["reason"]
+
+
+# --------------------------------------------------------------------- 浏览器自动选择
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_script(name: str):
+    scripts_dir = str(ROOT / "scripts")
+    added = scripts_dir not in sys.path
+    if added:
+        sys.path.insert(0, scripts_dir)
+    try:
+        spec = importlib.util.spec_from_file_location(f"_test_{name}", ROOT / "scripts" / f"{name}.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+    finally:
+        if added:
+            sys.path.remove(scripts_dir)
+    return module
+
+
+class _FakeChromium:
+    def __init__(self, fail_channels: set[str]) -> None:
+        self.fail_channels = fail_channels
+        self.calls: list[dict] = []
+
+    def launch(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("channel") in self.fail_channels:
+            raise RuntimeError(f"{kwargs['channel']} 不存在")
+        return object()
+
+
+class _FakePlaywright:
+    def __init__(self, fail_channels: set[str]) -> None:
+        self.chromium = _FakeChromium(fail_channels)
+
+
+def test_weibo_launch_prefers_edge_then_falls_back_to_chromium():
+    browser = _load_script("_browser")
+
+    pw = _FakePlaywright(fail_channels={"msedge"})
+    _, channel = browser.launch_browser(pw)
+
+    assert channel == "chromium"
+    assert [call.get("channel") for call in pw.chromium.calls] == ["msedge", None]
+
+
+def test_weibo_launch_reports_clear_error_when_no_browser():
+    browser = _load_script("_browser")
+    pw = _FakePlaywright(fail_channels={"msedge", None})
+
+    with pytest.raises(browser.BrowserMissing, match="找不到可用浏览器"):
+        browser.launch_browser(pw)
+
+
+def test_weibo_script_emits_browser_missing_json(monkeypatch, capsys):
+    script = _load_script("weibo_search")
+    monkeypatch.setattr(sys, "argv", ["weibo_search.py", "--query", "四时花"])
+
+    def fake_search(*_args, **_kwargs):
+        raise script.BrowserMissing("找不到可用浏览器：Edge 与 Chromium 都不可用")
+
+    monkeypatch.setattr(script, "_search", fake_search)
+
+    assert script.main() == 1
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["ok"] is False
+    assert payload["error"] == "browser_missing"
+    assert "找不到可用浏览器" in payload["detail"]

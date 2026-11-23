@@ -9,20 +9,43 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
+from http.cookiejar import CookieJar
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import quote
+from urllib.request import (
+    HTTPCookieProcessor,
+    HTTPSHandler,
+    Request,
+    build_opener,
+    urlopen,
+)
 
-from app.config import AppSettings
-from app.services import imagefetch
+from app.config import APP_ROOT, AppSettings
+from app.services import browser, imagefetch
 
 logger = logging.getLogger(__name__)
 
 BOCHA_URL = "https://api.bochaai.com/v1/web-search"
 ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/web_search"
+
+SEO360_URL = "https://www.so.com/s"
+SEO360_MOBILE_URL = "https://m.so.com/s"
+SEO360_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+SEO360_MOBILE_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+)
 
 
 class SearchUnavailable(RuntimeError):
@@ -115,6 +138,9 @@ class SearchResult:
     # 时间可以直接采信。约 10% 的搜索卡片没有作者字段，取不到就留空，不做额外请求。
     author_id: str = ""
     author_name: str = ""
+    # 无 key 的 360 兜底拿不到可点击原链接：``url`` 留空，并在标题里标明
+    # 「文本兜底，无原链接」。下游（证据行 / 引用）据此不得把它当可引用链接。
+    text_only: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -129,6 +155,7 @@ class SearchResult:
             "image_urls": list(self.image_urls),
             "author_id": self.author_id,
             "author_name": self.author_name,
+            "text_only": self.text_only,
         }
 
 
@@ -311,3 +338,326 @@ def search(
     results = _dedupe(results)
     logger.info("搜索 %s：%s 条（%s）", text, len(results), provider)
     return results
+
+
+# --------------------------------------------------------------------- 无 key 来源
+#
+# 公网演示不配付费 key。实测可用性（2026-11）：
+# * Bing 浏览器检索：约 2.4s，10 条，链接可点，稳定；
+# * 360：约 0.38s，能拿到标题/摘要，但跳转链接返回 400 —— 只能当**文本兜底**；
+# * DDG / Google / Brave / Startpage 网络不可达，百度弹滑块，Sogou 不稳定。
+# 所以顺序固定为 Bing 浏览器 → 360 文本，不引入其它来源，也不部署 SearXNG。
+
+
+def paid_config_status(app: AppSettings) -> tuple[bool, str]:
+    """付费搜索是否配置完整；不完整时返回可读原因（不发起请求）。"""
+    if not app.search_enabled:
+        return False, "未启用（SEARCH_ENABLED=false）"
+    if not app.search_api_key.strip():
+        return False, "缺少 SEARCH_API_KEY"
+    provider = (app.search_provider or "bocha").strip().lower() or "bocha"
+    if provider not in {"bocha", "zhipu"}:
+        return False, f"不支持的 SEARCH_PROVIDER：{provider}（只支持 bocha / zhipu）"
+    return True, ""
+
+
+def no_key_readiness(app: AppSettings) -> tuple[bool, str]:
+    """无 key 网页来源是否可用（Bing 浏览器 + 360 文本兜底）。"""
+    if not app.web_browser_enabled:
+        return False, "未启用（WEB_BROWSER_ENABLED=false）"
+    return browser.readiness()
+
+
+def _results_from_bing(payload: dict) -> list[SearchResult]:
+    results: list[SearchResult] = []
+    for item in payload.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        if not title or not url:
+            continue
+        snippet = str(item.get("snippet") or "").strip()
+        results.append(
+            SearchResult(
+                title=title,
+                url=url,
+                snippet=snippet,
+                content=snippet,
+                site_name=str(item.get("site") or "").strip(),
+                provider="bing_browser",
+            )
+        )
+    return results
+
+
+def _bing_browser_search(query: str, *, limit: int, timeout: float) -> list[SearchResult]:
+    """调用浏览器脚本检索 Bing；脚本失败或为空时抛异常，交给 360 兜底。"""
+    script = APP_ROOT / "scripts" / "bing_search.py"
+    if not script.exists():
+        raise SearchUnavailable(f"找不到 Bing 检索脚本：{script}")
+    command = [
+        sys.executable,
+        str(script),
+        "--query",
+        query,
+        "--limit",
+        str(limit),
+        "--timeout",
+        str(timeout),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout + 20,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SearchUnavailable(f"Bing 浏览器检索超时（{timeout:.0f}s）") from exc
+
+    payload: dict = {}
+    for line in (completed.stdout or "").strip().splitlines():
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            payload = candidate
+    if not payload:
+        detail = (completed.stderr or "").strip()[-200:]
+        raise SearchUnavailable(f"Bing 检索脚本没有返回 JSON：{detail}")
+    if not payload.get("ok"):
+        error = str(payload.get("error") or "unknown")
+        detail = str(payload.get("detail") or "")
+        raise SearchUnavailable(f"Bing 浏览器检索失败（{error}）：{detail}")
+    return _results_from_bing(payload)
+
+
+_VOID_TAGS = {
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "param",
+    "source",
+    "track",
+    "wbr",
+}
+
+
+class _So360Parser(HTMLParser):
+    """只取 360 结果的标题与摘要，**刻意不取链接**。
+
+    360 的跳转链接会 400，取出来只会让下游误以为可点开。这里连 href 都不读，
+    从源头上避免它变成可引用链接。同时兼容桌面（``li.res-list``）与移动页
+    常见的结果容器，避免换一个入口就整路为空。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.items: list[tuple[str, str]] = []
+        self._depth = 0
+        self._block: dict | None = None
+        self._roles: list[str] = []
+        self._in_title = 0
+        self._in_snippet = 0
+        self._snippet_started = False
+        self._title: list[str] = []
+        self._snippet: list[str] = []
+
+    @staticmethod
+    def _classes(attrs: list[tuple[str, str | None]]) -> set[str]:
+        return (dict(attrs).get("class") or "").split()
+
+    @classmethod
+    def _is_result(cls, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+        if tag not in {"li", "div", "article", "section"}:
+            return False
+        tokens = cls._classes(attrs)
+        return any(
+            token == "res-list"
+            or token == "g-card"
+            or token.startswith("res-")
+            or token.startswith("result")
+            for token in tokens
+        )
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _VOID_TAGS:
+            return
+        self._depth += 1
+        if self._block is None and self._is_result(tag, attrs):
+            self._block = {"tag": tag, "depth": self._depth}
+            self._title = []
+            self._snippet = []
+            self._snippet_started = False
+
+        role = ""
+        if self._block is not None:
+            classes = self._classes(attrs)
+            if tag in {"h2", "h3"} or any("title" in token for token in classes):
+                role = "title"
+                self._in_title += 1
+            elif (tag == "p" or any("desc" in token for token in classes)) and not (
+                self._snippet_started
+            ):
+                role = "snippet"
+                self._snippet_started = True
+                self._in_snippet += 1
+        self._roles.append(role)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _VOID_TAGS:
+            return
+        if self._roles:
+            role = self._roles.pop()
+            if role == "title" and self._in_title:
+                self._in_title -= 1
+            elif role == "snippet" and self._in_snippet:
+                self._in_snippet -= 1
+        if self._block is not None and self._depth == self._block["depth"] and tag == self._block["tag"]:
+            title = " ".join("".join(self._title).split())
+            snippet = " ".join("".join(self._snippet).split())
+            if title:
+                self.items.append((title, snippet))
+            self._block = None
+            self._in_title = 0
+            self._in_snippet = 0
+        self._depth = max(0, self._depth - 1)
+
+    def handle_data(self, data: str) -> None:
+        if self._block is None:
+            return
+        if self._in_title:
+            self._title.append(data)
+        elif self._in_snippet:
+            self._snippet.append(data)
+
+
+def _results_from_360(html_text: str, *, limit: int) -> list[SearchResult]:
+    parser = _So360Parser()
+    try:
+        parser.feed(html_text or "")
+    except Exception:  # noqa: BLE001 - 兜底页面结构变了就当没结果
+        return []
+    results: list[SearchResult] = []
+    for title, snippet in parser.items[: max(1, limit)]:
+        results.append(
+            SearchResult(
+                title=f"{title}（文本兜底，无原链接）",
+                url="",
+                snippet=snippet,
+                content=snippet,
+                site_name="360 搜索",
+                provider="360_text",
+                text_only=True,
+            )
+        )
+    return results
+
+
+def _fetch_360(url: str, *, ua: str, referer: str, timeout: float) -> str:
+    """带 cookie jar 取 360 页面。
+
+    360 对裸请求很敏感：先访问首页拿 cookie，再带 Referer 检索，成功率高很多。
+    首页失败不阻断检索（有的节点只拦首页），所以 preflight 单独吞掉异常。
+    """
+    opener = build_opener(
+        HTTPCookieProcessor(CookieJar()),
+        HTTPSHandler(context=imagefetch.ssl_context()),
+    )
+    with contextlib.suppress(HTTPError, URLError, TimeoutError, OSError):
+        opener.open(
+            Request(referer, headers={"User-Agent": ua}),
+            timeout=timeout,
+        ).read()
+    request = Request(
+        url,
+        headers={
+            "User-Agent": ua,
+            "Referer": referer,
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        },
+    )
+    with opener.open(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return response.read().decode(charset, errors="replace")
+
+
+def _search_360(query: str, *, limit: int, timeout: float) -> list[SearchResult]:
+    """360 文本兜底：桌面页优先，失败再试移动页；连 href 都不读。"""
+    per_call = max(1.0, timeout / 3)
+    errors: list[str] = []
+    attempts = (
+        (f"{SEO360_URL}?q={quote(query)}", SEO360_UA, "https://www.so.com/"),
+        (f"{SEO360_MOBILE_URL}?q={quote(query)}", SEO360_MOBILE_UA, "https://m.so.com/"),
+    )
+    for url, ua, referer in attempts:
+        try:
+            raw = _fetch_360(url, ua=ua, referer=referer, timeout=per_call)
+        except HTTPError as exc:
+            errors.append(f"HTTP {exc.code}")
+            continue
+        except (URLError, TimeoutError, OSError) as exc:
+            errors.append(f"连不上：{getattr(exc, 'reason', exc)}")
+            continue
+        results = _results_from_360(raw, limit=limit)
+        if results:
+            return results
+        if "验证码" in raw or "访问异常" in raw:
+            errors.append("被风控（验证码）")
+        else:
+            errors.append("0 条")
+    raise SearchUnavailable("360 文本兜底不可用：" + "；".join(errors))
+
+
+def search_no_key(
+    query: str,
+    app: AppSettings,
+    *,
+    max_results: int | None = None,
+    timeout: float | None = None,
+) -> list[SearchResult]:
+    """无 key 网页来源：Bing 浏览器主路，失败/为空才用 360 文本兜底。
+
+    抛 ``SearchUnavailable`` 表示两路都不可用；360 的结果 ``url`` 为空并带
+    ``text_only=True``，调用方不得把它当可引用链接。
+    """
+    if not app.web_browser_enabled:
+        raise SearchUnavailable("未启用无 key 网页来源（WEB_BROWSER_ENABLED=false）")
+
+    text = " ".join((query or "").split())[:70]
+    if not text:
+        raise SearchUnavailable("搜索词为空")
+
+    count = max(1, min(50, max_results or app.web_browser_max_results))
+    timeout_seconds = float(timeout or app.web_browser_timeout)
+    errors: list[str] = []
+
+    try:
+        results = _bing_browser_search(text, limit=count, timeout=timeout_seconds)
+        if results:
+            logger.info("Bing 浏览器检索 %s：%s 条", text, len(results))
+            return results
+        errors.append("Bing 浏览器检索 0 条")
+    except Exception as exc:  # noqa: BLE001 - 主路失败才允许兜底
+        errors.append(f"{type(exc).__name__}: {str(exc)[:120]}")
+
+    try:
+        results = _search_360(text, limit=count, timeout=min(timeout_seconds, 10.0))
+        if results:
+            logger.info("Bing 不可用，360 文本兜底 %s：%s 条", text, len(results))
+            return results
+        errors.append("360 文本兜底 0 条")
+    except Exception as exc:  # noqa: BLE001 - 兜底失败统一报不可用
+        errors.append(f"{type(exc).__name__}: {str(exc)[:120]}")
+
+    raise SearchUnavailable("无 key 网页来源不可用：" + "；".join(errors))

@@ -110,7 +110,11 @@ def test_status_reports_channels_without_key(client, tmp_path, monkeypatch):
         "reason": "未启用（XHS_ENABLED=false）",
     }
     assert status["own"]["enabled"] is True
-    assert status["weibo"]["enabled"] is False
+    # 没有付费 key 时微博直抓是独立来源：开关打开（默认）就该报 enabled，
+    # 并明确标注走的是 direct，而不是笼统显示不可用。
+    assert status["weibo"]["enabled"] is True
+    assert status["weibo"]["mode"] == "direct"
+    assert status["web"]["mode"] in {"browser", "unavailable"}
 
     # (a) 上游目录不存在：必须是「找不到上游」，不能混成「索引没建」。
     monkeypatch.setattr(chat_router.settings, "lolita_rag_root", tmp_path / "missing-rag")

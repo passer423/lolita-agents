@@ -259,3 +259,148 @@ def test_network_error_retries_once_then_reports(monkeypatch):
         web_search.search("Baby", app)
 
     assert len(calls) == 2
+
+
+# --------------------------------------------------------------------- 无 key 来源
+
+
+def test_bing_payload_keeps_only_clickable_results():
+    payload = {
+        "ok": True,
+        "results": [
+            {"title": "四时花预约", "url": "https://example.com/1", "snippet": "578 元", "site": "weibo.com"},
+            {"title": "缺链接", "url": "", "snippet": "丢掉"},
+            "不是对象",
+        ],
+    }
+
+    results = web_search._results_from_bing(payload)
+
+    assert len(results) == 1
+    assert results[0].url == "https://example.com/1"
+    assert results[0].provider == "bing_browser"
+    assert results[0].text_only is False
+
+
+SO360_HTML = """
+<ul>
+  <li class="res-list">
+    <h3><a href="https://www.so.com/link?url=bad">四时花预约价</a></h3>
+    <p class="res-desc">长款 578 元，现货 598 元</p>
+  </li>
+  <li class="res-list">
+    <h3>Baby 秋日私语返图</h3>
+    <p>实拍与尺码讨论</p>
+  </li>
+</ul>
+"""
+
+
+def test_360_results_are_text_only_without_url():
+    results = web_search._results_from_360(SO360_HTML, limit=5)
+
+    assert len(results) == 2
+    first = results[0]
+    # 360 的跳转链接不可点：连 href 都不读，url 必须为空。
+    assert first.url == ""
+    assert first.text_only is True
+    assert first.provider == "360_text"
+    assert "文本兜底，无原链接" in first.title
+    assert "578" in first.content
+
+
+MOBILE_360_HTML = """
+<div class="g-card">
+  <div class="g-f-title"><a href="https://m.so.com/link?bad">四时花 预约价</a></div>
+  <p class="g-f-info-sub">长款 578 元，现货 598 元</p>
+</div>
+<div class="g-card">
+  <div class="g-f-title"><a href="https://m.so.com/link?bad2">Baby 返图</a></div>
+  <p>实拍与尺码讨论</p>
+</div>
+"""
+
+
+def test_360_mobile_markup_is_supported():
+    """桌面/移动入口结构不同；换入口不能整路为空，也不能带出链接。"""
+    results = web_search._results_from_360(MOBILE_360_HTML, limit=5)
+
+    assert [item.title for item in results] == [
+        "四时花 预约价（文本兜底，无原链接）",
+        "Baby 返图（文本兜底，无原链接）",
+    ]
+    assert all(item.url == "" and item.text_only for item in results)
+    assert "578" in results[0].content
+
+
+def test_search_no_key_prefers_bing_and_does_not_call_360(monkeypatch):
+    app = AppSettings(web_browser_enabled=True)
+    bing = [
+        web_search.SearchResult(
+            title="四时花",
+            url="https://example.com/1",
+            snippet="578 元",
+            provider="bing_browser",
+        )
+    ]
+    monkeypatch.setattr(web_search, "_bing_browser_search", lambda *_a, **_k: bing)
+
+    def fail_360(*_args, **_kwargs):
+        raise AssertionError("Bing 有结果时不应调用 360")
+
+    monkeypatch.setattr(web_search, "_search_360", fail_360)
+
+    results = web_search.search_no_key("四时花", app)
+
+    assert [item.url for item in results] == ["https://example.com/1"]
+    assert results[0].provider == "bing_browser"
+
+
+def test_search_no_key_falls_back_to_360_when_bing_empty(monkeypatch):
+    app = AppSettings(web_browser_enabled=True)
+    monkeypatch.setattr(web_search, "_bing_browser_search", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        web_search,
+        "_search_360",
+        lambda *_a, **_k: web_search._results_from_360(SO360_HTML, limit=5),
+    )
+
+    results = web_search.search_no_key("四时花", app)
+
+    assert len(results) == 2
+    assert all(item.text_only and item.url == "" for item in results)
+    assert results[0].provider == "360_text"
+
+
+def test_search_no_key_reports_both_failures(monkeypatch):
+    app = AppSettings(web_browser_enabled=True)
+
+    def broken(*_args, **_kwargs):
+        raise web_search.SearchUnavailable("boom")
+
+    monkeypatch.setattr(web_search, "_bing_browser_search", broken)
+    monkeypatch.setattr(web_search, "_search_360", broken)
+
+    with pytest.raises(web_search.SearchUnavailable, match="无 key 网页来源不可用"):
+        web_search.search_no_key("四时花", app)
+
+
+def test_search_no_key_respects_switch(monkeypatch):
+    app = AppSettings(web_browser_enabled=False)
+
+    with pytest.raises(web_search.SearchUnavailable, match="WEB_BROWSER_ENABLED=false"):
+        web_search.search_no_key("四时花", app)
+
+
+def test_text_only_evidence_gets_distinct_refs():
+    """文本兜底没有 URL，去重键不能都落空，否则多条结果会被合并成一条。"""
+    from app.agent import channels
+
+    results = web_search._results_from_360(SO360_HTML, limit=5)
+    items = channels._search_evidence("web", results)
+
+    assert [item["url"] for item in items] == ["", ""]
+    assert all(item["text_only"] is True for item in items)
+    refs = [item["ref"] for item in items]
+    assert len(set(refs)) == 2
+    assert all(refs)

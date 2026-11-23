@@ -546,15 +546,30 @@ def _recall_lolibrary(
 # --------------------------------------------------------------------- xhs / weibo / web
 
 
+def _evidence_ref(result) -> str:
+    """证据去重键：正常用 URL；无链接的文本兜底用来源+标题，避免全被合并成一条。"""
+    url = str(getattr(result, "url", "") or "").strip()
+    if url:
+        return url
+    if getattr(result, "text_only", False):
+        provider = str(getattr(result, "provider", "") or "")
+        title = str(getattr(result, "title", "") or "")[:60]
+        return f"text:{provider}:{title}"
+    return ""
+
+
 def _search_evidence(channel: str, results: list, limit: int | None = None) -> list[dict]:
     return [
         {
             "channel": channel,
             "source_kind": CHANNEL_SOURCE_KIND[channel],
-            "ref": r.url,
+            "ref": _evidence_ref(r),
             "title": r.title,
             "text": _clip(r.content or r.snippet, limit),
             "url": r.url,
+            # 1 = 只有标题/摘要、没有可点击原链接（360 文本兜底）。写作层与
+            # 引用层看到它为真时，不得生成可点击来源。
+            "text_only": bool(getattr(r, "text_only", False)),
             # 只给数量与前几张图：正文里没有的信息，靠它提示「图里可能有价格表」。
             # 这两个字段不进写作提示词，只有代码侧读它们。
             "image_count": int(getattr(r, "image_count", 0) or 0),
@@ -631,6 +646,11 @@ def _official_evidence(
 def _recall_xhs(
     question: str, ctx: RecallContext, query: str = "", limit: int | None = None
 ) -> list[dict]:
+    # 总开关关闭时直接跳过：不发任何请求，也不进入登录墙/图片识别链路。
+    # 状态接口会显示 enabled=false + 原因，界面不会把它当成「有通道但永远为空」。
+    if not ctx.settings.xhs_enabled:
+        raise ChannelUnavailable("小红书通道已关闭（XHS_ENABLED=false），不发起请求")
+
     from app.agent import image_evidence
     from app.services import xhs_search
 
@@ -762,6 +782,12 @@ def _recall_weibo(
     # 先用 scripts/probe_search.py 实测再改，别凭感觉调。
     text = (query or question).strip()
 
+    # 公网演示不配付费 key：搜索不可用时直抓不是「应急」，而是这条通道的主路。
+    configured, config_reason = web_search.paid_config_status(ctx.settings)
+    if not configured:
+        logger.info("付费搜索未配置（%s），微博直抓作为独立来源", config_reason)
+        return _weibo_direct_fallback(question, text, ctx, limit)
+
     # 配额已失效时不必再打一次注定失败的接口，直接换直抓。
     if web_search.quota_blocked(ctx.settings):
         logger.warning("微博搜索配额失效中，改用直抓")
@@ -822,9 +848,23 @@ def _recall_web(
 ) -> list[dict]:
     from app.services import web_search
 
-    results = web_search.search(
-        query or question, ctx.settings, max_results=ctx.settings.search_max_results
-    )
+    text = query or question
+    configured, _ = web_search.paid_config_status(ctx.settings)
+    if not configured or web_search.quota_blocked(ctx.settings):
+        # 无 key / 配额失效：Bing 浏览器主路，失败或为空才用 360 文本兜底。
+        results = web_search.search_no_key(
+            text, ctx.settings, max_results=ctx.settings.search_max_results
+        )
+    else:
+        try:
+            results = web_search.search(
+                text, ctx.settings, max_results=ctx.settings.search_max_results
+            )
+        except web_search.SearchQuotaExhausted:
+            logger.warning("网页搜索配额耗尽，改用 Bing 浏览器检索")
+            results = web_search.search_no_key(
+                text, ctx.settings, max_results=ctx.settings.search_max_results
+            )
     return _search_evidence("web", results, limit)
 
 
@@ -864,22 +904,96 @@ def _search_status(app: AppSettings) -> dict[str, Any]:
     return {"enabled": True, "ready": True, "reason": ""}
 
 
-def _weibo_status(search: dict[str, Any], app: AppSettings) -> dict[str, Any]:
-    """微博通道状态：搜索配额失效时，直抓可用才算就绪。"""
+def _weibo_status(app: AppSettings) -> dict[str, Any]:
+    """微博通道状态：如实标明当前走搜索还是直抓。
+
+    * 付费搜索配好且可用：``mode=search``；
+    * 没配 key / provider 不支持：直抓就是主路，``mode=direct``；
+    * 配额失效：搜索不可用，直抓可用则 ``mode=direct``；
+    * 直抓开关也关掉：``mode=unavailable``；直抓是当前路由但浏览器缺失时
+      仍是 ``mode=direct`` + ``ready=false``，并给出具体原因。
+    """
     from app.services import web_search, weibo_direct
 
-    if not (search["enabled"] and not search["ready"] and web_search.quota_blocked(app)):
-        return dict(search)
-    ready, reason = weibo_direct.readiness(app)
+    search = _search_status(app)
+    configured, config_reason = web_search.paid_config_status(app)
+    if not configured:
+        ready, reason = weibo_direct.readiness(app)
+        if ready:
+            return {
+                "enabled": True,
+                "ready": True,
+                "mode": "direct",
+                "reason": f"付费搜索未配置（{config_reason}），使用微博直抓（站内第一页）",
+            }
+        if not app.weibo_direct_enabled:
+            return {
+                "enabled": False,
+                "ready": False,
+                "mode": "unavailable",
+                "reason": f"付费搜索未配置（{config_reason}）；微博直抓已关闭（WEIBO_DIRECT_ENABLED=false）",
+            }
+        return {
+            "enabled": True,
+            "ready": False,
+            "mode": "direct",
+            "reason": f"付费搜索未配置（{config_reason}）；微博直抓不可用（{reason}）",
+        }
+
+    if search["ready"]:
+        return {**search, "mode": "search"}
+
+    if web_search.quota_blocked(app):
+        ready, reason = weibo_direct.readiness(app)
+        if ready:
+            return {
+                "enabled": True,
+                "ready": True,
+                "mode": "direct",
+                "reason": "搜索引擎配额失效，改用微博直抓（站内第一页）",
+            }
+        return {
+            **search,
+            "mode": "direct",
+            "reason": f"{search['reason']}；微博直抓不可用（{reason}）",
+        }
+
+    return {**search, "mode": "search"}
+
+
+def _web_status(app: AppSettings) -> dict[str, Any]:
+    """网页通道状态：付费搜索可用走 search，否则无 key 的 Bing/360 走 browser。"""
+    from app.services import web_search
+
+    search = _search_status(app)
+    if search["ready"]:
+        return {**search, "mode": "search"}
+
+    configured, config_reason = web_search.paid_config_status(app)
+    if not app.web_browser_enabled:
+        # 没有付费搜索、也没有开无 key 来源：这条通道没有可用路径。
+        status = {**search, "mode": "unavailable"}
+        if not configured:
+            status["reason"] = f"{config_reason}；无 key 网页来源未启用（WEB_BROWSER_ENABLED=false）"
+        return status
+
+    ready, reason = web_search.no_key_readiness(app)
     if ready:
+        detail = "搜索引擎配额失效" if configured else f"付费搜索未配置（{config_reason}）"
         return {
             "enabled": True,
             "ready": True,
-            "reason": "搜索引擎配额失效，改用微博直抓（站内第一页）",
+            "mode": "browser",
+            "reason": f"{detail}，改用 Bing 浏览器检索（失败时 360 文本兜底）",
         }
-    status = dict(search)
-    status["reason"] = f"{search['reason']}；微博直抓不可用（{reason}）"
-    return status
+    detail = search["reason"] if configured else config_reason
+    return {
+        "enabled": True,
+        "ready": False,
+        # 开关是开的，路由就是 browser；ready=false + 原因说明当前为什么不可用。
+        "mode": "browser",
+        "reason": f"{detail}；无 key 网页来源不可用（{reason}）",
+    }
 
 
 def _xhs_status(app: AppSettings) -> dict[str, Any]:
@@ -921,9 +1035,8 @@ def channel_status(app: AppSettings | None = None) -> dict[str, dict[str, Any]]:
     }
 
     result["xhs"] = _xhs_status(app)
-    search = _search_status(app)
-    result["weibo"] = _weibo_status(search, app)
-    result["web"] = dict(search)
+    result["weibo"] = _weibo_status(app)
+    result["web"] = _web_status(app)
     return result
 
 
@@ -934,7 +1047,7 @@ def follow_source(app: AppSettings | None = None) -> str:
     也收不到更新，所以这里直接不给建议。
     """
     app = app or default_settings
-    if _search_status(app)["ready"]:
+    if _web_status(app)["ready"]:
         return "web"
     if _xhs_status(app)["ready"]:
         return "xhs"

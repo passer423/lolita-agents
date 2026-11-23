@@ -427,3 +427,27 @@ def test_official_evidence_line_is_labelled():
 
     assert line.startswith("[1]（官方）")
     assert "淘宝" not in line
+
+
+# ------------------------------------------------------------------ 总开关
+
+
+def test_disabled_xhs_sends_no_request_and_reports_disabled(monkeypatch):
+    """XHS_ENABLED=false：不发任何请求，状态如实显示 disabled + 原因。"""
+    app = AppSettings(xhs_enabled=False)
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        xhs_search, "search", lambda *_a, **_k: calls.append("search") or []
+    )
+
+    with pytest.raises(channels.ChannelUnavailable, match="XHS_ENABLED=false"):
+        channels.recall("xhs", "四时花 价格", RecallContext(settings=app))
+
+    assert calls == []
+    status = channels._xhs_status(app)
+    assert status == {
+        "enabled": False,
+        "ready": False,
+        "reason": "未启用（XHS_ENABLED=false）",
+    }

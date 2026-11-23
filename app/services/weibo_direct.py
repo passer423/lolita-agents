@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 from app.config import APP_ROOT, AppSettings
-from app.services import web_search
+from app.services import browser, web_search
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,9 @@ def readiness(app: AppSettings) -> tuple[bool, str]:
         return False, f"找不到直抓脚本：{script_path()}"
     if importlib.util.find_spec("playwright") is None:
         return False, "未安装 playwright（pip install playwright）"
-    return True, ""
+    # 装了 Playwright 不等于有浏览器：托管 CI 与新服务器常见这种情况。
+    # 不先判掉的话，状态会报就绪，第一次召回才在子进程里失败。
+    return browser.readiness()
 
 
 def _cache_path(app: AppSettings, query: str, limit: int) -> Path:
@@ -245,6 +247,8 @@ def _fetch_posts(query: str, app: AppSettings, *, limit: int, timeout: float) ->
         detail = str(payload.get("detail") or "")
         if error in {"no_payload", "login_required"}:
             raise WeiboDirectUnavailable(f"微博直抓被登录墙拦住（{error}）：{detail}")
+        if error == "browser_missing":
+            raise WeiboDirectUnavailable(f"微博直抓没有可用浏览器：{detail}")
         raise WeiboDirectUnavailable(f"微博直抓失败（{error}）：{detail}")
 
     posts = payload.get("posts") or []

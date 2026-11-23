@@ -96,8 +96,10 @@ def test_follows_sources_report_readiness(client):
         item["name"]: item for item in client.get("/api/follows").json()["sources"]
     }
     assert set(sources) == {"own", "real", "lolibrary", "xhs", "weibo", "web"}
-    assert sources["web"]["enabled"] is False
-    assert sources["web"]["ready"] is False
+    # 没有付费 key 时网页通道仍可能有 Bing/360 无 key 来源；
+    # ready 取决于 runner 是否装了浏览器，但状态必须如实说明原因。
+    assert sources["web"]["enabled"] is True
+    assert sources["web"]["mode"] in {"browser", "unavailable"}
     assert "SEARCH_ENABLED" in sources["web"]["reason"]
     assert sources["own"]["enabled"] is True
 

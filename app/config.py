@@ -119,6 +119,8 @@ class AppSettings(BaseSettings):
     agent_deadline: float = 60.0
 
     # ---------- 召回通道：小红书 ----------
+    # 总开关。关闭时通道状态显示 disabled + 原因，召回直接跳过、不发任何请求。
+    # 默认保持关闭：公网服务器没有登录态，打开只会得到登录墙。
     xhs_enabled: bool = False
     xhs_timeout: float = 45.0
     # 单次小红书召回最多取几条；硬上限 10 在 xhs_search 里。关注扫描与实时
@@ -158,7 +160,15 @@ class AppSettings(BaseSettings):
     # 账号资源包耗尽不会秒级恢复；等 TTL 到期再试一次就够，重试只会白等。
     search_quota_ttl: float = 900.0
 
-    # 微博应急直抓：只在上面那套搜索返回 1113 时启用（不替换 provider）。
+    # 无 key 网页来源（公网演示）：Bing 浏览器检索为主，360 文本兜底。
+    # 只在付费搜索不可用 / 配额失效 / 未配置 key 时启用；Bing 为空或失败才走
+    # 360，且 360 结果不带链接，只当文本线索。需要 Playwright + Edge/Chromium。
+    web_browser_enabled: bool = True
+    web_browser_timeout: float = 25.0
+    web_browser_max_results: int = 5
+
+    # 微博应急直抓：付费搜索不可用时作为独立来源；搜索可用时先走搜索，
+    # 配额失效（1113）再回退到这里（不替换 provider）。
     # 走 Playwright 打开 m.weibo.cn 搜索，只读第一页；翻页会跳登录，不做。
     weibo_direct_enabled: bool = True
     # 浏览器启动 + 首屏的总预算（秒）。超时按通道 skip 降级，不拖累其他通道。

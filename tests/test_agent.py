@@ -66,6 +66,17 @@ def ctx() -> RecallContext:
     return RecallContext(settings=settings)
 
 
+def paid_ctx(monkeypatch) -> RecallContext:
+    """微博「搜索 → 微博页」路径需要付费搜索配置；测试里显式给上。"""
+    from app.services import web_search
+
+    monkeypatch.setattr(settings, "search_enabled", True)
+    monkeypatch.setattr(settings, "search_api_key", "test-key")
+    monkeypatch.setattr(settings, "search_provider", "zhipu")
+    monkeypatch.setattr(web_search, "quota_blocked", lambda *_a, **_k: False)
+    return ctx()
+
+
 def evidence(channel, ref=None, title=None, text="内容", url="", source_kind=None):
     return [{
         "channel": channel,
@@ -907,8 +918,12 @@ def test_follow_suggestion_only_for_unreleased_queries(monkeypatch):
     assert _suggestion("蕾丝怎么洗", "预约中") is None
 
 
-def test_follow_suggestion_skipped_when_no_channel_ready():
+def test_follow_suggestion_skipped_when_no_channel_ready(monkeypatch):
     """实时通道都不可用时不给建议：点了也永远收不到更新。"""
+    from app.services import web_search
+
+    # 本机可能恰好装了浏览器；结论不能随 runner 环境漂移。
+    monkeypatch.setattr(web_search, "no_key_readiness", lambda _app: (False, "测试环境"))
     assert _suggestion("Baby 缎带与齿轮 预约价多少", "9 月发售，现在可预约") is None
 
 
@@ -1331,7 +1346,7 @@ def test_weibo_without_weibo_pages_is_skip_not_empty(monkeypatch):
     )
 
     with pytest.raises(ChannelUnavailable) as exc:
-        channels.recall("weibo", "Baby 秋日私语", ctx())
+        channels.recall("weibo", "Baby 秋日私语", paid_ctx(monkeypatch))
 
     assert "无微博页面" in str(exc.value)
 
@@ -1347,7 +1362,7 @@ def test_weibo_returns_only_weibo_pages(monkeypatch):
         ],
     )
 
-    result = channels.recall("weibo", "Baby 秋日私语", ctx())
+    result = channels.recall("weibo", "Baby 秋日私语", paid_ctx(monkeypatch))
 
     assert len(result) == 1
     assert result[0]["channel"] == "weibo"
@@ -1372,7 +1387,7 @@ def test_weibo_prefers_site_query_then_falls_back(monkeypatch):
 
     monkeypatch.setattr(web_search, "search", fake_search)
 
-    result = channels.recall("weibo", "Baby 秋日私语", ctx())
+    result = channels.recall("weibo", "Baby 秋日私语", paid_ctx(monkeypatch))
 
     assert calls[0] == "site:weibo.com Baby 秋日私语"
     assert calls[1] == "Baby 秋日私语 微博"
@@ -1392,7 +1407,7 @@ def test_weibo_excludes_non_content_hosts(monkeypatch):
         ],
     )
 
-    result = channels.recall("weibo", "Baby 秋日私语", ctx())
+    result = channels.recall("weibo", "Baby 秋日私语", paid_ctx(monkeypatch))
 
     assert [item["url"] for item in result] == ["https://weibo.com/u/1"]
 
@@ -1413,7 +1428,7 @@ def test_weibo_irrelevant_pages_are_skip(monkeypatch):
     )
 
     with pytest.raises(ChannelUnavailable) as exc:
-        channels.recall("weibo", "Baby 秋日私语 JSK", ctx())
+        channels.recall("weibo", "Baby 秋日私语 JSK", paid_ctx(monkeypatch))
 
     assert "均未命中查询词" in str(exc.value)
 
@@ -1433,7 +1448,7 @@ def test_weibo_primary_hit_skips_fallback(monkeypatch):
 
     monkeypatch.setattr(web_search, "search", fake_search)
 
-    result = channels.recall("weibo", "Baby 秋日私语", ctx())
+    result = channels.recall("weibo", "Baby 秋日私语", paid_ctx(monkeypatch))
 
     assert len(calls) == 1
     assert calls[0].startswith("site:weibo.com")
@@ -1530,7 +1545,7 @@ def test_xhs_recall_uses_configured_limit(monkeypatch):
         return []
 
     monkeypatch.setattr(xhs_search, "search", fake_search)
-    ctx = RecallContext(settings=AppSettings(xhs_max_results=7))
+    ctx = RecallContext(settings=AppSettings(xhs_enabled=True, xhs_max_results=7))
 
     channels._recall_xhs("Baby", ctx)
 

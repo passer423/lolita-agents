@@ -3,7 +3,7 @@
 只用于搜索引擎配额耗尽时的兜底：未登录能拿到的只有 ``m.weibo.cn`` 搜索
 **第一页**；翻页会跳登录，所以这里不翻页、不取评论。脚本做三件事：
 
-1. 用 Playwright + 本机 Edge 打开移动端搜索页；
+1. 用 Playwright 打开移动端搜索页（本机 Edge 优先，回退 Chromium）；
 2. 抓首屏 ``api/container/getIndex`` 返回的 JSON，解析 mblog（正文 / 时间 /
    作者 / 图片 / 互动数），丢掉广告与推荐卡片；
 3. 长文用 ``statuses/extend`` 补全（这个接口不需要登录）。
@@ -22,6 +22,8 @@ import re
 import sys
 import time
 from urllib.parse import quote
+
+from _browser import BrowserMissing, launch_browser
 
 BASE = "https://m.weibo.cn"
 SEARCH_PATH = "/search?containerid=100103type%3D1%26q%3D"
@@ -55,11 +57,11 @@ def _launch():
     from playwright.sync_api import sync_playwright
 
     playwright = sync_playwright().start()
-    browser = playwright.chromium.launch(
-        channel="msedge",
-        headless=True,
-        args=["--disable-blink-features=AutomationControlled"],
-    )
+    try:
+        browser, channel = launch_browser(playwright)
+    except Exception:
+        playwright.stop()
+        raise
     context = browser.new_context(
         user_agent=IPHONE_UA,
         viewport={"width": 414, "height": 896},
@@ -68,7 +70,7 @@ def _launch():
     )
     page = context.new_page()
     page.set_default_timeout(15000)
-    return playwright, browser, context, page
+    return playwright, browser, context, page, channel
 
 
 def _wait_first_page(page, timeout: float) -> dict | None:
@@ -185,7 +187,7 @@ def _posts_from_payload(payload: dict) -> list[dict]:
 
 
 def _search(query: str, *, limit: int, timeout: float) -> dict:
-    playwright, browser, context, page = _launch()
+    playwright, browser, context, page, channel = _launch()
     try:
         try:
             page.goto(
@@ -215,7 +217,7 @@ def _search(query: str, *, limit: int, timeout: float) -> dict:
             full = _extend_text(context, post["id"], int(min(remaining, 8) * 1000))
             if full and len(full) > len(post["text"]):
                 post["text"] = full
-        return {"ok": True, "query": query, "posts": posts}
+        return {"ok": True, "query": query, "posts": posts, "browser": channel}
     finally:
         context.close()
         browser.close()
@@ -244,6 +246,8 @@ def main() -> int:
             "error": "playwright_missing",
             "detail": "未安装 playwright：python -m pip install playwright",
         }
+    except BrowserMissing as exc:
+        result = {"ok": False, "error": "browser_missing", "detail": str(exc)}
     except Exception as exc:  # noqa: BLE001 - 统一输出 JSON，不把 traceback 混进 stdout
         result = {"ok": False, "error": type(exc).__name__, "detail": str(exc)[:300]}
 
