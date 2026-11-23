@@ -94,49 +94,133 @@ def available(app: AppSettings) -> bool:
     return readiness(app)[0]
 
 
-# 状态展示用的运行健康度。``readiness()`` 仍只判结构（配置 / 依赖 / 登录文件），
-# 召回路径完全不受这里影响；只有 ``status_readiness()`` 会把「最近真实调用失败」
-# 或「连续空结果」折算成 not ready。
+# 状态展示与召回快速跳过用的运行健康度。``readiness()`` 仍只判结构（配置 /
+# 依赖 / 登录文件）；``status_readiness()`` 把「最近真实调用失败」或「连续空
+# 结果」折算成 not ready，``failure_blocked()`` 让召回在失败窗口内直接跳过。
 #
 # 为什么不做主动探测：小红书没有免签名的轻量自检接口，主动探测要么再走一次
 # Playwright（几秒 + 可能触发风控），要么消耗一次搜索配额；而状态接口会被
 # 反复轮询。复用真实调用的结果既零额外请求，也不会因为一次网络抖动把召回拦掉。
+#
+# 健康度落一份小文件：``--reload`` / 进程重启后内存清零，只靠内存会让状态
+# 接口在 cookie 已失效时又报 ready，直到下一次真实调用才再次变红。
 HEALTH_TTL_SECONDS = 15 * 60
+# 失败后的快速跳过窗口：比状态 TTL 短，过窗口就允许再试一次，成功即自动恢复。
+FAILURE_SKIP_SECONDS = 10 * 60
 EMPTY_STREAK_DEGRADE = 3
+_HEALTH_FILE = "xhs_health.json"
 _health: dict[str, dict[str, Any]] = {}
 
 
-def _record_health(provider: str, *, ok: bool, reason: str = "", empty: bool = False) -> None:
-    entry = _health.setdefault(
-        provider, {"ts": 0.0, "ok": True, "reason": "", "empty_streak": 0}
-    )
+def _health_key(app: AppSettings, provider: str) -> str:
+    # 带上 data_dir：测试里多个临时应用共用一个进程，不能互相串状态。
+    return f"{app.data_dir}|{provider}"
+
+
+def _health_path(app: AppSettings) -> Path:
+    return Path(app.data_dir) / "cache" / _HEALTH_FILE
+
+
+def _load_health(app: AppSettings) -> dict[str, dict[str, Any]]:
+    try:
+        raw = json.loads(_health_path(app).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    providers = raw.get("providers") if isinstance(raw, dict) else None
+    if not isinstance(providers, dict):
+        return {}
+    return {str(key): value for key, value in providers.items() if isinstance(value, dict)}
+
+
+def _save_health(app: AppSettings, provider: str, entry: dict[str, Any]) -> None:
+    """只写当前 provider，避免把别的 data_dir 的内存记录一起落盘。"""
+    state = _load_health(app)
+    state[provider] = entry
+    path = _health_path(app)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"providers": state}, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.info("小红书健康状态写入失败：%s", exc)
+
+
+def reset_health() -> None:
+    """测试与手动恢复用：清掉内存里的最近调用记录（磁盘记录由 TTL 自然过期）。"""
+    _health.clear()
+
+
+def _recent_entry(app: AppSettings, provider: str) -> dict[str, Any] | None:
+    key = _health_key(app, provider)
+    entry = _health.get(key)
+    if entry is None:
+        entry = _load_health(app).get(provider)
+        if entry:
+            _health[key] = entry
+    if not entry:
+        return None
+    if time.time() - float(entry.get("ts") or 0) > HEALTH_TTL_SECONDS:
+        return None
+    return entry
+
+
+def _record_health(
+    app: AppSettings, provider: str, *, ok: bool, reason: str = "", empty: bool = False
+) -> None:
+    key = _health_key(app, provider)
+    entry = _health.get(key) or {"ts": 0.0, "ok": True, "reason": "", "empty_streak": 0}
     entry["ts"] = time.time()
     entry["ok"] = ok
     if ok:
         entry["reason"] = ""
         entry["empty_streak"] = int(entry.get("empty_streak") or 0) + 1 if empty else 0
     else:
-        entry["reason"] = reason
+        entry["reason"] = (reason or "").strip()[:200]
+    _health[key] = entry
+    _save_health(app, provider, entry)
 
 
 def status_readiness(app: AppSettings) -> tuple[bool, str]:
     """给状态接口用：结构就绪 + 最近调用是否真的成功。
 
-    失败只影响「显示为 not ready」，不影响 ``available()`` / ``search()``：
-    登录态失效后第一次真实调用报错时把原因记下来，下一次查询状态就能看到，
-    TTL 到期后重新按结构判断，不会永久卡红。
+    失败只影响「显示为 not ready」，不影响 ``available()``：登录态失效后第一次
+    真实调用报错时把原因记下来（并落盘），下一次查询状态就能看到；TTL 到期后
+    重新按结构判断，不会永久卡红。
     """
     ready, reason = readiness(app)
     if not ready:
         return ready, reason
-    entry = _health.get(_provider(app))
-    if not entry or time.time() - float(entry.get("ts") or 0) > HEALTH_TTL_SECONDS:
+    try:
+        provider = _provider(app)
+    except XhsUnavailable as exc:
+        return False, str(exc)
+    entry = _recent_entry(app, provider)
+    if not entry:
         return True, ""
     if not entry.get("ok"):
-        return False, f"最近一次调用失败：{entry.get('reason') or '未知原因'}（可能是 XHS_COOKIE 失效）"
+        minutes = int(FAILURE_SKIP_SECONDS // 60)
+        return False, (
+            f"最近一次调用失败：{entry.get('reason') or '未知原因'}"
+            f"（可能是 XHS_COOKIE 失效；{minutes} 分钟内快速跳过，之后自动重试）"
+        )
     if int(entry.get("empty_streak") or 0) >= EMPTY_STREAK_DEGRADE:
         return False, f"最近连续 {EMPTY_STREAK_DEGRADE} 次召回为空，可能是登录态失效或被风控"
     return True, ""
+
+
+def failure_blocked(app: AppSettings) -> tuple[bool, str]:
+    """最近一次真实失败是否还在快速跳过窗口内；过窗口就允许再试。"""
+    try:
+        provider = _provider(app)
+    except XhsUnavailable:
+        return False, ""
+    entry = _recent_entry(app, provider)
+    if not entry or entry.get("ok"):
+        return False, ""
+    if time.time() - float(entry.get("ts") or 0) <= FAILURE_SKIP_SECONDS:
+        return True, entry.get("reason") or "最近一次调用失败"
+    return False, ""
 
 
 def _cache_path(app: AppSettings, query: str, *, provider: str, limit: int) -> Path:
@@ -298,15 +382,15 @@ def search(
         try:
             notes = xhs_spider.fetch_notes(query, app, limit, timeout=timeout_seconds)
         except XhsUnavailable as exc:
-            _record_health(provider, ok=False, reason=str(exc))
+            _record_health(app, provider, ok=False, reason=str(exc))
             raise
     else:
         try:
             notes = _playwright_fetch_notes(query, app, limit, timeout_seconds)
         except XhsUnavailable as exc:
-            _record_health(provider, ok=False, reason=str(exc))
+            _record_health(app, provider, ok=False, reason=str(exc))
             raise
 
-    _record_health(provider, ok=True, empty=not notes)
+    _record_health(app, provider, ok=True, empty=not notes)
     _write_cache(cache, notes)
     return _notes_to_results(notes)

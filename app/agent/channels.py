@@ -694,6 +694,12 @@ def _recall_xhs(
     from app.agent import image_evidence
     from app.services import xhs_search
 
+    # 最近一次真实调用失败（cookie 失效 / 风控）后的短窗口内直接跳过：
+    # 状态接口已经报 not ready，召回不必每次都再跑一遍注定失败的浏览器链路。
+    blocked, reason = xhs_search.failure_blocked(ctx.settings)
+    if blocked:
+        raise ChannelUnavailable(f"小红书通道按最近一次实际失败降级：{reason}")
+
     results = xhs_search.search(
         query or question,
         ctx.settings,
@@ -799,6 +805,11 @@ def _weibo_direct_fallback(
     「微博上没有」，也不拖累其他通道。
     """
     from app.services import weibo_direct
+
+    # 直抓刚失败（登录墙 / 超时 / 风控）时，短窗口内不再重复起浏览器。
+    blocked, blocked_reason = weibo_direct.failure_blocked(ctx.settings)
+    if blocked:
+        raise ChannelUnavailable(f"微博直抓按最近一次实际失败降级：{blocked_reason}")
 
     try:
         results = weibo_direct.search(
@@ -962,7 +973,7 @@ def _weibo_status(app: AppSettings) -> dict[str, Any]:
     search = _search_status(app)
     configured, config_reason = web_search.paid_config_status(app)
     if not configured:
-        ready, reason = weibo_direct.readiness(app)
+        ready, reason = weibo_direct.status_readiness(app)
         if ready:
             return {
                 "enabled": True,
@@ -988,7 +999,7 @@ def _weibo_status(app: AppSettings) -> dict[str, Any]:
         return {**search, "mode": "search"}
 
     if web_search.quota_blocked(app):
-        ready, reason = weibo_direct.readiness(app)
+        ready, reason = weibo_direct.status_readiness(app)
         if ready:
             return {
                 "enabled": True,
@@ -1025,6 +1036,17 @@ def _web_status(app: AppSettings) -> dict[str, Any]:
     ready, reason = web_search.no_key_health(app)
     if ready:
         detail = "搜索引擎配额失效" if configured else f"付费搜索未配置（{config_reason}）"
+        if configured and web_search.quota_blocked(app):
+            # 付费搜索已失效、当前实际走无 key 兜底：兜底最近没成功过就不能报 ready，
+            # 否则用户看到「就绪」，每个请求都掉进同一个 19 秒的失败路径。
+            verified, verify_reason = web_search.no_key_verified(app)
+            if not verified:
+                return {
+                    "enabled": True,
+                    "ready": False,
+                    "mode": "browser",
+                    "reason": f"{detail}；无 key 兜底尚未验证（{verify_reason}），抓到一次成功结果后再报就绪",
+                }
         return {
             "enabled": True,
             "ready": True,

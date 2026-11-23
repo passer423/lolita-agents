@@ -311,6 +311,58 @@ def test_status_degrades_after_three_empty_results(monkeypatch, tmp_path, _clean
     assert xhs_search.available(app) is True
 
 
+def test_status_failure_survives_restart_and_expires(monkeypatch, tmp_path, _clean_health):
+    """进程重启（内存清零）后仍要按落盘的失败记录报 not ready；TTL 过期自动恢复。"""
+    app = _spider_app(tmp_path)
+    app.ensure_dirs()
+    monkeypatch.setattr(xhs_spider, "readiness", lambda _app: (True, ""))
+    monkeypatch.setattr(
+        xhs_spider,
+        "fetch_notes",
+        lambda *_a, **_k: (_ for _ in ()).throw(xhs_search.XhsUnavailable("登录已过期")),
+    )
+
+    with pytest.raises(xhs_search.XhsUnavailable):
+        xhs_search.search("痛包", app)
+
+    # 模拟 --reload / 重启：内存没了，只剩 data/cache/xhs_health.json
+    xhs_search.reset_health()
+    ready, reason = xhs_search.status_readiness(app)
+    assert ready is False
+    assert "登录已过期" in reason
+
+    # 把记录拨到 TTL 之外：状态回到结构判断，允许下一次真实调用重新验证
+    entry = xhs_search._recent_entry(app, "spider_xhs")
+    assert entry is not None
+    entry["ts"] = time.time() - xhs_search.HEALTH_TTL_SECONDS - 1
+    assert xhs_search.status_readiness(app)[0] is True
+
+
+def test_recall_skips_fast_within_failure_window(monkeypatch, tmp_path, _clean_health):
+    app = _spider_app(tmp_path)
+    app.ensure_dirs()
+    monkeypatch.setattr(xhs_spider, "readiness", lambda _app: (True, ""))
+    monkeypatch.setattr(
+        xhs_spider,
+        "fetch_notes",
+        lambda *_a, **_k: (_ for _ in ()).throw(xhs_search.XhsUnavailable("登录已过期")),
+    )
+
+    with pytest.raises(xhs_search.XhsUnavailable):
+        xhs_search.search("痛包", app)
+
+    # 失败窗口内：通道直接 skip，不再起浏览器
+    with pytest.raises(channels.ChannelUnavailable) as exc:
+        channels._recall_xhs("痛包", RecallContext(settings=app))
+    assert "最近一次实际失败" in str(exc.value)
+
+    # 窗口过后允许再试（快速跳过不能变成永久停用）
+    entry = xhs_search._recent_entry(app, "spider_xhs")
+    assert entry is not None
+    entry["ts"] = time.time() - xhs_search.FAILURE_SKIP_SECONDS - 1
+    assert xhs_search.failure_blocked(app)[0] is False
+
+
 # ------------------------------------------------------------------ 召回接线
 
 

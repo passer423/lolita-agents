@@ -226,3 +226,39 @@ def test_web_recall_skips_fast_when_recent_failure(tmp_path, monkeypatch):
         assert "最近一次实际失败" in str(exc.value)
     finally:
         web_search.reset_no_key_health()
+
+
+def test_no_key_health_survives_memory_reset(tmp_path, monkeypatch):
+    """进程重启后仍按落盘的最近失败记录报 not ready，不能又回到 ready。"""
+    app = AppSettings(data_dir=tmp_path / "data", web_browser_enabled=True)
+    monkeypatch.setattr(web_search, "no_key_readiness", lambda _app: (True, ""))
+    web_search.record_no_key_result(app, False, "Bing 浏览器 0 条；360 风控")
+
+    web_search.reset_no_key_health()
+    ready, reason = web_search.no_key_health(app)
+    assert ready is False
+    assert "0 条" in reason
+
+
+def test_web_status_requires_verified_fallback_when_quota_blocked(tmp_path, monkeypatch):
+    """付费搜索配额失效时，无 key 兜底没成功过就不能报 ready。"""
+    app = AppSettings(
+        data_dir=tmp_path / "data",
+        search_enabled=True,
+        search_api_key="k",
+        search_provider="zhipu",
+        web_browser_enabled=True,
+    )
+    monkeypatch.setattr(web_search, "no_key_readiness", lambda _app: (True, ""))
+    monkeypatch.setitem(web_search._QUOTA_BLOCKED_UNTIL, "zhipu", time.time() + 900)
+
+    unverified = channels._web_status(app)
+    assert unverified["ready"] is False
+    assert unverified["mode"] == "browser"
+    assert "未验证" in unverified["reason"]
+
+    # 兜底真抓到一次结果后，同一条通道才允许报就绪
+    web_search.record_no_key_result(app, True)
+    verified = channels._web_status(app)
+    assert verified["ready"] is True
+    assert verified["mode"] == "browser"

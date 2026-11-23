@@ -244,6 +244,25 @@ def test_weibo_status_without_key_reports_direct(monkeypatch):
     assert "未安装 playwright" in blocked["reason"]
 
 
+def test_weibo_status_reports_recent_direct_failure(monkeypatch):
+    """结构就绪但最近一次直抓失败（登录墙 / 超时）时，状态必须如实降级。"""
+    app = AppSettings(search_enabled=False, search_api_key="", weibo_direct_enabled=True)
+    monkeypatch.setattr(weibo_direct, "readiness", lambda _app: (True, ""))
+    weibo_direct._record_health(app, ok=False, reason="登录墙")
+
+    status = channels._weibo_status(app)
+    assert status["ready"] is False
+    assert status["mode"] == "direct"
+    assert "登录墙" in status["reason"]
+
+    # 进程重启后仍按落盘记录降级，直到 TTL 到期
+    weibo_direct.reset_health()
+    restarted = channels._weibo_status(app)
+    assert restarted["ready"] is False
+    assert "登录墙" in restarted["reason"]
+    weibo_direct.reset_health()
+
+
 def test_weibo_status_uses_direct_when_quota_blocked(monkeypatch):
     app = AppSettings(search_enabled=True, search_api_key="k", search_provider="zhipu")
     monkeypatch.setattr(web_search, "quota_blocked", lambda *_a, **_k: True)

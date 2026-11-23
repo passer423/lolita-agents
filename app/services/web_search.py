@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from http.cookiejar import CookieJar
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import (
@@ -74,21 +75,58 @@ _NO_KEY_HEALTH: dict[str, dict] = {}
 _NO_KEY_HEALTH_TTL = 10 * 60
 _NO_KEY_DEGRADE_TTL = 10 * 60
 
+# 和配额状态一样落一份小文件：进程重启 / --reload 后内存清零，只靠内存会让
+# 状态接口在 Bing 已被风控时又报 ready，直到下一次真实调用才再次变红。
+_NO_KEY_STATE_FILE = "web_browser_health.json"
+
 
 def _no_key_health_key(app: AppSettings) -> str:
     return str(app.data_dir)
 
 
+def _no_key_state_path(app: AppSettings) -> Path:
+    return app.data_dir / "cache" / _NO_KEY_STATE_FILE
+
+
+def _load_no_key_state(app: AppSettings) -> dict | None:
+    try:
+        raw = json.loads(_no_key_state_path(app).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _save_no_key_state(app: AppSettings, entry: dict) -> None:
+    path = _no_key_state_path(app)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        logger.info("无 key 网页健康状态写入失败：%s", exc)
+
+
+def _no_key_entry(app: AppSettings) -> dict | None:
+    key = _no_key_health_key(app)
+    entry = _NO_KEY_HEALTH.get(key)
+    if entry is None:
+        entry = _load_no_key_state(app)
+        if entry:
+            _NO_KEY_HEALTH[key] = entry
+    return entry
+
+
 def record_no_key_result(app: AppSettings, ok: bool, reason: str = "") -> None:
-    _NO_KEY_HEALTH[_no_key_health_key(app)] = {
+    entry = {
         "at": time.time(),
         "ok": bool(ok),
         "reason": (reason or "").strip()[:200],
     }
+    _NO_KEY_HEALTH[_no_key_health_key(app)] = entry
+    _save_no_key_state(app, entry)
 
 
 def reset_no_key_health() -> None:
-    """测试与手动恢复用：清掉最近失败记录。"""
+    """测试与手动恢复用：清掉最近失败记录（磁盘记录由 TTL 自然过期）。"""
     _NO_KEY_HEALTH.clear()
 
 
@@ -97,7 +135,7 @@ def no_key_health(app: AppSettings) -> tuple[bool, str]:
     ready, reason = no_key_readiness(app)
     if not ready:
         return ready, reason
-    entry = _NO_KEY_HEALTH.get(_no_key_health_key(app))
+    entry = _no_key_entry(app)
     if entry and not entry.get("ok"):
         age = time.time() - float(entry.get("at") or 0)
         if age <= _NO_KEY_HEALTH_TTL:
@@ -109,12 +147,25 @@ def no_key_health(app: AppSettings) -> tuple[bool, str]:
     return True, ""
 
 
+def no_key_verified(app: AppSettings) -> tuple[bool, str]:
+    """最近一次无 key 调用是否**成功**过（用于「降级路径未验证」的如实展示）。"""
+    ready, reason = no_key_readiness(app)
+    if not ready:
+        return False, reason
+    entry = _no_key_entry(app)
+    if entry and entry.get("ok"):
+        age = time.time() - float(entry.get("at") or 0)
+        if age <= _NO_KEY_HEALTH_TTL:
+            return True, ""
+    return False, f"最近 {int(_NO_KEY_HEALTH_TTL // 60)} 分钟没有成功的无 key 调用记录"
+
+
 def no_key_blocked(app: AppSettings) -> tuple[bool, str]:
     """最近一次真实失败是否还在「快速跳过」窗口内。
 
     只影响无 key 路径；付费搜索可用时不会走到这里。
     """
-    entry = _NO_KEY_HEALTH.get(_no_key_health_key(app))
+    entry = _no_key_entry(app)
     if not entry or entry.get("ok"):
         return False, ""
     age = time.time() - float(entry.get("at") or 0)

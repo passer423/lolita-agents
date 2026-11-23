@@ -59,6 +59,94 @@ def readiness(app: AppSettings) -> tuple[bool, str]:
     return browser.readiness()
 
 
+# 直抓的真实调用健康度：结构就绪不代表站内检索不被登录墙 / 风控拦。
+# 与 xhs_search 同一套路：状态 TTL 内展示失败原因，失败窗口内召回快速跳过，
+# 落一份小文件让进程重启后也不会继续报 ready。
+HEALTH_TTL_SECONDS = 15 * 60
+FAILURE_SKIP_SECONDS = 10 * 60
+_HEALTH_FILE = "weibo_direct_health.json"
+_health: dict[str, dict] = {}
+
+
+def _health_key(app: AppSettings) -> str:
+    return str(app.data_dir)
+
+
+def _health_path(app: AppSettings) -> Path:
+    return app.data_dir / "cache" / _HEALTH_FILE
+
+
+def _load_health(app: AppSettings) -> dict | None:
+    try:
+        raw = json.loads(_health_path(app).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _save_health(app: AppSettings, entry: dict) -> None:
+    path = _health_path(app)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        logger.info("微博直抓健康状态写入失败：%s", exc)
+
+
+def _recent_entry(app: AppSettings) -> dict | None:
+    key = _health_key(app)
+    entry = _health.get(key)
+    if entry is None:
+        entry = _load_health(app)
+        if entry:
+            _health[key] = entry
+    if not entry:
+        return None
+    if time.time() - float(entry.get("at") or 0) > HEALTH_TTL_SECONDS:
+        return None
+    return entry
+
+
+def _record_health(app: AppSettings, *, ok: bool, reason: str = "") -> None:
+    entry = {
+        "at": time.time(),
+        "ok": bool(ok),
+        "reason": (reason or "").strip()[:200],
+    }
+    _health[_health_key(app)] = entry
+    _save_health(app, entry)
+
+
+def reset_health() -> None:
+    """测试与手动恢复用：清掉内存里的最近调用记录（磁盘记录由 TTL 自然过期）。"""
+    _health.clear()
+
+
+def status_readiness(app: AppSettings) -> tuple[bool, str]:
+    """结构就绪 + 最近一次真实直抓是否成功（只用于状态展示）。"""
+    ready, reason = readiness(app)
+    if not ready:
+        return ready, reason
+    entry = _recent_entry(app)
+    if entry and not entry.get("ok"):
+        minutes = int(FAILURE_SKIP_SECONDS // 60)
+        return False, (
+            f"最近一次直抓失败：{entry.get('reason') or '未知原因'}"
+            f"（{minutes} 分钟内快速跳过，之后自动重试）"
+        )
+    return True, ""
+
+
+def failure_blocked(app: AppSettings) -> tuple[bool, str]:
+    """最近一次真实直抓失败是否还在快速跳过窗口内。"""
+    entry = _recent_entry(app)
+    if not entry or entry.get("ok"):
+        return False, ""
+    if time.time() - float(entry.get("at") or 0) <= FAILURE_SKIP_SECONDS:
+        return True, entry.get("reason") or "最近一次直抓失败"
+    return False, ""
+
+
 def _cache_path(app: AppSettings, query: str, limit: int) -> Path:
     """缓存键带来源与条数：换实现或调大条数必须重新抓，不能吃旧结果。"""
     raw = f"weibo_direct|{limit}|{query}"
@@ -280,8 +368,13 @@ def search(
     if not ready:
         raise WeiboDirectUnavailable(reason)
 
-    posts = _fetch_posts(query, app, limit=limit, timeout=timeout_seconds)
+    try:
+        posts = _fetch_posts(query, app, limit=limit, timeout=timeout_seconds)
+    except WeiboDirectUnavailable as exc:
+        _record_health(app, ok=False, reason=str(exc))
+        raise
     kept = _filter_posts(query, posts, limit)
+    _record_health(app, ok=True)
     _write_cache(cache, kept)
     logger.info("微博直抓 %s：原始 %s 条，过滤后 %s 条", query, len(posts), len(kept))
     return _posts_to_results(kept)

@@ -42,14 +42,26 @@ _prepare()
 
 @pytest.fixture(autouse=True)
 def _reset_runtime_health():
-    """网页检索健康度是进程级状态；每个用例前后清掉，避免失败用例污染状态用例。"""
-    from app.services import web_search
+    """通道运行健康度是进程级 + 落盘状态；每个用例前后清掉，避免互相污染。"""
+    from app.config import settings as default_settings
+    from app.services import web_search, weibo_direct, xhs_search
 
-    web_search.reset_no_key_health()
+    def _clean() -> None:
+        web_search.reset_no_key_health()
+        xhs_search.reset_health()
+        weibo_direct.reset_health()
+        for name in (
+            web_search._NO_KEY_STATE_FILE,
+            xhs_search._HEALTH_FILE,
+            weibo_direct._HEALTH_FILE,
+        ):
+            (default_settings.data_dir / "cache" / name).unlink(missing_ok=True)
+
+    _clean()
     try:
         yield
     finally:
-        web_search.reset_no_key_health()
+        _clean()
 
 
 @pytest.fixture()
