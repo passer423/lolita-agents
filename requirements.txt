@@ -15,6 +15,14 @@ pydantic-settings>=2.0,<3.0
 # 不写在这里，首次问答会 503，且没有任何提示指向"缺包"。
 openai>=1.12.0,<3.0
 
+# ---------- 精排（默认开，int8 ONNX）----------
+# 精排默认开启。int8 动态量化模型（scripts/export_reranker_onnx.py 生成）约 266 MB，
+# 配合 app/rerank.py 的按需加载/闲置卸载，2 GiB 内存能与 BGE 同驻。
+# 缺 onnxruntime 时自动回退 torch fp32（实测额外约 0.8 GB，2 GiB 机器余量很薄）。
+onnxruntime>=1.17,<2
+# app/rerank.py 直接 import；通常由上游 sentence-transformers 带入，显式声明避免版本漂移。
+tokenizers>=0.15
+
 # ---------- agent 编排（LangGraph） ----------
 # 多路召回的编排层用 StateGraph / Send 表达（见 docs/adr/0002）。只声明本仓
 # 直接 import 的包：langchain-core 与 langchain-openai 不是直接依赖（模型调用

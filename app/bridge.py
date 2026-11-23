@@ -34,6 +34,7 @@ from typing import Any
 
 from app.config import AppSettings
 from app.config import settings as default_settings
+from app.rerank import resolve_onnx_path, resolve_reranker_model, shared_onnx_reranker
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,18 @@ def upstream_status(app: AppSettings | None = None) -> dict:
     }
 
 
+def _reranker_model_ref(app: AppSettings) -> str:
+    """精排模型的引用：显式配置优先，其次本地上游仓库目录，最后回落到 HF 仓库名。"""
+    explicit = (app.reranker_model or "").strip()
+    if explicit:
+        return explicit
+    local = resolve_reranker_model(app)
+    if local.exists():
+        return str(local)
+    logger.warning("本机没有精排模型目录 %s，回落到 BAAI/bge-reranker-base", local)
+    return "BAAI/bge-reranker-base"
+
+
 def upstream_settings(app: AppSettings | None = None, *, source: str = "own"):
     """构造一份只属于本应用的上游 Settings。
 
@@ -115,6 +128,11 @@ def upstream_settings(app: AppSettings | None = None, *, source: str = "own"):
         # 锁定 embedding 行为：只用本地缓存，绝不因为联网下载把请求卡住几十秒
         "embedding_backend": "auto",
         "embedding_allow_download": False,
+        # 精排默认开（见 app/config.py 的说明）；模型路径优先本地上游仓库那份，
+        # 避免离线机器去连 HuggingFace。具体后端在 _configure_reranker 里挂。
+        "reranker_enabled": app.reranker_enabled,
+        "reranker_model": _reranker_model_ref(app),
+        "reranker_batch_size": app.reranker_batch_size,
     }
     if source == "real":
         # 必须显式写上游自带的 data/，不能靠 Settings 的默认值：pydantic-settings
@@ -157,6 +175,7 @@ def _ensure_loaded(app: AppSettings | None = None, *, source: str = "own"):
             from src.pipeline.runtime import load_retriever
 
             bundle = load_retriever(settings)
+            _configure_reranker(bundle, settings, app)
             _state.bundles[source] = bundle
             _state.settings[source] = settings
             _state.error = ""
@@ -174,6 +193,42 @@ def _ensure_loaded(app: AppSettings | None = None, *, source: str = "own"):
             _state.error = f"{type(exc).__name__}: {exc}"
             raise UpstreamUnavailable(f"知识索引装载失败：{_state.error}") from exc
         return _state.bundles[source]
+
+
+def _configure_reranker(bundle: Any, settings: Any, app: AppSettings) -> None:
+    """把精排模型挂到检索器上：默认 int8 ONNX，缺文件/缺包时回退 torch。
+
+    上游 ``load_retriever`` 在 ``reranker_enabled=True`` 时已经放了一个 torch
+    ``Reranker``（模型懒加载）。这里优先把它换成**共享的** ONNX 代理：
+    266 MB 的 int8 模型在 ``own`` / ``real`` 两个 bundle 之间只留一份。
+    """
+    if not app.reranker_enabled:
+        bundle.retriever.reranker = None
+        return
+
+    backend = (app.reranker_backend or "auto").strip().lower()
+    if backend not in {"auto", "onnx", "torch"}:
+        logger.warning("未知的 RERANKER_BACKEND=%s，按 auto 处理", backend)
+        backend = "auto"
+
+    if backend in {"auto", "onnx"}:
+        proxy = shared_onnx_reranker(app)
+        if proxy is not None:
+            from src.retriever.reranker import Reranker
+
+            bundle.retriever.reranker = Reranker(settings, model=proxy)
+            return
+        if backend == "onnx":
+            logger.warning(
+                "RERANKER_BACKEND=onnx，但模型不可用（%s），回退 torch；"
+                "先运行 python scripts/export_reranker_onnx.py",
+                resolve_onnx_path(app),
+            )
+    # torch 回退：load_retriever 已按 settings.reranker_enabled 构造过就复用。
+    if bundle.retriever.reranker is None:
+        from src.retriever.reranker import Reranker
+
+        bundle.retriever.reranker = Reranker(settings)
 
 
 def reload_bundle(app: AppSettings | None = None) -> dict:

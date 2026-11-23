@@ -113,6 +113,26 @@ class AppSettings(BaseSettings):
     evidence_text_limit: int = 300
     evidence_text_limit_long: int = 700
 
+    # ---------- 精排（reranker） ----------
+    # 公网演示要求保留精排，且默认开启。fp32 torch 版本在本机实测整链峰值
+    # 1.54–1.68 GB（batch 4/16），2 GiB 下余量很薄；int8 ONNX 约 1.46 GB，
+    # 权重 266 MB + 激活约 150 MB，再配合「首次打分才加载 / 闲置后卸载」。
+    # 模型文件或 onnxruntime 缺失时回退 torch；后端不可用只会让精排降级为原序，
+    # 不影响检索本身可用。
+    reranker_enabled: bool = True
+    # auto：有 int8 ONNX 就用 ONNX，否则 torch；onnx：强制 ONNX（缺失仍回退 torch）；
+    # torch：走上游的 sentence_transformers.CrossEncoder。
+    reranker_backend: str = "auto"
+    # 留空 = <LOLITA_RAG_ROOT>/data/models/bge-reranker-base（上游自带的那份）。
+    reranker_model: str = ""
+    # 留空 = <reranker_model>/onnx/model.int8.onnx。用 scripts/export_reranker_onnx.py 生成。
+    reranker_onnx_path: Path | None = None
+    # 闲置多少秒后卸载模型（<=0 表示常驻不卸载）。实测加载约 0.8 秒，
+    # 闲置后的第一问含加载约 1.2 秒。
+    reranker_idle_unload_seconds: float = 120.0
+    # 实测 20 条短候选：batch=4 约 275 ms、batch=16 约 420 ms，且峰值更低。
+    reranker_batch_size: int = 4
+
     # 单次问答的**整体**预算（秒）。各通道和模型客户端都有自己的超时，但没有总预算时
     # 最坏会串成两分钟（核心召回 + 30s 规划 + 65s 小红书 + 20s 搜索 + 60s 写作）。
     # 超时返回已查到的证据并注明「部分通道超时」，不报 500。<=0 表示不限制。
