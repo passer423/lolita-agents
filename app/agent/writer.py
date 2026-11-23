@@ -68,6 +68,12 @@ _SHOP_MARKERS = (
     "旗舰店", "专营店", "官方店", "店铺", "店家", "商家", "掌柜", "客服",
     "洋服社", "工作室", "商品页", "质检报告", "淘宝", "天猫",
 )
+# 微博上的店家账号没有站点标记，只有公告体：「兔屿岛 通知 … 再贩通知｜小饼干」这类
+# 帖子被叫成「出物的人」就是漏了这一层。公告体对买家帖几乎不会出现，可以查全文。
+_SHOP_NOTICE_MARKERS = (
+    "再贩通知", "开团通知", "上新通知", "补款通知", "截团通知", "店铺公告",
+    "本店", "售后服务",
+)
 # 「官方」只留给品牌自有渠道。档案馆、博物馆、协会都不是品牌，不能借用这个词。
 _OFFICIAL_MARKERS = ("官方公告", "官方说明", "品牌官方", "官方账号", "官网", "品牌官网")
 
@@ -94,7 +100,10 @@ def _looks_like_shop(item: dict) -> bool:
     host = _host_of(str(item.get("url") or ""))
     if any(host == name or host.endswith("." + name) for name in _SHOP_HOSTS):
         return True
-    haystack = f"{item.get('title', '')} {str(item.get('text') or '')[:80]}"
+    text = str(item.get("text") or "")
+    if any(marker in f"{item.get('title', '')} {text}" for marker in _SHOP_NOTICE_MARKERS):
+        return True
+    haystack = f"{item.get('title', '')} {text[:80]}"
     return any(marker in haystack for marker in _SHOP_MARKERS)
 
 
@@ -217,6 +226,14 @@ SYNTH_SYSTEM = """你是 Lolita 领域的问答助手，像微信里一个懂 Lo
    每个价格数字都要紧挨 [n]；最多在价格句后加一次「具体可点开参考来源核对」，
    不要重复；不要写「机器识别」「未校验」「以原图为准」这类提示，
    来源说明证据标题里已有，答案里不必再提。
+10. 档案条目带「历史原价」时，用户问「这是什么 / 多少钱」要把发售年份、历史原价、
+    配色照实写上，并说明这是历史原价、不是现在的售价；只有证据里确实没有价格，
+    才能说记录里没写。
+11. **不要替用户在「原版 / 复刻 / 再贩版」之间做购买取舍**。lolita 圈极看重版权与
+    山正，回答里不出现「不推荐买原版」「建议买复刻」「还是买再贩版吧」这类结论，
+    也不把店家的免责声明转述成劝退。用户问某色会不会掉色、怎么洗时，就答：会不会
+    掉色、洗前取下什么、怎么洗能减少染色、染色后能不能售后；店家写的「不推荐
+    购买原版」只能当作「原版该配色有染色风险」的背景，不能写成推荐或劝退。
 """
 
 
@@ -464,7 +481,7 @@ def fill_citations(
 
 # --------------------------------------------------------------------- 归因后处理
 #
-# 提示词负责「别写错」，这里兜住模型仍可能写出的「网友」。只在**能确定**
+# 提示词负责「别写错」，这里兜住模型仍可能写出的「网友 / 出物的人」。只在**能确定**
 # 该句引用的证据全是店家 / 官方时替换；同一句里还引了真 UGC 就不动——
 # 分不清说的是谁时，宁可不改。
 
@@ -477,6 +494,9 @@ _ATTRIBUTION_REWRITES = (
     ("网友说", "{label}说"),
     ("网友的说法", "{label}的说法"),
     ("网友", "{label}"),
+    ("出物的人还说", "{label}还说"),
+    ("出物的人说", "{label}说"),
+    ("出物的人", "{label}"),
 )
 
 
@@ -489,10 +509,10 @@ def _evidence_numbers(evidence: list[dict]) -> dict[int, dict]:
 def fix_source_attribution(
     answer: str, evidence: list[dict]
 ) -> tuple[str, list[dict]]:
-    """把非 UGC 来源上的「网友」改成正确称谓；返回 ``(新文本, 改动记录)``。
+    """把非 UGC 来源上的「网友 / 出物的人」改成正确称谓；返回 ``(新文本, 改动记录)``。
 
-    只有整句引用的证据都属于同一类非 UGC 来源时才替换：混引时无从判断「网友」
-    指的是哪一条，改写可能把一句正确的 UGC 归因也改坏。档案用「档案记录里」，
+    只有整句引用的证据都属于同一类非 UGC 来源时才替换：混引时无从判断指的是
+    哪一条，改写可能把一句正确的 UGC 归因也改坏。档案用「档案记录里」，
     不用「官方」——社区整理的资料不能说得像品牌确认过。
     """
     if not answer or not evidence:
@@ -502,7 +522,7 @@ def fix_source_attribution(
     parts: list[str] = []
     for match in _SENTENCE_RE.finditer(answer):
         sentence = match.group()
-        if "网友" not in sentence:
+        if "网友" not in sentence and "出物的人" not in sentence:
             parts.append(sentence)
             continue
         cited = [int(token) for token in _CITATION_RE.findall(sentence)]
@@ -529,7 +549,7 @@ def fix_source_attribution(
         for old, template in _ATTRIBUTION_REWRITES:
             if old in rewritten:
                 rewritten = rewritten.replace(old, template.format(label=label))
-                if "网友" not in rewritten:
+                if "网友" not in rewritten and "出物的人" not in rewritten:
                     break
         if rewritten != sentence:
             fixes.append({"ref": cited[0] if cited else 0, "to": label})

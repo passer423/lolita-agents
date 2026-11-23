@@ -340,6 +340,44 @@ def test_store_post_is_appellation_not_netizen():
     assert writer.usage["diagnostics"]["source_attribution_fixes"]
 
 
+def test_shop_notice_on_weibo_is_not_reseller():
+    """real-03：「兔屿岛 通知 … 再贩通知｜小饼干」是店家公告，不是「出物的人」。"""
+    post = {
+        "n": 1,
+        "channel": "real",
+        "source_kind": "upstream_ugc",
+        "ref": "real-03",
+        "title": "PickRed-tuyudao兔屿岛",
+        "text": "LOLITA 兔屿岛 通知 lolita上新 再贩通知｜小饼干 定于本周开团，感谢等待",
+        "url": "https://m.weibo.cn/detail/5351412252283440",
+    }
+
+    assert source_appellation(post) == APPELLATION_SHOP
+
+    writer = make_writer(content="出物的人说二贩要等通知[1]。")
+    text = writer.write("小饼干什么时候二贩", [{**post}])
+
+    assert "出物的人" not in text
+    assert "店家说" in text
+
+
+def test_reseller_wording_kept_for_real_ugc():
+    ev = evidence(title="出物帖", text="我这边有现货")
+    assert source_appellation(ev[0]) == APPELLATION_UGC
+
+    writer = make_writer(content="出物的人说有现货[1]。")
+
+    assert writer.write("有现货吗", ev) == "出物的人说有现货[1]。"
+
+
+def test_prompt_carries_replica_neutrality_and_archive_price_rules():
+    system = build_synth_messages("q", evidence())[0]["content"]
+
+    assert "原版 / 复刻 / 再贩版" in system
+    assert "山正" in system
+    assert "历史原价" in system
+
+
 def test_real_ugc_keeps_netizen_wording():
     ev = evidence(title="某买家发帖", text="我机洗没事")
     assert source_appellation(ev[0]) == APPELLATION_UGC
