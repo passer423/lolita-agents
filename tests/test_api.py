@@ -515,3 +515,37 @@ def test_shell_registers_versioned_cleanup_worker(client):
 
 def test_unknown_route_is_404(client):
     assert client.get("/api/nope").status_code == 404
+
+
+def test_warm_models_touches_both_indexes(monkeypatch):
+    """启动预热只做检索加载：own / real 各一次，不涉及 LLM。"""
+    from app import main as main_module
+
+    calls = []
+
+    def record(source):
+        def _search(text, app=None, *, top_k=None):
+            calls.append((source, text))
+            return []
+
+        return _search
+
+    monkeypatch.setattr(main_module.bridge, "search_kb", record("own"))
+    monkeypatch.setattr(main_module.bridge, "search_real", record("real"))
+
+    main_module._warm_models()
+
+    assert [source for source, _ in calls] == ["own", "real"]
+
+
+def test_warm_models_never_raises(monkeypatch):
+    """索引没建 / 上游缺失时预热只记日志，不能把启动带崩。"""
+    from app import main as main_module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("索引还没有建立")
+
+    monkeypatch.setattr(main_module.bridge, "search_kb", boom)
+    monkeypatch.setattr(main_module.bridge, "search_real", boom)
+
+    main_module._warm_models()  # 不抛就是通过

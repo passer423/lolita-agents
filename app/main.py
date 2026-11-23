@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -33,6 +35,22 @@ STATIC_DIR = Path(__file__).parent / "static"
 settings.ensure_dirs()
 
 
+def _warm_models() -> None:
+    """预热 BGE 与精排：各跑一次最小检索，**不调用 LLM、不写库**。
+
+    两个索引分别装一次（own / real），精排是两者共享的同一份实例；
+    任何一步失败只记日志，不抛给启动流程——预热是体验优化，不是可用性前提。
+    """
+    started = time.perf_counter()
+    for source, search in (("own", bridge.search_kb), ("real", bridge.search_real)):
+        try:
+            search("预热", settings, top_k=1)
+            logger.info("预热完成：%s 检索已加载（累计 %.1f 秒）", source, time.perf_counter() - started)
+        except Exception as exc:  # noqa: BLE001 - 预热失败不能影响服务启动
+            logger.warning("预热 %s 检索失败（不影响服务）：%s", source, exc)
+    logger.info("启动预热结束：%.1f 秒", time.perf_counter() - started)
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     db.init_db(settings.db_path)
@@ -57,6 +75,10 @@ async def lifespan(application: FastAPI):
     runner = job_runner.get_runner(settings)
     runner.start()
     application.state.job_runner = runner
+
+    # 预热放后台线程：不阻塞启动，健康检查立刻可用。
+    if settings.warmup_on_start:
+        threading.Thread(target=_warm_models, name="warmup", daemon=True).start()
     try:
         yield
     finally:
