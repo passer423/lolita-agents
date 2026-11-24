@@ -334,6 +334,9 @@
 
   function paintMessages(host) {
     host.innerHTML = '';
+    // 推荐问题只属于「空会话」：当前会话有任何消息就收起。
+    const chips = document.getElementById('chat-chips');
+    if (chips) chips.style.display = state.messages.length ? 'none' : '';
     if (!state.messages.length) {
       host.innerHTML = '<div class="hint" style="text-align:center;padding:18px 0">' +
         '<b>先告诉我你的身材数据，合身判断更准</b><br>' +
@@ -1112,7 +1115,7 @@
               '<button class="primary" id="chat-send">发送</button>' +
             '</div>' +
             (suggestions.length
-              ? '<div class="chips chat-chips">' +
+              ? '<div class="chips chat-chips" id="chat-chips">' +
                 suggestions.map((text) =>
                   '<button class="chip" data-q="' + esc(text) + '">' + esc(text) + '</button>').join('') +
                 '</div>'
