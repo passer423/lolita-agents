@@ -835,6 +835,7 @@
   function renderAuth(mode) {
     const root = view();
     mode = mode === 'register' ? 'register' : 'login';
+    setThreadEntry(false);
     state.account = null;
     state.threads = [];
     state.threadId = null;
@@ -931,7 +932,16 @@
     if (!side) return;
     side.classList.toggle('open', open);
     if (backdrop) backdrop.classList.toggle('show', open);
-    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (toggle) {
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      toggle.classList.toggle('on', open);
+    }
+  }
+
+  // 顶栏右上角的会话入口只在聊天页出现；登录页/助手未启用时收起。
+  function setThreadEntry(show) {
+    const entry = document.getElementById('thread-toggle');
+    if (entry) entry.hidden = !show;
   }
 
   function renderThreads() {
@@ -1046,6 +1056,7 @@
 
   async function renderChat() {
     const root = view();
+    setThreadEntry(false);
     let status = null;
     try {
       const response = await fetch('/api/chat/status');
@@ -1058,8 +1069,8 @@
     if (!status.enabled) {
       root.innerHTML = '<div class="card"><h2>助手还没启用</h2>' +
         '<div class="notice warn">' + esc(status.hint || '需要配置模型') + '</div>' +
-        '<div class="auth-actions"><button class="ghost sm" id="chat-logout">登出</button></div></div>';
-      document.getElementById('chat-logout').addEventListener('click', logout);
+        '<div class="auth-actions"><button class="ghost sm" id="chat-logout-disabled">登出</button></div></div>';
+      document.getElementById('chat-logout-disabled').addEventListener('click', logout);
       return;
     }
 
@@ -1080,21 +1091,18 @@
           '</div>' +
           '<button class="primary thread-new" id="thread-new">新对话</button>' +
           '<div class="thread-list" id="thread-bar"></div>' +
+          '<div class="thread-side-foot">' +
+            '<button class="ghost sm thread-logout" id="chat-logout">登出</button>' +
+          '</div>' +
         '</aside>' +
         '<div class="chat-main">' +
-          // 手机端显式入口；桌面由左侧栏承担，不显示这一行。
-          '<div class="thread-switch">' +
-            '<button class="thread-switch-btn" id="thread-toggle" ' +
-              'aria-expanded="false" aria-controls="thread-side">切换会话' +
-              '<span class="thread-switch-count" id="thread-count"></span></button>' +
-          '</div>' +
           '<div class="card chat-card">' +
             '<div class="chat-head">' +
               '<span class="chat-model">' + esc(displayName) +
                 (username ? ' · ' + esc(username) : '') + '</span>' +
               '<div class="chat-actions">' +
                 '<button class="ghost sm" id="chat-stop" style="display:none" disabled>停止</button>' +
-                '<button class="ghost sm" id="chat-logout">登出</button>' +
+                '<button class="ghost sm chat-logout-desktop" id="chat-logout-desktop">登出</button>' +
               '</div>' +
             '</div>' +
             '<div class="chat-list" id="chat-list"></div>' +
@@ -1175,13 +1183,16 @@
     });
     document.getElementById('thread-new').addEventListener('click', newThread);
     document.getElementById('chat-logout').addEventListener('click', logout);
-    document.getElementById('thread-toggle').addEventListener('click', () => {
+    document.getElementById('chat-logout-desktop').addEventListener('click', logout);
+    // 顶栏按钮是静态节点，用 onclick 覆盖绑定，避免反复登录后叠加监听。
+    document.getElementById('thread-toggle').onclick = () => {
       const side = document.getElementById('thread-side');
       setSidebar(!(side && side.classList.contains('open')));
-    });
+    };
     document.getElementById('thread-backdrop').addEventListener('click', () => setSidebar(false));
     document.getElementById('thread-close').addEventListener('click', () => setSidebar(false));
 
+    setThreadEntry(true);
     // 首屏：有对话就打开最近一个，没有就留空等首问自动新建。
     renderThreads();
     if (!state.threadId && state.threads.length) {

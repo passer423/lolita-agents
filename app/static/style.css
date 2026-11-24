@@ -495,15 +495,20 @@ ul.plain li { margin-bottom: 2px; }
 }
 .thread-del:hover { color: var(--accent); }
 
-/* 窄屏抽屉：默认收起，用「切换会话」按钮唤出 */
+/* 窄屏抽屉：默认收起，用顶栏「会话」按钮唤出 */
 .thread-backdrop { display: none; }
 
 /* 桌面左栏不需要标题行和关闭键，只在窄屏抽屉里出现 */
 .thread-side-head { display: none; }
 .thread-close { display: none; }
+.thread-side-foot { display: none; }
 
-/* 移动端「切换会话」入口；桌面已有左栏，不显示 */
-.thread-switch { display: none; }
+/* 顶栏右侧：会话入口 + 状态点 */
+.topbar-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+
+/* 会话入口只在手机顶栏出现；桌面继续用左侧栏 */
+.thread-entry { display: none; }
+.thread-entry[hidden] { display: none; }
 
 /* 登录 / 注册：跟聊天卡片同一套外观，不另起一页 */
 .auth-card { max-width: 420px; margin: 8vh auto 0; gap: 12px; }
@@ -777,14 +782,48 @@ ul.plain li { margin-bottom: 2px; }
 @media (max-width: 600px) {
   :root { --pad: 10px; }
 
-  /* 顶栏不再把标题和状态点分别拉到屏幕两端：手机上一行内容收紧，
-     状态点跟着标题走，左右留白也抬到 14px，避免贴边。 */
+  /* 顶栏：标题在左，会话入口与状态点收在右侧同一行。
+     纵向 10px，让 32px 的会话按钮落进 52px 高的顶栏。 */
   #topbar {
     justify-content: flex-start;
     gap: 8px;
+    padding-top: 10px;
+    padding-bottom: 10px;
     padding-left: max(14px, env(safe-area-inset-left));
     padding-right: max(14px, env(safe-area-inset-right));
   }
+
+  /* 右上角会话入口：小胶囊，不占整行；触控热区向四周扩。 */
+  .thread-entry {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 32px;
+    padding: 3px 10px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--ink);
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .thread-entry.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .thread-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 17px;
+    height: 17px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 11px;
+  }
+  .thread-count:empty { display: none; }
+  .thread-entry.on .thread-count { background: rgba(255, 255, 255, .22); color: #fff; }
 
   /* 卡片去掉左右外框贴边，把 14px 的左右留白还给正文 */
   #view { padding: 8px 0 calc(20px + env(safe-area-inset-bottom)); }
@@ -857,39 +896,8 @@ ul.plain li { margin-bottom: 2px; }
   /* 窄屏：对话栏变成左侧抽屉，浮在聊天区上方，不挤压正文 */
   .chat-shell { display: block; }
 
-  /* 会话入口：聊天卡上方的显式按钮，一眼可见、触控高度 42px。
-     点开是历史会话覆盖层（复用左栏抽屉），选中后自动收起。 */
-  .thread-switch { display: flex; padding: 0 14px 8px; }
-  .thread-switch-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 42px;
-    padding: 0 16px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: var(--card);
-    color: var(--ink);
-    font: inherit;
-    font-size: 13.5px;
-    font-weight: 600;
-    box-shadow: 0 1px 2px rgba(48, 38, 40, .06);
-    cursor: pointer;
-  }
-  .thread-switch-btn:active { background: var(--accent-soft); }
-  .thread-switch-count {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 20px;
-    height: 20px;
-    padding: 0 6px;
-    border-radius: 999px;
-    background: var(--accent-soft);
-    color: var(--accent);
-    font-size: 11.5px;
-  }
-  .thread-switch-count:empty { display: none; }
+  /* 弹层里的会话入口列表：占满标题与新对话之后的剩余高度，一屏放更多会话 */
+  .thread-list { flex: 1 1 auto; }
 
   /* 抽屉标题与关闭键只在移动端出现，桌面左栏保持原样 */
   .thread-side-head {
@@ -900,6 +908,7 @@ ul.plain li { margin-bottom: 2px; }
     font-size: 12.5px;
     color: var(--muted);
   }
+  .thread-side-head > span { font-weight: 600; color: var(--ink); }
   .thread-close {
     display: inline-flex;
     align-items: center;
@@ -917,6 +926,17 @@ ul.plain li { margin-bottom: 2px; }
     cursor: pointer;
   }
   .thread-close:active { background: var(--accent-soft); color: var(--accent); }
+
+  /* 底部登出：与列表用分隔线隔开，钉在弹层最下面；桌面仍用聊天卡头的登出 */
+  .thread-side-foot {
+    display: block;
+    margin-top: auto;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+  }
+  .thread-logout { display: inline-flex; width: 100%; }
+  /* 比 button.ghost 的特异性高，确保移动端只剩弹层底部的登出 */
+  .chat-actions .chat-logout-desktop { display: none; }
   .thread-side {
     position: fixed;
     top: 0;
@@ -961,6 +981,10 @@ ul.plain li { margin-bottom: 2px; }
   .chat-input .primary { min-height: 46px; }
   .thread-open { min-height: 40px; padding-top: 0; padding-bottom: 0; }
   .thread-del { min-width: 40px; }
+
+  /* 顶栏会话按钮视觉保持小胶囊，热区向四周扩到约 42px */
+  .thread-entry { position: relative; }
+  .thread-entry::after { content: ''; position: absolute; inset: -5px -3px; }
 
   /* 引用编号视觉不变，热区向四周扩 9px */
   .cite::after {

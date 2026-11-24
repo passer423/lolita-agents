@@ -11,7 +11,11 @@
 <body>
   <header id="topbar">
     <h1 id="title">Lo裙问答助手</h1>
-    <span id="netdot" class="dot" title="服务状态"></span>
+    <div class="topbar-right">
+      <button class="thread-entry" id="thread-toggle" type="button" hidden
+              aria-expanded="false" aria-controls="thread-side" aria-label="切换会话">会话<span class="thread-count" id="thread-count"></span></button>
+      <span id="netdot" class="dot" title="服务状态"></span>
+    </div>
   </header>
 
   <main id="view"><div class="loading">载入中…</div></main>
