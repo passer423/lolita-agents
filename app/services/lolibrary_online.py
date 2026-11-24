@@ -50,6 +50,17 @@ _PRICE = re.compile(
 _COLORS_START = re.compile(r"Official colors|Colorways", re.I)
 _COLORS_STOP = re.compile(r"Features|Measurements|Product number|Tags|Notes|Images", re.I)
 
+# 条目页的平铺尺寸是 `<h4>Bust</h4><p>88 - 94 cm …</p>` 这种成对结构。
+# 只认带 cm/in 数值的块，Material / Notes 这类文字段落不会命中。
+_MEASUREMENT_BLOCK = re.compile(
+    r"<h4\b[^>]*>\s*([^<]{1,40}?)\s*</h4>\s*<p\b[^>]*>(.*?)</p>",
+    re.I | re.S,
+)
+_MEASUREMENT_VALUE = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:-\s*\d+(?:\.\d+)?\s*)?(?:cm|in)\b",
+    re.I,
+)
+
 # `[Price note]` 是自由文本，逐档价只认「金额 + (short|long length)」成对出现的写法。
 _PRICE_NOTE = re.compile(r"\[\s*Price note\s*\](.*?)(?:\[|\bRerelease\b|$)", re.I | re.S)
 _TIER = re.compile(
@@ -111,6 +122,8 @@ class ArchiveDetail:
     release_year: str = ""
     original_price: str = ""
     colors: tuple[str, ...] = ()
+    #: 平铺尺寸，按条目页出现顺序：`(("Bust", "88 - 94 cm …"), ("Waist", "70 - 75 cm …"))`。
+    measurements: tuple[tuple[str, str], ...] = ()
     alias: str = ""
     price_tiers: tuple[PriceTier, ...] = ()
 
@@ -181,6 +194,27 @@ def _extract_colors(text: str) -> tuple[str, ...]:
         if normalized not in {item.lower().replace("-", "") for item in colors}:
             colors.append(word.title() if word.isascii() else word)
     return tuple(colors[:8])
+
+
+def _extract_measurements(html: str) -> tuple[tuple[str, str], ...]:
+    """取条目页的平铺尺寸（Bust / Waist / Length…）。
+
+    只收「标题 + 带 cm/in 数值」的成对块：Material、Notes 这类没有尺寸数字，
+    不会被当成尺寸；同一标题重复出现只留第一次。
+    """
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for match in _MEASUREMENT_BLOCK.finditer(html or ""):
+        label = _text(match.group(1)).rstrip(":").strip()
+        value = _text(match.group(2))
+        key = label.lower()
+        if not label or not value or key in seen:
+            continue
+        if not _MEASUREMENT_VALUE.search(value):
+            continue
+        seen.add(key)
+        found.append((label, value))
+    return tuple(found[:8])
 
 
 def _amount(value: str) -> tuple[str, str]:
@@ -262,6 +296,7 @@ def parse_item(html: str, card: SearchCard) -> ArchiveDetail:
         release_year=release.group(1) if release else "",
         original_price=original_price,
         colors=colors,
+        measurements=_extract_measurements(html),
         alias=card.alias,
         price_tiers=tiers,
     )

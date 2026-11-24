@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 
 SOCIAL_CHANNELS = ("xhs", "weibo")
 EVIDENCE_TEXT_LIMIT = 300
+#: 裙子档案是结构化字段（含平铺尺寸），窗口太短会把排在后面的尺寸截掉，
+#: 让模型误以为「档案没写腰围」。单独放宽，只作用于这一条证据。
+PROFILE_TEXT_LIMIT = 700
 
 # 「信息字段意图」：用户问的是裙子的档案字段，而不是洗护/尺码/搭配。
 FIELD_MARKERS = (
@@ -47,6 +50,11 @@ FIELD_MARKERS = (
 CARE_MARKERS = (
     "怎么洗", "洗护", "清洗", "保养", "晾", "尺码", "尺寸", "显胖",
     "搭配", "怎么穿", "推荐", "值得买", "适合", "新手",
+)
+
+# 尺码/平铺尺寸是档案条目页能直接回答的字段；洗护、搭配仍归知识库。
+SIZE_MARKERS = (
+    "尺码", "码数", "尺寸", "平铺", "胸围", "腰围", "肩宽", "袖长", "裙长", "衣长",
 )
 
 _DRESS_MARKERS = ("裙子", "连衣裙", "小裙子", "半裙", "jsk", "op", "sk", "套装", "这条", "这款")
@@ -114,6 +122,8 @@ class ArchiveItem:
     release_year: str = ""
     original_price: str = ""
     colors: tuple[str, ...] = ()
+    #: 平铺尺寸（Bust / Waist / Length…），来自 Lolibrary 条目页。
+    measurements: tuple[tuple[str, str], ...] = ()
     url: str = ""
     product_number: str = ""
     alias: str = ""
@@ -1534,7 +1544,10 @@ def resolve_dress(
             )
             return _with_queries(brand_only_query)
         return None
-    if care_intent and not field_intent:
+    # 尺码本来归知识库；但已经认出**具体系列**、问的又是尺码/平铺尺寸时，
+    # 这正是档案能回答的字段，不该整段丢掉识别结果。洗护/搭配仍保持不触发。
+    size_intent = any(marker in lowered for marker in SIZE_MARKERS)
+    if care_intent and not field_intent and not (is_specific and size_intent):
         return None
 
     source = "none"
@@ -1726,6 +1739,14 @@ def dress_channels(query: dict, intent_channels: list[str]) -> list[str]:
 
 
 def _record_item(record: dict) -> ArchiveItem:
+    raw_measurements = record.get("measurements") or {}
+    measurements: tuple[tuple[str, str], ...] = ()
+    if isinstance(raw_measurements, dict):
+        measurements = tuple(
+            (str(key).strip(), str(value).strip())
+            for key, value in raw_measurements.items()
+            if str(key).strip() and str(value).strip()
+        )
     return ArchiveItem(
         title=str(record.get("title") or ""),
         brand=str(record.get("brand") or ""),
@@ -1733,6 +1754,7 @@ def _record_item(record: dict) -> ArchiveItem:
         release_year=str(record.get("release_year") or ""),
         original_price=str(record.get("original_price") or ""),
         colors=tuple(str(item) for item in (record.get("colors") or [])),
+        measurements=measurements,
         url=str(record.get("url") or ""),
         product_number=str(record.get("product_number") or ""),
         alias=" ".join(_record_aliases(record)),
@@ -1747,6 +1769,7 @@ def _detail_item(detail: lolibrary_online.ArchiveDetail) -> ArchiveItem:
         release_year=detail.release_year,
         original_price=detail.original_price,
         colors=detail.colors,
+        measurements=detail.measurements,
         url=detail.url,
         product_number=detail.product_number,
         alias=detail.alias,
@@ -1800,7 +1823,9 @@ def lookup_archive(
     record = _find_archive_record(current, records)
     if record is not None:
         item = _record_item(record)
-        needs_detail = not (item.release_year and item.original_price and item.colors)
+        needs_detail = not (
+            item.release_year and item.original_price and item.colors and item.measurements
+        )
         # 国牌按需求只查小红书/微博；本地档案只提供身份，不再去 Lolibrary 详情页。
         if current.region != "CN" and needs_detail and item.url and online_enabled:
             card = lolibrary_online.SearchCard(
@@ -1820,6 +1845,7 @@ def lookup_archive(
                     release_year=detail.release_year or item.release_year,
                     original_price=detail.original_price or item.original_price,
                     colors=detail.colors or item.colors,
+                    measurements=detail.measurements or item.measurements,
                     url=item.url,
                     product_number=detail.product_number or item.product_number,
                     alias=item.alias or detail.alias,
@@ -2073,9 +2099,9 @@ def _unique_values(candidates: list[dict]) -> list[str]:
 # --------------------------------------------------------------------- 档案整合
 
 
-def _clip(text: str) -> str:
+def _clip(text: str, limit: int = EVIDENCE_TEXT_LIMIT) -> str:
     text = (text or "").strip()
-    return text if len(text) <= EVIDENCE_TEXT_LIMIT else text[:EVIDENCE_TEXT_LIMIT] + "…"
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def _region_label(region: str) -> str:
@@ -2155,6 +2181,7 @@ def build_profile(
 
     social = _social_fields(evidence)
     notes = list(current.notes)
+    measurements = list(archive_item.measurements) if archive_item is not None else []
 
     release_candidates: list[dict] = []
     price_candidates: list[dict] = []
@@ -2295,6 +2322,9 @@ def build_profile(
         "style": style,
         "style_conflict": style_conflict,
         "colors": colors,
+        "measurements": [
+            {"label": label, "value": value} for label, value in measurements
+        ],
         "url": archive_item.url if archive_item else "",
         "sources": source_refs[:5],
         "missing": missing,
@@ -2309,7 +2339,7 @@ def build_profile(
         "source_kind": _profile_source_kind(current, archive_item, social),
         "ref": profile["url"] or profile["title"] or current.series_cn,
         "title": _profile_title(profile),
-        "text": _clip(_profile_text(profile, archive_error)),
+        "text": _clip(_profile_text(profile, archive_error), PROFILE_TEXT_LIMIT),
         "url": profile["url"],
     }
     return {"profile": profile, "evidence": evidence_item}
@@ -2367,6 +2397,13 @@ def _profile_text(profile: dict, archive_error: str = "") -> str:
         style = "来源说法不一致"
     parts.append(f"款式：{style}")
     parts.append("配色：" + (" / ".join(profile.get("colors") or []) or "未查到"))
+    if profile.get("measurements"):
+        parts.append(
+            "平铺尺寸：" + "；".join(
+                f"{item.get('label')} {item.get('value')}"
+                for item in profile["measurements"]
+            )
+        )
 
     notes = list(profile.get("notes") or [])
     kinds = {profile.get("release_kind"), profile.get("price_kind"), profile.get("style_kind")}

@@ -49,12 +49,39 @@ def _account(path, username="owner"):
 # --------------------------------------------------------------------- 抽取
 
 
-def test_extracts_size_preference_and_brand(memory_settings):
+def test_extracts_size_color_and_brand(memory_settings):
     facts = long_memory.extract("我穿M码，我喜欢粉色，我常买 Baby 的裙子", memory_settings)
     pairs = {(fact["kind"], fact["value"]) for fact in facts}
     assert ("size", "M") in pairs
-    assert ("preference", "我喜欢粉色") in pairs
+    assert ("color", "粉色") in pairs
+    # 颜色已经记成「喜欢的颜色」，不再重复写一条泛化偏好。
+    assert ("preference", "我喜欢粉色") not in pairs
     assert ("brand", "Baby, the Stars Shine Bright") in pairs
+
+
+def test_extracts_body_measurements_with_explicit_cm(memory_settings):
+    facts = long_memory.extract("我胸围85cm，腰围70cm，臀围90cm", memory_settings)
+    assert {(fact["kind"], fact["value"]) for fact in facts} == {
+        ("bust", "85cm"),
+        ("waist", "70cm"),
+        ("hips", "90cm"),
+    }
+
+    triple = long_memory.extract("我三围 85/70/90cm", memory_settings)
+    assert {(fact["kind"], fact["value"]) for fact in triple} == {
+        ("bust", "85cm"),
+        ("waist", "70cm"),
+        ("hips", "90cm"),
+    }
+
+    # 没有 cm/厘米/公分 的裸数字不当围度。
+    assert long_memory.extract("我胸围85", memory_settings) == []
+    assert long_memory.extract("胸围85cm", memory_settings) == []
+
+
+def test_negative_or_question_colors_are_not_stored(memory_settings):
+    assert long_memory.extract("我不喜欢粉色", memory_settings) == []
+    assert long_memory.extract("粉色适合我吗", memory_settings) == []
 
 
 def test_questions_and_third_person_are_not_stored(memory_settings):
@@ -76,7 +103,7 @@ def test_size_without_context_is_ignored(memory_settings):
 
 def test_same_message_dedupes(memory_settings):
     facts = long_memory.extract("我喜欢粉色，我喜欢粉色", memory_settings)
-    assert [fact["value"] for fact in facts] == ["我喜欢粉色"]
+    assert [fact["value"] for fact in facts] == ["粉色"]
 
 
 # --------------------------------------------------------------------- 存储
@@ -102,7 +129,7 @@ def test_memories_are_isolated_between_accounts(tmp_path, memory_settings):
     long_memory.remember(path, alice["id"], "我喜欢粉色", memory_settings)
 
     rows = db.list_memories(path, alice["id"])
-    assert [row["value"] for row in rows] == ["我喜欢粉色"]
+    assert [row["value"] for row in rows] == ["粉色"]
     assert db.list_memories(path, bob["id"]) == []
     assert not db.delete_memory(path, bob["id"], rows[0]["id"])
     assert db.delete_memory(path, alice["id"], rows[0]["id"])
@@ -128,17 +155,28 @@ def test_old_facts_are_hidden_and_pruned(tmp_path, memory_settings):
 def test_render_marks_source_kind(tmp_path):
     block = long_memory.render(
         [
-            {"kind": "size", "value": "M"},
+            {"kind": "preference", "value": "我喜欢蕾丝"},
             {"kind": "brand", "value": "Angelic Pretty"},
-            {"kind": "preference", "value": "我喜欢粉色"},
+            {"kind": "color", "value": "粉色"},
+            {"kind": "size", "value": "M"},
+            {"kind": "hips", "value": "90cm"},
+            {"kind": "bust", "value": "85cm"},
+            {"kind": "waist", "value": "70cm"},
         ]
     )
     assert block is not None
     assert block["role"] == "user"
     assert block["content"].startswith(long_memory.MARKER)
+    assert "胸围：85cm" in block["content"]
+    assert "腰围：70cm" in block["content"]
+    assert "臀围：90cm" in block["content"]
     assert "尺码：M" in block["content"]
+    assert "喜欢的颜色：粉色" in block["content"]
     assert "常买品牌：Angelic Pretty" in block["content"]
-    assert "偏好：我喜欢粉色" in block["content"]
+    assert "偏好：我喜欢蕾丝" in block["content"]
+    # 身材数据排在偏好前面：查裙子时先看到要拿来比的数字。
+    content = block["content"]
+    assert content.index("胸围") < content.index("喜欢的颜色") < content.index("偏好")
     assert long_memory.render([]) is None
 
 
@@ -190,6 +228,6 @@ def test_run_records_explicit_facts_for_account(data_dir, memory_settings, monke
     graph.run("我喜欢黑色", ctx=ctx, planner=object())
 
     facts = db.list_memories(settings.db_path, account["id"])
-    assert ("preference", "我喜欢黑色") in {
+    assert ("color", "黑色") in {
         (fact["kind"], fact["value"]) for fact in facts
     }

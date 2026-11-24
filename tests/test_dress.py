@@ -146,6 +146,22 @@ def test_latte_alias_variants_resolve(workdir):
         assert query.verified is True, question
 
 
+def test_size_question_still_resolves_known_series(workdir):
+    """问平铺尺寸时，只要认出了具体系列，就该继续走裙子档案。"""
+    app = make_app(workdir)
+    query = dress.resolve_dress("甜心拿铁的平铺尺寸", RecallContext(settings=app))
+
+    assert query is not None
+    assert query.series_en == "Sweetheart Dreamy Latte"
+    assert query.is_specific is True
+
+
+def test_size_question_without_series_still_skipped(workdir):
+    """只有品牌、没有系列时，尺码问题仍归知识库，不硬造裙子档案。"""
+    app = make_app(workdir)
+    assert dress.resolve_dress("Baby 的裙子尺码怎么选", RecallContext(settings=app)) is None
+
+
 def test_bare_unknown_name_goes_to_model(workdir):
     app = make_app(workdir)
     query = dress.resolve_dress("星月夜之梦", RecallContext(settings=app))
@@ -630,6 +646,36 @@ def test_model_result_verified_by_archive(workdir, monkeypatch):
     assert any(item["cn"] == "皇家千层公主" and item["brand"] == "baby" for item in learned)
 
 
+def test_profile_carries_flat_measurements(workdir, monkeypatch):
+    """在线档案的平铺尺寸要进 profile，并出现在给写作模型的证据文本里。"""
+    _app, ctx, query = _model_query(workdir)
+    monkeypatch.setattr(
+        lolibrary_online,
+        "lookup",
+        lambda *a, **k: ([_detail(measurements=(
+            ("Bust", "88 - 94 cm (34.64 - 37 in)"),
+            ("Length", "90 - 94 cm (35.43 - 37 in)"),
+            ("Shoulder Width", "34.5 cm (13.58 in)"),
+            ("Sleeve Length", "Long: 65 cm (25.59 in) / Short: 26.5 cm (10.43 in)"),
+            ("Waist", "70 - 75 cm (27.55 - 29.52 in)"),
+        ))], ""),
+    )
+
+    result = dress.build_profile(query, [], ctx, online=True)
+
+    assert result["profile"]["measurements"] == [
+        {"label": "Bust", "value": "88 - 94 cm (34.64 - 37 in)"},
+        {"label": "Length", "value": "90 - 94 cm (35.43 - 37 in)"},
+        {"label": "Shoulder Width", "value": "34.5 cm (13.58 in)"},
+        {"label": "Sleeve Length", "value": "Long: 65 cm (25.59 in) / Short: 26.5 cm (10.43 in)"},
+        {"label": "Waist", "value": "70 - 75 cm (27.55 - 29.52 in)"},
+    ]
+    assert "平铺尺寸：" in result["evidence"]["text"]
+    assert "Bust 88 - 94 cm" in result["evidence"]["text"]
+    # 尺寸排在档案末尾，不能被 300 字窗口截掉（否则模型会说腰围没记录）。
+    assert "Waist 70 - 75 cm" in result["evidence"]["text"]
+
+
 def test_model_result_unverified_is_labeled(workdir, monkeypatch):
     _app, ctx, query = _model_query(workdir)
     monkeypatch.setattr(
@@ -984,6 +1030,32 @@ def test_online_without_price_note_only_has_normal_tier():
     assert detail.price_tiers[0].stage == "normal"
     assert detail.price_tiers[0].amount == "12000"
     assert all(tier.stage == "normal" for tier in detail.price_tiers)
+
+
+MEASUREMENT_HTML = """
+<div>
+  <h4 class="mt-4">Bust</h4>
+  <p class="text-muted text-regular">88 - 94 cm (34.64 - 37 in)</p>
+  <h4 class="mt-4">Material</h4>
+  <p class="text-muted text-regular">100% polyester</p>
+  <h4 class="mt-4">Waist</h4>
+  <p class="text-muted text-regular">70 - 75 cm (27.55 - 29.52 in)</p>
+  <h4 class="mt-4">Notes</h4>
+  <div><p>Official colors white / pink</p></div>
+</div>
+"""
+
+
+def test_online_parses_flat_measurements():
+    """平铺尺寸只收带 cm/in 数值的标题块，Material / Notes 不能混进来。"""
+    card = lolibrary_online.SearchCard(url="https://lolibrary.org/items/m", title="M")
+
+    detail = lolibrary_online.parse_item(MEASUREMENT_HTML, card)
+
+    assert detail.measurements == (
+        ("Bust", "88 - 94 cm (34.64 - 37 in)"),
+        ("Waist", "70 - 75 cm (27.55 - 29.52 in)"),
+    )
 
 
 # --------------------------------------------------------------------- 缩写与裸名字

@@ -76,6 +76,7 @@ from app.agent import (
     cost,
     dress,
     dress_name_tool,
+    fit,
     history_memory,
     long_memory,
     routing,
@@ -1237,6 +1238,21 @@ def _cost_block(
     )
 
 
+def _fit_note(state: AgentState, ctx: RecallContext) -> str:
+    """按长期记忆里的三围/喜欢的颜色，给已解析的裙子档案补一段结论。
+
+    只对「已解析且已核实」的档案生效：未解析/未核实的档案本来就不是事实，
+    拿它去比尺寸会给出更糟的假结论。
+    """
+    if state.get("dress_unresolved") or state.get("dress_unverified"):
+        return ""
+    profile = state.get("dress_profile") or {}
+    if not profile:
+        return ""
+    facts = long_memory.facts_for(ctx.settings.db_path, ctx.account_id)
+    return fit.advice(profile, facts)
+
+
 def _finish(
     question: str,
     state: AgentState,
@@ -1254,11 +1270,15 @@ def _finish(
         state.get("supplementary"),
         limit=ctx.settings.evidence_max_items,
     )
+    answer = state.get("answer", "")
+    note = _fit_note(state, ctx)
+    if note:
+        answer = f"{answer}\n\n{note}" if answer.strip() else note
     cost_block = _cost_block(planner, writer, ctx.settings, route)
-    conflict_block = conflicts.diagnose(question, state.get("answer", ""), evidence)
+    conflict_block = conflicts.diagnose(question, answer, evidence)
     payload = {
         "question": question,
-        "answer": state.get("answer", ""),
+        "answer": answer,
         "refused": not evidence,
         "evidence": _numbered(evidence),
         "steps": state.get("steps", []),
@@ -1523,6 +1543,12 @@ def stream(
     else:
         text = _forced_answer(evidence, reason="no_evidence")
         yield {"type": "delta", "text": text}
+
+    # 尺码/配色补充只拼进 final：前端收到 final 会整段替换，既不会重复，
+    # 也不会在写作中途插一行打断阅读。
+    note = _fit_note(state, ctx)
+    if note:
+        text = f"{text}\n\n{note}" if text.strip() else note
 
     if (
         state.get("dress_unresolved")

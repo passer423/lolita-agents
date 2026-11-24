@@ -24,6 +24,7 @@ from pathlib import Path
 
 from app import db
 from app.agent import dress
+from app.agent.fit import COLOR_ALIASES
 from app.agent.history_memory import find_size
 from app.config import AppSettings
 
@@ -38,12 +39,21 @@ MAX_PER_KIND = 3
 MAX_FACT_CHARS = 40
 
 KIND_LABELS = {
+    "bust": "胸围",
+    "waist": "腰围",
+    "hips": "臀围",
     "size": "尺码",
+    "color": "喜欢的颜色",
     "brand": "常买品牌",
     "preference": "偏好",
 }
 
+#: 渲染顺序：身材数据在前（查裙子时要拿来比），软偏好放最后。
+KIND_ORDER = ("bust", "waist", "hips", "size", "color", "brand", "preference")
+
 _FIRST_PERSON = ("我", "本人", "自己")
+#: 「我朋友胸围…」里的数字不是本人的，不写进本人档案。
+_OTHER_PERSON = ("朋友", "闺蜜", "同事", "她", "他", "妈妈", "姐姐", "妹妹")
 _PREFERENCE_MARKERS = (
     "喜欢",
     "不喜欢",
@@ -71,6 +81,19 @@ _QUESTION_MARKERS = (
     "能不能",
 )
 _CLAUSE_SPLIT = re.compile(r"[，。；;,.!?！？\n]")
+_SENTENCE_SPLIT = re.compile(r"[。；;!?！？\n]")
+
+#: 三围只认显式带 cm/厘米/公分的陈述；没有单位的数字（「我穿170」）不当围度。
+_BODY_MARKERS = {"bust": ("胸围",), "waist": ("腰围",), "hips": ("臀围",)}
+_CM_VALUE = re.compile(r"(\d{2,3}(?:\.\d+)?)\s*(?:cm|厘米|公分)", re.IGNORECASE)
+_THREE_SIZES = re.compile(
+    r"三围\s*[:：]?\s*(\d{2,3}(?:\.\d+)?)\s*[/、,，]\s*(\d{2,3}(?:\.\d+)?)"
+    r"\s*[/、,，]\s*(\d{2,3}(?:\.\d+)?)"
+)
+
+#: 颜色只认「我 + 喜欢/偏爱… + 颜色词」；否定句与疑问句都不写。
+_COLOR_PREFERENCE = ("喜欢", "偏爱", "最爱", "爱", "控")
+_COLOR_NEGATIVE = ("不喜欢", "不爱", "讨厌", "不要", "不想要", "无感", "忌")
 
 
 def _alias_pattern(alias: str) -> re.Pattern[str] | None:
@@ -97,13 +120,56 @@ def _is_question(clause: str) -> bool:
     return any(marker in clause for marker in _QUESTION_MARKERS)
 
 
+def _cm_text(value: str) -> str:
+    if "." in value:
+        value = value.rstrip("0").rstrip(".")
+    return f"{value}cm"
+
+
+def _body_facts(clause: str) -> list[tuple[str, str]]:
+    """从一句话里取三围：优先「三围 85/70/90」，其次逐部位「胸围 85cm」。"""
+    triple = _THREE_SIZES.search(clause)
+    if triple:
+        return [
+            ("bust", _cm_text(triple.group(1))),
+            ("waist", _cm_text(triple.group(2))),
+            ("hips", _cm_text(triple.group(3))),
+        ]
+    found: list[tuple[str, str]] = []
+    for kind, markers in _BODY_MARKERS.items():
+        for marker in markers:
+            index = clause.find(marker)
+            if index < 0:
+                continue
+            match = _CM_VALUE.search(clause[index: index + 12])
+            if match:
+                found.append((kind, _cm_text(match.group(1))))
+            break
+    return found
+
+
+def _liked_color(clause: str) -> str:
+    """「我 + 喜欢 + 颜色词」才算；否定与疑问已在调用处排除。"""
+    if any(marker in clause for marker in _COLOR_NEGATIVE):
+        return ""
+    if not any(marker in clause for marker in _COLOR_PREFERENCE):
+        return ""
+    for name in sorted(COLOR_ALIASES, key=len, reverse=True):
+        if name in clause:
+            return name
+    return ""
+
+
+def _mentions_color(clause: str) -> bool:
+    return any(name in clause for name in COLOR_ALIASES)
+
+
 def extract(text: str, app: AppSettings) -> list[dict]:
     """从一条用户消息里抽稳定事实；只认显式陈述，疑问句不写。
 
     返回 ``[{"kind": ..., "value": ..., "source": ...}]``，同一条消息内
     同 kind + value 只出现一次。
     """
-    clauses = [part.strip() for part in _CLAUSE_SPLIT.split(str(text or ""))]
     brand_patterns = _brand_patterns(app)
     facts: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -122,25 +188,45 @@ def extract(text: str, app: AppSettings) -> list[dict]:
             }
         )
 
-    for clause in clauses:
-        if not clause or _is_question(clause):
+    # 「我胸围85cm，腰围70cm」里第一人称只出现在第一个分句；先按句切，
+    # 让整句共享同一个「我」，再按逗号分句判断各自的事实。
+    for sentence in _SENTENCE_SPLIT.split(str(text or "")):
+        if not sentence.strip() or _is_question(sentence):
             continue
+        first_person = any(marker in sentence for marker in _FIRST_PERSON)
+        other_person = any(marker in sentence for marker in _OTHER_PERSON)
 
-        size = find_size(clause)
-        if size:
-            add("size", size, clause)
+        for clause in (part.strip() for part in _CLAUSE_SPLIT.split(sentence)):
+            if not clause or _is_question(clause):
+                continue
 
-        first_person = any(marker in clause for marker in _FIRST_PERSON)
-        if not first_person:
-            continue
+            size = find_size(clause)
+            if size:
+                add("size", size, clause)
 
-        if any(marker in clause for marker in _BRAND_MARKERS):
-            for pattern, canonical in brand_patterns:
-                if pattern.search(clause):
-                    add("brand", canonical, clause)
+            if not first_person:
+                continue
 
-        if any(marker in clause for marker in _PREFERENCE_MARKERS):
-            add("preference", clause, clause)
+            # 三围与颜色必须是「本人」的：朋友/家人的数字不写进本人档案。
+            if not other_person:
+                for kind, value in _body_facts(clause):
+                    add(kind, value, clause)
+
+            liked_color = "" if other_person else _liked_color(clause)
+            if liked_color:
+                add("color", liked_color, clause)
+
+            if any(marker in clause for marker in _BRAND_MARKERS):
+                for pattern, canonical in brand_patterns:
+                    if pattern.search(clause):
+                        add("brand", canonical, clause)
+
+            # 提到颜色的那句不重复写泛化偏好：颜色要么已记成「喜欢的颜色」，
+            # 要么是「不喜欢/讨厌」，后者不写（更不该在查裙子时当喜欢来提醒）。
+            if not _mentions_color(clause) and any(
+                marker in clause for marker in _PREFERENCE_MARKERS
+            ):
+                add("preference", clause, clause)
 
     return facts
 
@@ -150,7 +236,7 @@ def render(facts: list[dict]) -> dict | None:
     if not facts:
         return None
     lines = [MARKER]
-    for kind in ("size", "brand", "preference"):
+    for kind in KIND_ORDER:
         values: list[str] = []
         for fact in facts:
             if fact.get("kind") != kind:
@@ -165,21 +251,34 @@ def render(facts: list[dict]) -> dict | None:
     return {"role": "user", "content": "\n".join(lines)} if len(lines) > 1 else None
 
 
+def facts_for(
+    db_path: Path,
+    account_id: int | None,
+    *,
+    max_age_days: float = db.MEMORY_MAX_AGE_DAYS,
+) -> list[dict]:
+    """读取某账号未过期的稳定事实；读失败只当没有记忆。
+
+    与 :func:`block_for` 共用同一条读取路径：渲染成提示词和拿来比对尺寸
+    必须是同一批事实，不能一处过期一处没过期。
+    """
+    if not account_id:
+        return []
+    try:
+        return db.list_memories(db_path, account_id, max_age_days=max_age_days)
+    except Exception as exc:  # noqa: BLE001 - 记忆读不到不能影响本轮回答
+        logger.warning("长期记忆读取失败（不影响回答）：%s", exc)
+        return []
+
+
 def block_for(
     db_path: Path,
     account_id: int | None,
     *,
     max_age_days: float = db.MEMORY_MAX_AGE_DAYS,
 ) -> dict | None:
-    """读取某账号未过期的稳定事实并渲染；读失败只当没有记忆。"""
-    if not account_id:
-        return None
-    try:
-        facts = db.list_memories(db_path, account_id, max_age_days=max_age_days)
-    except Exception as exc:  # noqa: BLE001 - 记忆读不到不能影响本轮回答
-        logger.warning("长期记忆读取失败（不影响回答）：%s", exc)
-        return None
-    return render(facts)
+    """读取某账号未过期的稳定事实并渲染；没有记忆返回 None。"""
+    return render(facts_for(db_path, account_id, max_age_days=max_age_days))
 
 
 def remember(
