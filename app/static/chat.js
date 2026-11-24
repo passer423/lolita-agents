@@ -336,9 +336,11 @@
     host.innerHTML = '';
     if (!state.messages.length) {
       host.innerHTML = '<div class="hint" style="text-align:center;padding:18px 0">' +
-        '<b>Lolita 圈层问答助手</b><br>' +
-        '把微博真实语料、Lolibrary 档案和自有知识库整理成可检索的知识，只回答 Lo 裙相关的问题。<br>' +
-        '问具体裙子会先判断日牌 / 国牌再分流查证；答案带引用、可点开看原文，查不到会直接说查不到。</div>';
+        '<b>先告诉我你的身材数据，合身判断更准</b><br>' +
+        '身高 / 体重 / 三围（cm）和喜欢的颜色，一条消息发过来就行，' +
+        '例如「我身高160cm，体重55kg，喜欢粉色」。我会记住，之后问某条裙子时' +
+        '能直接判断穿不穿得下、裙长到哪、有没有你喜欢的配色。<br>' +
+        '也可以直接提问：某条裙子多少钱、哪年发售，或者蕾丝 / 真丝怎么洗。</div>';
       return;
     }
     state.messages.forEach((message) => host.appendChild(messageNode(message)));
