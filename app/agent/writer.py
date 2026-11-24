@@ -232,10 +232,12 @@ SYNTH_SYSTEM = """你是 Lolita 领域的问答助手，像微信里一个懂 Lo
    每个价格数字都要紧挨 [n]；最多在价格句后加一次「具体可点开参考来源核对」，
    不要重复；不要写「机器识别」「未校验」「以原图为准」这类提示，
    来源说明证据标题里已有，答案里不必再提。
-10. 档案条目带「发售价」时，用户问「这是什么 / 多少钱」要把发售年份、发售价、
-    配色照实写上，直接说发售价；lolita 多是限时发售，发售价本身就是有效信息，
-    不要附加「非现价」「不代表当前价格」这类说明。只有证据里确实没有价格，
-    才能说记录里没写。
+10. 档案条目带「发售价」时，用户问「这是什么 / 多少钱 / 价格 / 再贩价」要把发售年份、
+    发售价、配色照实写上，直接给出这个价格；日牌的发售价就是它的价格，lolibrary
+    的记录可信，不要用「只记录了」「没写再贩价」把它降权，也不要先说「没查到」。
+    用户问再贩价时，直接答档案价格，不要补「资料没写是不是最近一次再贩」——
+    那是在替证据交代它没写的事。再贩是否改价，只有证据明确写了才提；没写就
+    完全不提。只有证据里确实没有价格，才能说记录里没写。
 11. **不要替用户在「原版 / 复刻 / 再贩版」之间做购买取舍**。lolita 圈极看重版权与
     山正，回答里不出现「不推荐买原版」「建议买复刻」「还是买再贩版吧」这类结论，
     也不把店家的免责声明转述成劝退。用户问某色会不会掉色、怎么洗时，就答：会不会
@@ -280,6 +282,30 @@ def _evidence_block(evidence: list[dict]) -> str:
             _CLUE_HEADER + "\n" + "\n".join(_evidence_line(item) for item in clues)
         )
     return "\n\n".join(sections)
+
+
+#: 问价格的说法：命中才可能补「直接给档案价」的写法要求。
+_PRICE_ASK_MARKERS = ("价格", "多少钱", "售价", "原价", "贵不贵", "再贩")
+
+#: 档案里已有价格时的本轮写法要求。系统提示词里的长期规则容易被「再贩价」带偏，
+#: 这里按本轮证据再强调一次：日牌发售价就是价格，不要降权成「只记录了发售价」。
+_ARCHIVE_PRICE_HINT = (
+    "【价格写法】档案里的价格就是日牌的发售价，直接给出这个数字；"
+    "不要写「没查到」「只记录了发售价」「没写再贩价」，也不要补"
+    "「资料没写是不是最近一次再贩」。"
+)
+
+
+def _archive_price_hint(question: str, evidence: list[dict]) -> str:
+    """问题在问价格、且档案里确有发售价时，补一条直接的写法要求。"""
+    text = question or ""
+    if not any(marker in text for marker in _PRICE_ASK_MARKERS):
+        return ""
+    for item in evidence:
+        body = str(item.get("text") or "")
+        if item.get("channel") == "dress" and "（发售价）" in body:
+            return _ARCHIVE_PRICE_HINT
+    return ""
 
 
 # --------------------------------------------------------------------- 句级引用覆盖
@@ -803,12 +829,11 @@ def build_synth_messages(
     messages: list[dict] = [{"role": "system", "content": SYNTH_SYSTEM}]
     for turn in sanitize_history(history):
         messages.append({"role": turn["role"], "content": turn["content"]})
-    messages.append(
-        {
-            "role": "user",
-            "content": f"【证据】\n{evidence_text}\n\n【问题】\n{question}",
-        }
-    )
+    content = f"【证据】\n{evidence_text}\n\n【问题】\n{question}"
+    hint = _archive_price_hint(question, evidence)
+    if hint:
+        content += f"\n\n{hint}"
+    messages.append({"role": "user", "content": content})
     return messages
 
 

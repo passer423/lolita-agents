@@ -2420,10 +2420,17 @@ def _profile_text(profile: dict, archive_error: str = "") -> str:
     parts.append(f"发售：{release}")
 
     if profile.get("price"):
-        label = "发售价" if profile.get("price_kind") == "archive_original" else "价格（网友提到，未核实）"
+        if profile.get("price_kind") == "archive_original":
+            # 日牌档案里的发售价就是可用的价格：字段名叫「价格」，把发售价放进括号，
+            # 避免写作层把它当成「另一种价格」而说没查到。
+            label = "价格"
+            value = f"{profile['price']}（发售价）"
+        else:
+            label = "价格"
+            value = f"{profile['price']}（网友提到，未核实）"
         if profile.get("price_conflict"):
-            label = "价格（来源说法不一致）"
-        parts.append(f"{label}：{profile['price']}")
+            label, value = "价格", "来源说法不一致"
+        parts.append(f"{label}：{value}")
     else:
         parts.append("价格：未查到")
 

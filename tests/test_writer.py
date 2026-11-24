@@ -376,6 +376,42 @@ def test_prompt_carries_replica_neutrality_and_archive_price_rules():
     assert "原版 / 复刻 / 再贩版" in system
     assert "山正" in system
     assert "发售价" in system
+    # 问再贩价时，日牌发售价就是价格，不能被降权成「没查到」。
+    assert "再贩价" in system
+    assert "日牌的发售价就是它的价格" in system
+
+
+def test_archive_price_question_gets_a_direct_price_hint():
+    ev = evidence(
+        channel="dress",
+        source_kind="third_party",
+        title="裙子档案",
+        text="价格：¥32780 JPY（发售价）",
+    )
+
+    prompt = build_synth_messages("bbd 最近一次再贩价格", ev)[-1]["content"]
+
+    assert "【价格写法】" in prompt
+    assert "直接给出这个数字" in prompt
+    assert "不要写「没查到」" in prompt
+
+
+def test_archive_price_hint_only_when_price_exists_and_asked():
+    dress = evidence(
+        channel="dress",
+        source_kind="third_party",
+        title="裙子档案",
+        text="价格：¥32780 JPY（发售价）",
+    )
+    no_price = evidence(
+        channel="dress",
+        source_kind="third_party",
+        title="裙子档案",
+        text="价格：未查到",
+    )
+
+    assert "【价格写法】" not in build_synth_messages("蕾丝怎么洗", dress)[-1]["content"]
+    assert "【价格写法】" not in build_synth_messages("多少钱", no_price)[-1]["content"]
 
 
 def test_real_ugc_keeps_netizen_wording():
