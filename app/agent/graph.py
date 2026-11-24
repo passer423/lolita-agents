@@ -70,7 +70,17 @@ from typing import Annotated, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
-from app.agent import channels, conflicts, cost, dress, dress_name_tool, history_memory, routing, trace
+from app.agent import (
+    channels,
+    conflicts,
+    cost,
+    dress,
+    dress_name_tool,
+    history_memory,
+    long_memory,
+    routing,
+    trace,
+)
 from app.agent.channels import ALL_CHANNELS, ChannelUnavailable, RecallContext
 from app.agent.planner import PlannerOutputError, plan_channels, plan_intents
 from app.agent.writer import HISTORY_FETCH_MESSAGES, sanitize_history
@@ -1287,10 +1297,17 @@ def _finish(
 def _history_for_context(
     history: list[dict] | None, ctx: RecallContext
 ) -> list[dict]:
-    """历史先压成结构化要点；压不出来（空/无字段/不更短）就退回 sanitize 原文。"""
+    """历史先压成结构化要点；压不出来（空/无字段/不更短）就退回 sanitize 原文。
+
+    长期记忆（稳定偏好/尺码/品牌）是**另一条消息**，放在最前：它不属于本轮
+    短期窗口，先于历史截断存在，不能和最近几轮一起被裁掉。没有账号或读库
+    失败时只是不带这一段，不影响本轮。
+    """
     sanitized = sanitize_history(history, limit=HISTORY_FETCH_MESSAGES)
     compacted = history_memory.compress(sanitized, ctx.settings)
-    return compacted if compacted is not None else sanitized
+    turns = compacted if compacted is not None else sanitized
+    memory = long_memory.block_for(ctx.settings.db_path, ctx.account_id)
+    return ([memory] + turns) if memory else turns
 
 
 def run(
@@ -1317,13 +1334,15 @@ def run(
     route = routing.decide(question, ctx.settings)
     progress = _Progress()
     # 历史在进图之前就压成要点：planner / dress / writer 共用同一份，避免各取一段原文。
-    memory = _history_for_context(history, ctx)
+    turns = _history_for_context(history, ctx)
+    # 用户在这轮里明确说过的稳定事实单独落库（读与写都走 graph 的 ctx，不占短期窗口）。
+    long_memory.remember(ctx.settings.db_path, ctx.account_id, question, ctx.settings)
     graph = build_graph(planner, writer, ctx, stream=False, progress=progress, route=route)
     state, timed_out = _invoke_with_deadline(
         graph,
         {
             "question": question,
-            "history": memory,
+            "history": turns,
             "evidence": [],
             "steps": [],
             "recalled": [],
@@ -1343,7 +1362,7 @@ def run(
     duration_ms = int((time.perf_counter() - started) * 1000)
     return _finish(
         question, state, ctx=ctx, planner=planner, writer=writer,
-        history=memory, duration_ms=duration_ms, route=route,
+        history=turns, duration_ms=duration_ms, route=route,
     )
 
 
@@ -1379,7 +1398,8 @@ def stream(
     route = routing.decide(question, ctx.settings)
     progress = _Progress(events=True)
     # 与非流式共用同一份压缩要点；写作阶段也用它，不再回头读 raw history。
-    memory = _history_for_context(history, ctx)
+    turns = _history_for_context(history, ctx)
+    long_memory.remember(ctx.settings.db_path, ctx.account_id, question, ctx.settings)
     graph = build_graph(planner, writer, ctx, stream=True, progress=progress, route=route)
 
     result: dict = {}
@@ -1390,7 +1410,7 @@ def stream(
             result["state"] = graph.invoke(
                 {
                     "question": question,
-                    "history": memory,
+                    "history": turns,
                     "evidence": [],
                     "steps": [],
                     "recalled": [],
@@ -1474,7 +1494,7 @@ def stream(
                 writer.stream(
                     question,
                     numbered,
-                    sanitize_history(memory),
+                    sanitize_history(turns),
                     model=route.model,
                 ),
                 deadline_at if deadline_at is not None else float("inf"),

@@ -177,6 +177,14 @@ def _turn_numbers(messages: list[dict]) -> list[int]:
     return numbers
 
 
+def find_size(text: str) -> str | None:
+    """从一句话里取尺码记号（M / XL / 均码 / 160 这类）；没语境就返回 None。"""
+    match = _SIZE_RE.search(text)
+    if not match:
+        return None
+    return str(next(group for group in match.groups() if group)).upper()
+
+
 def _alias_pattern(alias: str) -> re.Pattern[str] | None:
     alias = alias.strip()
     if not alias:
@@ -274,10 +282,9 @@ def _extract(history: list[dict], app: AppSettings) -> Digest:
             break
 
     for message, number in zip(messages, numbers, strict=False):
-        size_match = _SIZE_RE.search(message["content"])
-        if size_match:
-            size = next(group for group in size_match.groups() if group)
-            digest.sizes.append((str(size).upper(), number))
+        size = find_size(message["content"])
+        if size:
+            digest.sizes.append((size, number))
             break
 
     digest.preferences = _clauses(messages, numbers, _PREFERENCE_MARKERS, limit=2)

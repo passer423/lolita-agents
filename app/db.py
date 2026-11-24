@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 #: 每账号保留的对话数、每对话保留的消息数、全库对话上限、闲置过期天数。
 KEEP_THREADS_PER_ACCOUNT = 20
@@ -31,6 +31,11 @@ KEEP_MESSAGES_PER_THREAD = 100
 MAX_THREADS_TOTAL = 500
 THREAD_MAX_AGE_DAYS = 90
 KEEP_SESSIONS_PER_ACCOUNT = 10
+
+#: 长期记忆（显式偏好 / 尺码 / 品牌）：每账号最多几条、多久没再被确认就过期。
+#: 都是稳定信息，过期比对话宽松得多；上限只为防单账号把库灌满。
+KEEP_MEMORIES_PER_ACCOUNT = 30
+MEMORY_MAX_AGE_DAYS = 365
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
@@ -93,6 +98,25 @@ CREATE TABLE IF NOT EXISTS follow_events (
 );
 
 CREATE INDEX IF NOT EXISTS follow_events_unread ON follow_events(read, id);
+
+-- 长期记忆：稳定事实（偏好 / 尺码 / 品牌），与 thread_messages 的短期窗口分开。
+-- 同一账号同一 kind + value 只留一行，重复出现时更新 updated_at 并累加 hits。
+CREATE TABLE IF NOT EXISTS long_memories (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    hits       INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS long_memories_unique
+    ON long_memories(account_id, kind, value);
+
+CREATE INDEX IF NOT EXISTS long_memories_account
+    ON long_memories(account_id, updated_at);
 
 -- 迁移前的全局单会话表。保留旧行，但代码不再读写（新账号看不到）。
 CREATE TABLE IF NOT EXISTS conversations (
@@ -411,6 +435,77 @@ def unread_follow_events(db_path: Path, account_id: int) -> int:
     return int(row["n"])
 
 
+# ------------------------------------------------------------------- 长期记忆
+
+
+def upsert_memory(
+    db_path: Path, account_id: int, kind: str, value: str, source: str = ""
+) -> dict:
+    """写入一条稳定事实；同账号同 kind + value 重复出现时只累加 hits。
+
+    ``updated_at`` 每次都刷新——「多久没再被确认」是过期依据，重复说一次
+    就等于重新确认一次。``created_at`` / 首次的 ``source`` 保留不动。
+    """
+    stamp = now()
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO long_memories "
+            "(account_id, kind, value, source, created_at, updated_at, hits) "
+            "VALUES (?, ?, ?, ?, ?, ?, 1) "
+            "ON CONFLICT(account_id, kind, value) DO UPDATE SET "
+            "updated_at = excluded.updated_at, hits = hits + 1",
+            (account_id, kind, value, source, stamp, stamp),
+        )
+        row = conn.execute(
+            "SELECT * FROM long_memories "
+            "WHERE account_id = ? AND kind = ? AND value = ?",
+            (account_id, kind, value),
+        ).fetchone()
+    return dict(row)
+
+
+def list_memories(
+    db_path: Path,
+    account_id: int,
+    *,
+    limit: int = KEEP_MEMORIES_PER_ACCOUNT,
+    max_age_days: float = MEMORY_MAX_AGE_DAYS,
+) -> list[dict]:
+    """按最近确认排序的稳定事实；``max_age_days <= 0`` 表示不按时间过滤。"""
+    clause = ""
+    params: list = [account_id]
+    if max_age_days and max_age_days > 0:
+        clause = " AND updated_at >= ?"
+        params.append(_ago(max_age_days))
+    params.append(max(1, int(limit)))
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, kind, value, source, created_at, updated_at, hits "
+            f"FROM long_memories WHERE account_id = ?{clause} "
+            "ORDER BY updated_at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_memory(db_path: Path, account_id: int, memory_id: int) -> bool:
+    with connect(db_path) as conn:
+        return (
+            conn.execute(
+                "DELETE FROM long_memories WHERE id = ? AND account_id = ?",
+                (memory_id, account_id),
+            ).rowcount
+            > 0
+        )
+
+
+def clear_memories(db_path: Path, account_id: int) -> int:
+    with connect(db_path) as conn:
+        return conn.execute(
+            "DELETE FROM long_memories WHERE account_id = ?", (account_id,)
+        ).rowcount
+
+
 # --------------------------------------------------------------------- 对话线程
 
 
@@ -593,10 +688,11 @@ def prune_user_data(db_path: Path, *, max_age_days: int = THREAD_MAX_AGE_DAYS) -
     * 每个账号只留最近 ``KEEP_THREADS_PER_ACCOUNT`` 个对话；
     * 全库只留最近 ``MAX_THREADS_TOTAL`` 个对话（防止注册大量账号把磁盘塞满）；
     * 过期登录会话，以及每个账号只留最近 ``KEEP_SESSIONS_PER_ACCOUNT`` 个；
+    * 长期记忆：一年没再确认的过期，每账号只留 ``KEEP_MEMORIES_PER_ACCOUNT`` 条；
     * 孤儿消息（对话已删但消息残留）。
     """
     stamp = now()
-    removed = {"threads": 0, "sessions": 0}
+    removed = {"threads": 0, "sessions": 0, "memories": 0}
     with connect(db_path) as conn:
         stale = [
             row["id"]
@@ -610,7 +706,8 @@ def prune_user_data(db_path: Path, *, max_age_days: int = THREAD_MAX_AGE_DAYS) -
             row[0]
             for row in conn.execute(
                 "SELECT account_id FROM chat_threads "
-                "UNION SELECT account_id FROM account_sessions"
+                "UNION SELECT account_id FROM account_sessions "
+                "UNION SELECT account_id FROM long_memories"
             ).fetchall()
         ]
         for account_id in account_ids:
@@ -638,6 +735,18 @@ def prune_user_data(db_path: Path, *, max_age_days: int = THREAD_MAX_AGE_DAYS) -
             "DELETE FROM thread_messages WHERE thread_id NOT IN "
             "(SELECT id FROM chat_threads)"
         )
+
+        # 长期记忆：一年没再被确认的事实过期；每账号只留最近若干条。
+        removed["memories"] += conn.execute(
+            "DELETE FROM long_memories WHERE updated_at < ?", (_ago(MEMORY_MAX_AGE_DAYS),)
+        ).rowcount
+        for account_id in account_ids:
+            removed["memories"] += conn.execute(
+                "DELETE FROM long_memories WHERE id IN ("
+                "SELECT id FROM long_memories WHERE account_id = ? "
+                "ORDER BY updated_at DESC, id DESC LIMIT -1 OFFSET ?)",
+                (account_id, KEEP_MEMORIES_PER_ACCOUNT),
+            ).rowcount
 
         removed["sessions"] += conn.execute(
             "DELETE FROM account_sessions WHERE expires_at <= ?", (stamp,)
