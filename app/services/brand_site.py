@@ -8,7 +8,9 @@
 
 * **缓存**：每个品牌一个 JSON 文件，默认 30 分钟。官网列表短时间内不会变，
   没必要每次提问都去抓；空结果也写入缓存，避免页面结构变化后反复打官网。
-* **超时**：单页 6 秒；失败且缓存不超过 6 小时时退回旧缓存，否则报不可用。
+* **超时**：单站总预算 8 秒（含多页串行），到点立即放弃、不再干等；超时
+  优先退回 6 小时内的旧缓存并标 ``stale``，没有旧缓存才报「官网暂时没响应」。
+  缓存命中直接返回，不进入网络路径。
 * **容忍小改**：优先按标签 + class 识别列表块；class 改名时退回按
   ``/Page/Feature/``、``<time>``、``<h2>`` 的顺序配对。解析不出条目就是空，
   不猜。
@@ -21,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -32,8 +35,10 @@ from app.config import AppSettings
 
 logger = logging.getLogger(__name__)
 
-# 单页超时。AP 列表本机实测约 1.5s，BABY 约 0.7s；6s 足够覆盖慢网。
+# 单页 socket 超时。AP 列表本机实测约 1.5s，BABY 约 0.7s；6s 足够覆盖慢网。
 REQUEST_TIMEOUT = 6.0
+# 单站（含该站多个页面的串行抓取）总预算。硬上限：到点就放弃，不再等下一页。
+SITE_TIMEOUT = 8.0
 CACHE_TTL = 30 * 60
 STALE_TTL = 6 * 60 * 60
 MAX_ITEMS_PER_SITE = 4
@@ -354,6 +359,32 @@ def _fetch(url: str, timeout: float = REQUEST_TIMEOUT) -> str:
     return raw.decode(charset, errors="replace")
 
 
+def _fetch_limited(url: str, timeout: float) -> str:
+    """带硬超时的单页抓取。
+
+    ``urlopen`` 的 timeout 只约束单次 socket 读写，服务端慢速回包时总时长仍
+    可能超过它；单站预算是硬上限，所以放到 daemon 线程里 join 兜底，到点直接
+    放弃（线程自行结束，不阻塞调用方）。
+    """
+    result: dict[str, object] = {}
+
+    def worker() -> None:
+        try:
+            result["html"] = _fetch(url, timeout=timeout)
+        except BaseException as exc:  # noqa: BLE001 - 线程内异常交回调用方处理
+            result["error"] = exc
+
+    thread = threading.Thread(target=worker, name="brand-site-fetch", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise TimeoutError(f"超过 {timeout:.1f} 秒未返回")
+    error = result.get("error")
+    if isinstance(error, BaseException):
+        raise error
+    return str(result.get("html") or "")
+
+
 def _cache_path(app: AppSettings, site_id: str) -> Path:
     return Path(app.data_dir) / "cache" / "brand_site" / f"{site_id}.json"
 
@@ -407,19 +438,45 @@ def _site_items(site: BrandSite, app: AppSettings) -> list[dict]:
     now = time.time()
     cached = _read_cache(app, site.id)
     if cached and now - cached["fetched_at"] <= CACHE_TTL:
+        # 缓存命中不走网络，也不受单站预算影响：这条路径应当接近 0ms。
         return _with_brand(cached["items"], site)
 
+    deadline = time.monotonic() + SITE_TIMEOUT
     items: list[dict] = []
     errors: list[str] = []
     fetched = 0
+    timed_out = False
     for page in site.pages:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            errors.append(f"{page}：单站 {SITE_TIMEOUT:.0f} 秒预算用完，跳过")
+            break
         try:
-            html = _fetch(page)
+            html = _fetch_limited(page, min(REQUEST_TIMEOUT, remaining))
+        except TimeoutError as exc:
+            timed_out = True
+            errors.append(f"{page}：{exc}")
+            # 到点就放弃整站剩下的页面，不再串行等下一页。
+            break
         except Exception as exc:  # noqa: BLE001 - 单页失败不拖垮同品牌其他页
             errors.append(f"{page}：{type(exc).__name__}: {str(exc)[:80]}")
             continue
         fetched += 1
         items.extend(parse_news_page(html, page, site))
+
+    # 超时：整个站点没有在预算内抓完，优先用 6 小时内的旧缓存并标明旧数据；
+    # 连旧缓存都没有就如实报「官网暂时没响应」，不拿半页结果冒充完整上新。
+    if timed_out:
+        if cached and time.time() - cached["fetched_at"] <= STALE_TTL:
+            logger.warning(
+                "官网超过 %.0f 秒未响应，使用 %.0f 分钟前的缓存：%s",
+                SITE_TIMEOUT,
+                (time.time() - cached["fetched_at"]) / 60,
+                site.id,
+            )
+            return _with_brand(cached["items"], site, stale=True)
+        raise BrandSiteUnavailable(f"官网暂时没响应（单站 {SITE_TIMEOUT:.0f} 秒超时）")
 
     if fetched:
         seen: set[str] = set()
@@ -434,8 +491,8 @@ def _site_items(site: BrandSite, app: AppSettings) -> list[dict]:
         _write_cache(app, site.id, ranked)
         return _with_brand(ranked, site)
 
-    if cached and now - cached["fetched_at"] <= STALE_TTL:
-        logger.warning("官网抓取失败，使用 %.0f 分钟前的缓存：%s", (now - cached["fetched_at"]) / 60, site.id)
+    if cached and time.time() - cached["fetched_at"] <= STALE_TTL:
+        logger.warning("官网抓取失败，使用 %.0f 分钟前的缓存：%s", (time.time() - cached["fetched_at"]) / 60, site.id)
         return _with_brand(cached["items"], site, stale=True)
 
     raise BrandSiteUnavailable("；".join(errors) or "官网没有返回内容")
@@ -481,4 +538,4 @@ def lookup(question: str, app: AppSettings) -> list[dict]:
 def readiness(_app: AppSettings | None = None) -> tuple[bool, str]:
     """状态展示用：模块已登记站点即就绪，不代表当前网络一定可达。"""
     names = "、".join(site.name for site in SITES)
-    return True, f"试点：{names}（缓存 30 分钟；失败降级微博/网页）"
+    return True, f"试点：{names}（缓存 30 分钟；单站 8 秒；超时用 6 小时内旧缓存，无缓存降级微博/网页）"

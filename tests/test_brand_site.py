@@ -146,6 +146,97 @@ def test_fetch_failure_without_cache_raises_unavailable(tmp_path, monkeypatch):
         brand_site.lookup("BABY 入荷", app)
 
 
+def test_fresh_cache_hit_skips_network_and_stays_fast(tmp_path, monkeypatch):
+    """缓存命中不进入抓取路径，也不受单站预算影响。"""
+    app = _app(tmp_path)
+    site = brand_site.SITES[0]
+    path = brand_site._cache_path(app, site.id)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        f'{{"fetched_at": {time.time()}, "items": [{{"title": "Melty Berry Princess入荷", '
+        f'"date": "2026-10", "url": "https://angelicpretty.com/Page/Feature/202610.aspx"}}]}}',
+        encoding="utf-8",
+    )
+
+    def should_not_fetch(*_args, **_kwargs):
+        raise AssertionError("新鲜缓存命中时不该抓官网")
+
+    monkeypatch.setattr(brand_site, "_fetch", should_not_fetch)
+    started = time.monotonic()
+    items = brand_site._site_items(site, app)
+    assert time.monotonic() - started < 0.2
+    assert items and "stale" not in items[0]
+
+
+def test_site_timeout_returns_stale_cache_without_waiting(tmp_path, monkeypatch):
+    """单站 8 秒预算到点立即返回旧缓存，不串行等完所有页面。"""
+    app = _app(tmp_path)
+    site = brand_site.SITES[0]
+    path = brand_site._cache_path(app, site.id)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"fetched_at": %s, "items": [{"title": "Melty Berry Princess入荷", '
+        '"date": "2026-10", "url": "https://angelicpretty.com/Page/Feature/202610.aspx"}]}'
+        % (time.time() - 60 * 60),
+        encoding="utf-8",
+    )
+
+    def slow_fetch(*_args, **_kwargs):
+        time.sleep(1.0)
+        return AP_HTML
+
+    monkeypatch.setattr(brand_site, "_fetch", slow_fetch)
+    monkeypatch.setattr(brand_site, "SITE_TIMEOUT", 0.05)
+    started = time.monotonic()
+    items = brand_site._site_items(site, app)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    assert items and items[0]["stale"] is True
+    assert items[0]["title"].startswith("Melty Berry")
+
+
+def test_site_timeout_without_cache_reports_no_response(tmp_path, monkeypatch):
+    """没有旧缓存时明确报「官网暂时没响应」，不产出条目。"""
+    app = _app(tmp_path)
+    site = brand_site.SITES[0]
+
+    def slow_fetch(*_args, **_kwargs):
+        time.sleep(1.0)
+        return AP_HTML
+
+    monkeypatch.setattr(brand_site, "_fetch", slow_fetch)
+    monkeypatch.setattr(brand_site, "SITE_TIMEOUT", 0.05)
+    started = time.monotonic()
+    with pytest.raises(brand_site.BrandSiteUnavailable) as exc:
+        brand_site._site_items(site, app)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    assert "官网暂时没响应" in str(exc.value)
+
+
+def test_stale_cache_older_than_window_is_not_used(tmp_path, monkeypatch):
+    """超过 6 小时的缓存不能冒充结果。"""
+    app = _app(tmp_path)
+    site = brand_site.SITES[0]
+    path = brand_site._cache_path(app, site.id)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"fetched_at": %s, "items": [{"title": "Old 入荷", "date": "2026-01", '
+        '"url": "https://angelicpretty.com/Page/Feature/202601.aspx"}]}'
+        % (time.time() - 7 * 60 * 60),
+        encoding="utf-8",
+    )
+
+    def broken_fetch(*_args, **_kwargs):
+        raise OSError("network down")
+
+    monkeypatch.setattr(brand_site, "_fetch", broken_fetch)
+    with pytest.raises(brand_site.BrandSiteUnavailable):
+        brand_site._site_items(site, app)
+
+
 def test_unknown_brand_raises_before_network(tmp_path, monkeypatch):
     app = _app(tmp_path)
 
@@ -179,6 +270,29 @@ def test_official_channel_maps_rows_to_official_evidence(tmp_path, monkeypatch):
     assert items[0]["source_kind"] == "official"
     assert items[0]["published_at"] == "2026-10"
     assert "2026-10" in items[0]["text"]
+
+
+def test_official_channel_marks_stale_rows_as_old_data(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+
+    def fake_lookup(question, settings):
+        return [
+            {
+                "brand": "Angelic Pretty",
+                "title": "Melty Berry Princessシリーズ入荷のご案内",
+                "date": "2026-10",
+                "url": "https://angelicpretty.com/Page/Feature/202610.aspx",
+                "stale": True,
+            }
+        ]
+
+    monkeypatch.setattr(brand_site, "lookup", fake_lookup)
+    items = channels._recall_official("AP 最近上新", RecallContext(settings=app))
+
+    assert len(items) == 1
+    assert items[0]["stale"] is True
+    assert "旧数据" in items[0]["text"]
+    assert items[0]["title"].endswith("（旧数据）")
 
 
 def test_official_channel_failure_degrades_to_unavailable(tmp_path, monkeypatch):

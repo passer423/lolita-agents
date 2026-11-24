@@ -701,20 +701,27 @@ def _recall_official(
         url = str(row.get("url") or "").strip()
         if not title or not url:
             continue
+        stale = bool(row.get("stale"))
         date = str(row.get("date") or "").strip()
         text = "｜".join(part for part in (date, title, f"{row.get('brand', '')} 官网") if part)
-        items.append(
-            {
-                "channel": "official",
-                "source_kind": CHANNEL_SOURCE_KIND["official"],
-                "ref": url,
-                "title": f"{row.get('brand', '')}｜{title}".strip("｜"),
-                "text": _clip(text, limit),
-                "url": url,
-                # 日期单独留一份，写作层需要「哪年哪月」时不必从正文里抠。
-                "published_at": date,
-            }
-        )
+        text = _clip(text, limit)
+        if stale:
+            # 来源上必须能看出来这不是本次实时抓取：用户据此决定要不要再去官网核对。
+            text += "（官网缓存，6 小时内的旧数据，非本次实时抓取）"
+        entry = {
+            "channel": "official",
+            "source_kind": CHANNEL_SOURCE_KIND["official"],
+            "ref": url,
+            "title": f"{row.get('brand', '')}｜{title}".strip("｜"),
+            "text": text,
+            "url": url,
+            # 日期单独留一份，写作层需要「哪年哪月」时不必从正文里抠。
+            "published_at": date,
+        }
+        if stale:
+            entry["stale"] = True
+            entry["title"] += "（旧数据）"
+        items.append(entry)
     return items
 
 
