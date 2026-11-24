@@ -175,6 +175,21 @@ def _thread_payload(thread: dict) -> dict:
     }
 
 
+def _suggested_questions() -> list[str]:
+    """首页推荐问题：编在 ``content/suggested_questions.json``，前后端共用这份。
+
+    每次请求现读，换文案不用重启；文件缺失或格式不对时只是不展示推荐问题，
+    不影响聊天本身。
+    """
+    try:
+        data = json.loads(settings.suggested_questions_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [item.strip() for item in data if isinstance(item, str) and item.strip()]
+
+
 @router.get("/status")
 def chat_status() -> dict:
     """前端靠它决定"能不能聊"、哪些召回通道开着。
@@ -186,6 +201,8 @@ def chat_status() -> dict:
         # model 是真实调用标识，留着给探针/排障用；前端只展示 display_name。
         "model": settings.llm_model if settings.llm_enabled else "",
         "display_name": settings.app_display_name.strip() or "lolitaagent",
+        # 首页推荐问题走同一份内容配置，前端不写死文案。
+        "suggested_questions": _suggested_questions(),
         "hint": "" if settings.llm_enabled else (
             "需要在 .env 里配置 LLM_API_KEY"
             "（DeepSeek：LLM_BASE_URL=https://api.deepseek.com/v1、LLM_MODEL=deepseek-chat）"

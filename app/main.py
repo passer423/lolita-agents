@@ -20,7 +20,7 @@ from app import __version__, accounts, bridge, db
 from app import auth as access_control
 from app.agent import channels
 from app.config import settings
-from app.routers import chat, follows, jobs, kb
+from app.routers import chat, follows, jobs, kb, memories
 from app.services import job_runner
 
 logging.basicConfig(
@@ -151,6 +151,7 @@ app.include_router(chat.threads_router)
 app.include_router(follows.router)
 app.include_router(kb.router)
 app.include_router(jobs.router)
+app.include_router(memories.router)
 app.include_router(access_control.router)
 
 

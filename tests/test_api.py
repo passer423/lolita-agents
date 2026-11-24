@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -594,3 +595,78 @@ def test_warm_models_never_raises(monkeypatch):
     monkeypatch.setattr("app.rerank.shared_onnx_reranker", lambda _app: None)
 
     main_module._warm_models()  # 不抛就是通过
+
+
+def test_suggested_questions_read_from_content(tmp_path, monkeypatch):
+    """首页推荐问题走 content 配置：只保留非空字符串，前端不再写死文案。"""
+    content = tmp_path / "content"
+    content.mkdir()
+    (content / "suggested_questions.json").write_text(
+        json.dumps(["问题一？", "  ", 42, "问题二？"], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(chat_router.settings, "content_dir", content)
+
+    assert chat_router._suggested_questions() == ["问题一？", "问题二？"]
+
+
+def test_suggested_questions_missing_file_is_empty(tmp_path, monkeypatch):
+    """配置缺失不该影响聊天，只是不展示推荐问题。"""
+    monkeypatch.setattr(chat_router.settings, "content_dir", tmp_path / "none")
+    assert chat_router._suggested_questions() == []
+
+
+def test_status_carries_suggested_questions(client):
+    assert isinstance(client.get("/api/chat/status").json()["suggested_questions"], list)
+
+
+# --------------------------------------------------------------------- 长期记忆
+
+
+def _seed_memory(client, kind: str, value: str, source: str = "") -> dict:
+    from app import db
+    from app.config import settings
+
+    return db.upsert_memory(settings.db_path, client.account["id"], kind, value, source)
+
+
+def test_memories_list_and_delete_are_account_scoped(client):
+    """只返回本人记忆；删别人的 id 一律 404，不暴露「存在但不是你的」。"""
+    from app import db
+    from app.config import settings
+
+    first = _seed_memory(client, "size", "M", "我穿M码")
+    second = _seed_memory(client, "preference", "我喜欢粉色")
+
+    body = client.get("/api/memories").json()
+    assert {(row["kind"], row["value"]) for row in body["memories"]} == {
+        ("size", "M"), ("preference", "我喜欢粉色"),
+    }
+    assert body["labels"]["size"] == "尺码"
+
+    other = db.create_account(settings.db_path, "other", "scrypt$1$1$1$x$y")
+    foreign = db.upsert_memory(settings.db_path, other["id"], "brand", "Angelic Pretty")
+
+    assert client.delete(f"/api/memories/{foreign['id']}").status_code == 404
+    ids = {row["id"] for row in client.get("/api/memories").json()["memories"]}
+    assert foreign["id"] not in ids
+
+    removed = client.delete(f"/api/memories/{first['id']}")
+    assert removed.status_code == 200
+    assert [row["id"] for row in removed.json()["memories"]] == [second["id"]]
+    assert client.delete(f"/api/memories/{first['id']}").status_code == 404
+
+
+def test_memories_clear_all_only_clears_own(client):
+    from app import db
+    from app.config import settings
+
+    _seed_memory(client, "size", "M")
+    _seed_memory(client, "brand", "Angelic Pretty")
+    other = db.create_account(settings.db_path, "other", "scrypt$1$1$1$x$y")
+    db.upsert_memory(settings.db_path, other["id"], "size", "L")
+
+    body = client.delete("/api/memories").json()
+    assert body["cleared"] == 2
+    assert body["memories"] == []
+    assert [row["value"] for row in db.list_memories(settings.db_path, other["id"])] == ["L"]

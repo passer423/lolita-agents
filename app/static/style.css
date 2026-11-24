@@ -596,7 +596,8 @@ ul.plain li { margin-bottom: 2px; }
 .chat-input { display: flex; gap: 8px; align-items: flex-end; }
 .chat-input textarea { flex: 1; min-width: 0; min-height: 44px; max-height: 120px; }
 .chat-input .primary { width: auto; flex: 0 0 auto; padding: 12px 18px; }
-.chat-chips { padding-bottom: 0; }
+/* 首页推荐问题：窄屏换行，不横向滚动、不溢出容器。 */
+.chat-chips { padding-bottom: 0; flex-wrap: wrap; overflow: visible; }
 
 /* 裙子档案：结构化字段卡片（发售价与社媒线索必须能一眼区分） */
 .dress-card {

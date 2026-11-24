@@ -298,6 +298,15 @@ class AppSettings(BaseSettings):
         return self.content_dir / "brands.json"
 
     @property
+    def suggested_questions_path(self) -> Path:
+        """首页推荐问题（`content/suggested_questions.json`，进 git）。
+
+        前端不写死文案：`/api/chat/status` 每次现读这份文件下发，
+        换问题只改 JSON，不用动代码也不用重启。
+        """
+        return self.content_dir / "suggested_questions.json"
+
+    @property
     def dress_aliases_path(self) -> Path:
         """系列级中文译名表（`content/dress/aliases.json`，进 git）。"""
         return self.content_dir / "dress" / "aliases.json"

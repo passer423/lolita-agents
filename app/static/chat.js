@@ -441,6 +441,7 @@
       answer.ms = Math.round(performance.now() - started);
       paintMessages(ui.list);
       refreshThreads();          // 更新标题/条数/排序，不打断当前气泡
+      loadMemories();            // 本轮可能新增了尺码/偏好，把新记忆带进面板
     } catch (error) {
       if (error && error.name === 'AbortError') {
         answer.stopped = true;
@@ -499,6 +500,8 @@
   const FOLLOW_CHECK_KEY = 'follow_checked_on';   // 存本地日期（YYYY-MM-DD）
   let followState = null;
   let followBusy = false;
+  // 长期记忆：对话后由服务端按规则写入，这里只做查看与删除。
+  let memoryState = null;
 
   function todayKey() {
     const now = new Date();
@@ -585,6 +588,65 @@
     if (followState.unread) {
       const panel = document.getElementById('follow-panel');
       if (panel) panel.open = true;
+    }
+  }
+
+  // ---------------------------------------------------------------- 长期记忆
+  function renderMemories() {
+    const listNode = document.getElementById('memory-list');
+    const countNode = document.getElementById('memory-count');
+    if (!listNode || !memoryState) return;
+
+    const memories = memoryState.memories || [];
+    const labels = memoryState.labels || {};
+
+    if (countNode) {
+      countNode.textContent = memories.length ? memories.length + ' 条' : '';
+      countNode.className = 'badge' + (memories.length ? ' on' : '');
+      countNode.style.display = memories.length ? '' : 'none';
+    }
+    // 没有记忆时不提供「全部清除」这个空操作。
+    const clearNode = document.getElementById('memory-clear');
+    if (clearNode) clearNode.style.display = memories.length ? '' : 'none';
+    const statusNode = document.getElementById('memory-status');
+    if (statusNode) statusNode.textContent = '';
+
+    listNode.innerHTML = memories.length
+      ? memories.map((memory) =>
+          '<div class="follow-row">' +
+            '<div class="grow"><div class="name">' + esc(memory.value) + '</div>' +
+              '<div class="meta">' + esc(labels[memory.kind] || memory.kind) +
+                ' · 最近确认 ' + esc(formatTime(memory.updated_at)) +
+                (memory.hits > 1 ? ' · 提到 ' + memory.hits + ' 次' : '') + '</div></div>' +
+            '<button class="follow-del" data-del-memory="' + memory.id + '" ' +
+              'title="删除这条记忆">×</button>' +
+          '</div>').join('')
+      : '<div class="follow-empty">还没有长期记忆。你在对话里明确说过尺码、偏好或常买品牌后，会自动出现在这里。</div>';
+
+    listNode.querySelectorAll('[data-del-memory]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        if (!window.confirm('删除这条长期记忆？之后的回答不会再参考它。')) return;
+        try {
+          memoryState = await getJSON(
+            '/api/memories/' + button.dataset.delMemory, { method: 'DELETE' });
+          renderMemories();
+        } catch (error) {
+          if (!authExpired(error)) toast('删除失败：' + error.message);
+        }
+      });
+    });
+  }
+
+  async function loadMemories() {
+    try {
+      memoryState = await getJSON('/api/memories');
+      renderMemories();
+    } catch (error) {
+      if (authExpired(error)) return;
+      const node = document.getElementById('memory-list');
+      if (node) {
+        node.innerHTML = '<div class="follow-empty">长期记忆载入失败：' + esc(error.message) + '</div>';
+      }
     }
   }
 
@@ -988,6 +1050,9 @@
     const username = (state.account && state.account.username) || '';
     // 顶栏只展示产品名，不暴露真实模型标识；展示名由服务端配置下发。
     const displayName = (status && status.display_name) || 'lolitaagent';
+    // 推荐问题由服务端从 content/suggested_questions.json 下发，前端不写死文案。
+    const suggestions = (status && Array.isArray(status.suggested_questions))
+      ? status.suggested_questions : [];
     // 问答是主区域，放最上面；关注项是辅助功能，折叠在下面，
     // 不占首屏、也不需要用户先滑过设置才能提问。
     root.innerHTML =
@@ -1014,10 +1079,12 @@
                 'placeholder="例：蕾丝和真丝能机洗吗？"></textarea>' +
               '<button class="primary" id="chat-send">发送</button>' +
             '</div>' +
-            '<div class="chips chat-chips">' +
-              ['蕾丝和真丝能机洗吗？', 'AP 最近有什么新款？', 'Baby 缎带与齿轮 预约价多少？'].map((text) =>
-                '<button class="chip" data-q="' + esc(text) + '">' + esc(text) + '</button>').join('') +
-            '</div>' +
+            (suggestions.length
+              ? '<div class="chips chat-chips">' +
+                suggestions.map((text) =>
+                  '<button class="chip" data-q="' + esc(text) + '">' + esc(text) + '</button>').join('') +
+                '</div>'
+              : '') +
           '</div>' +
           '<details class="card fold" id="follow-panel" style="display:none">' +
             '<summary>关注项 <span class="badge" id="follow-unread" style="display:none"></span>' +
@@ -1029,6 +1096,18 @@
                 '<button class="ghost sm" id="follow-check">检查更新</button>' +
                 '<button class="ghost sm" id="follow-read">全部已读</button>' +
                 '<span class="hint" id="follow-status"></span>' +
+              '</div>' +
+            '</div>' +
+          '</details>' +
+          '<details class="card fold" id="memory-panel">' +
+            '<summary>长期记忆 <span class="badge" id="memory-count" style="display:none"></span>' +
+              '<span class="fold-hint">来自你明确说过的尺码 / 偏好 / 常买品牌</span></summary>' +
+            '<div class="fold-body">' +
+              '<div class="follow-list" id="memory-list">' +
+                '<div class="follow-empty">载入中…</div></div>' +
+              '<div class="follow-actions">' +
+                '<button class="ghost sm" id="memory-clear">全部清除</button>' +
+                '<span class="hint" id="memory-status"></span>' +
               '</div>' +
             '</div>' +
           '</details>' +
@@ -1087,6 +1166,8 @@
     }
     // 关注项（形态甲）：打开页面时载入；有历史关注项才显示面板，不提供手动新增
     loadFollows();
+    // 长期记忆：入口常驻（空态说明自动收集规则），内容按账号隔离。
+    loadMemories();
 
     // iOS Safari：键盘弹起时 visualViewport 变矮、布局视口不变，dvh 不一定跟着缩。
     // 输入框有焦点时把它最小幅度滚进可视区，避免被键盘挡住（Android 上是无害的空操作）。
@@ -1096,6 +1177,18 @@
         ui.input.scrollIntoView({ block: 'nearest' });
       });
     }
+
+    document.getElementById('memory-clear').addEventListener('click', async () => {
+      if (!window.confirm('清除全部长期记忆？此操作不可撤销。')) return;
+      try {
+        memoryState = await getJSON('/api/memories', { method: 'DELETE' });
+        renderMemories();
+        const node = document.getElementById('memory-status');
+        if (node) node.textContent = '已清除全部长期记忆';
+      } catch (error) {
+        if (!authExpired(error)) toast('清除失败：' + error.message);
+      }
+    });
 
     document.getElementById('follow-check').addEventListener('click', () => checkFollows(false));
     document.getElementById('follow-read').addEventListener('click', async () => {
