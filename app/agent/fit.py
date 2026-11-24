@@ -73,6 +73,28 @@ _PART_EXCLUDES = {
     "length": ("sleeve", "bodice", "handle", "owner", "shoulder", "cuff"),
 }
 
+#: 小物类目：档案里的 Length / Width 是物件本身的大小，不是着丈，
+#: 不能拿身高去推「裙长到哪」。
+_SMALL_ITEM_CATEGORIES = (
+    "hair accessory", "accessory", "jewelry", "bag", "socks", "tights",
+    "shoes", "umbrella", "parasol", "gloves",
+)
+
+#: 档案尺寸标签 → 中文，供「档案里写了哪些尺寸」这句使用；没收录的保留原标签。
+_MEASURE_LABELS = {
+    "length": "长度",
+    "width": "宽度",
+    "height": "高度",
+    "diameter": "直径",
+    "bust": "胸围",
+    "waist": "腰围",
+    "hips": "臀围",
+    "shoulder": "肩宽",
+    "sleeve length": "袖长",
+    "sole length": "鞋内长",
+    "heel height": "跟高",
+}
+
 #: 明确在问「穿不穿得下」的说法。身高/体重只是数据，单独出现不算问句，
 #: 否则「我身高160，最近有什么上新」也会被当成合身问题。
 FIT_ASK_MARKERS = (
@@ -167,6 +189,42 @@ def _measurement(profile: dict, part: str) -> tuple[str, tuple[float, float] | N
     return best[1], best[2]
 
 
+def _category(profile: dict) -> str:
+    return str(profile.get("style") or profile.get("category") or "").strip()
+
+
+def _is_small_item(profile: dict) -> bool:
+    """发饰/包/袜/鞋这类小物：有尺寸就照实说，但不按身高推裙长。"""
+    category = _category(profile).lower()
+    return bool(category) and any(marker in category for marker in _SMALL_ITEM_CATEGORIES)
+
+
+def _has_body_part(profile: dict) -> bool:
+    """档案里是否有能和身体比的部位（胸围/腰围/臀围）。"""
+    return any(_measurement(profile, part)[1] is not None for part in PART_LABELS)
+
+
+def _dimensions_text(profile: dict) -> str:
+    rows: list[str] = []
+    for item in profile.get("measurements") or []:
+        label = str(item.get("label") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if not label or not value:
+            continue
+        name = _MEASURE_LABELS.get(label.lower(), label)
+        rows.append(f"{name} {value}")
+    return "、".join(rows)
+
+
+def _item_size_only_text(profile: dict) -> str:
+    """小物档案只有物件尺寸、没有身体部位可比时的说明；不猜。"""
+    category = _category(profile) or "小物"
+    return (
+        f"【按你的身材】这份档案是小物（{category}），只写了{_dimensions_text(profile)}，"
+        "没有胸围/腰围/臀围这类身体部位可比，判断不了穿不穿得下，我不猜。"
+    )
+
+
 def _compare(part: str, user: float, profile: dict) -> tuple[str, str | None]:
     """把一个部位和档案比一次；返回 ``(结论行, 宽松/合身/略小)``。"""
     part_label = PART_LABELS[part]
@@ -229,7 +287,10 @@ def _fit_section(profile: dict, facts: list[dict]) -> tuple[str, str]:
         if verdict:
             verdicts.append(verdict)
     overall = _overall(verdicts)
-    return "【按你的身材】" + "".join(lines) + f"{overall}。", overall
+    text = "【按你的身材】" + "".join(lines)
+    if overall:
+        text += f"{overall}。"
+    return text, overall
 
 
 def _length_section(profile: dict, facts: list[dict]) -> str:
@@ -391,13 +452,21 @@ def judge(
     real = any(_user_cm(facts, part) is not None for part in PART_LABELS)
     height = _user_cm(facts, "height")
     weight = _user_cm(facts, "weight")
+    measurements = profile.get("measurements") or []
+    small = _is_small_item(profile)
+    has_body = _has_body_part(profile)
 
-    if not profile.get("measurements"):
+    if not measurements:
         if real or height is not None or fit_question:
             parts.append(
                 "【按你的身材】这份档案没有写平铺尺寸，判断不了穿不穿得下，我不猜。"
             )
             status, summary = "no_archive_data", "档案没写尺寸，不判断"
+    elif small and not has_body:
+        # 发饰/包/袜/鞋：档案里有尺寸就照实报，但没有身体部位可比时不猜结论。
+        if real or height is not None or fit_question:
+            parts.append(_item_size_only_text(profile))
+            status, summary = "no_archive_data", "档案只有物件尺寸，不判断"
     elif real:
         text, overall = _fit_section(profile, facts)
         if text:
@@ -423,7 +492,8 @@ def judge(
         parts.append(GUIDE_TEXT)
         status, summary = "need_data", "缺三围，已询问"
 
-    if height is not None and (wants_length or wants_fit):
+    # 小物的 Length 是物件本身大小，不能当裙长按身高推落点。
+    if height is not None and (wants_length or wants_fit) and not small:
         length = _length_section(profile, facts)
         if length:
             parts.append(length)

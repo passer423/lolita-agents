@@ -347,7 +347,11 @@ def lookup(
     fetcher=None,
     max_items: int = 2,
 ) -> tuple[list[ArchiveDetail], str]:
-    """按系列名查在线档案：只返回裙子类目，最多抓 ``max_items`` 条详情。"""
+    """按系列名查在线档案：优先裙子类目，没有裙子时也接受小物。
+
+    发饰/包/袜/鞋这类条目同样有尺码信息，不能因为类目被整条丢掉；
+    排序时裙子只作为同分词数下的优先项，不硬性排除小物。
+    """
     cards, error = search(query, fetcher=fetcher)
     if error:
         return [], error
@@ -355,17 +359,17 @@ def lookup(
     wanted_brand = (brand or "").strip().lower()
     candidates = [
         card for card in cards
-        if _is_dress(card)
-        and (not wanted_brand or wanted_brand in (card.brand or "").lower())
+        if not wanted_brand or wanted_brand in (card.brand or "").lower()
     ]
     if not candidates:
-        return [], "Lolibrary 没有搜到裙子条目"
+        return [], "Lolibrary 没有搜到条目"
 
     query_tokens = _tokens(query)
     order = {card.url: index for index, card in enumerate(candidates)}
     candidates.sort(
         key=lambda card: (
             -len(query_tokens & _tokens(card.title)),
+            0 if _is_dress(card) else 1,
             order[card.url],
         )
     )

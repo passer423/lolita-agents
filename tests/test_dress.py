@@ -979,6 +979,54 @@ def test_online_lookup_degrades_on_network_error():
     assert "Lolibrary 搜索失败" in error
 
 
+def _card(title: str, slug: str, category: str) -> str:
+    return f"""
+<div class="card">
+  <p title="{title}"><a href="https://lolibrary.org/items/{slug}">{title}</a></p>
+  <a href="https://lolibrary.org/brands/test-brand">Test Brand</a>
+  <a href="https://lolibrary.org/categories/{category.lower().replace(' ', '-')}"
+     class="category">{category}</a>
+</div>
+"""
+
+
+def test_online_lookup_keeps_small_items_instead_of_dropping_by_category():
+    """发饰同样有尺码信息：不能被「只认裙子类目」整条丢掉。"""
+    html = _card("Test Series Headdress", "test-headdress", "Hair Accessory")
+
+    def fetcher(url):
+        if "/search?" in url:
+            return html
+        if url.endswith("/test-headdress"):
+            return ITEM_HTML
+        raise AssertionError(f"unexpected url: {url}")
+
+    items, error = lolibrary_online.lookup("Test Series Headdress", fetcher=fetcher)
+
+    assert error == ""
+    assert [item.category for item in items] == ["Hair Accessory"]
+
+
+def test_online_lookup_still_prefers_dress_on_equal_title_overlap():
+    """放宽类目后，裙子仍优先：同一系列同时有发饰和 JSK 时先取 JSK。"""
+    html = (
+        _card("Test Series Headdress", "test-headdress", "Hair Accessory")
+        + _card("Test Series JSK", "test-jsk", "JSK")
+    )
+
+    def fetcher(url):
+        if "/search?" in url:
+            return html
+        if url.endswith("/test-jsk"):
+            return ITEM_HTML
+        raise AssertionError(f"unexpected url: {url}")
+
+    items, error = lolibrary_online.lookup("Test Series", fetcher=fetcher, max_items=1)
+
+    assert error == ""
+    assert [item.category for item in items] == ["JSK"]
+
+
 @pytest.mark.parametrize("raw, expected", [
     ("Originally listed for CN¥598", "CN¥598"),
     ("Originally listed for CNY598", "CNY598"),

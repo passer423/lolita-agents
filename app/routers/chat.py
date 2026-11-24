@@ -38,7 +38,12 @@ from app import accounts, db
 from app.agent import channels, graph, trace
 from app.agent.channels import RecallContext
 from app.agent.planner import DeepSeekPlanner, PlannerUnavailable
-from app.agent.writer import MAX_HISTORY_TURNS, DeepSeekWriter, sanitize_history
+from app.agent.writer import (
+    HISTORY_FETCH_MESSAGES,
+    MAX_HISTORY_TURNS,
+    DeepSeekWriter,
+    sanitize_history,
+)
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -138,9 +143,9 @@ def _history_of(payload: ChatIn, account: dict, thread: dict) -> list[dict]:
         raw = [turn.model_dump() for turn in payload.history]
     else:
         raw = db.thread_messages(
-            settings.db_path, account["id"], thread["id"], limit=MAX_HISTORY_TURNS
+            settings.db_path, account["id"], thread["id"], limit=HISTORY_FETCH_MESSAGES
         )
-    return sanitize_history(raw)
+    return sanitize_history(raw, limit=HISTORY_FETCH_MESSAGES)
 
 
 def _remember(account: dict, thread: dict, question: str, answer: str) -> None:

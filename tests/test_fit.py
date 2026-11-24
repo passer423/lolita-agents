@@ -254,6 +254,64 @@ def test_judge_uses_height_for_skirt_length():
     assert step["status"] == "length_only"
 
 
+# --------------------------------------------------------------------- 小物
+
+
+def test_small_item_with_waist_is_judged_like_a_dress():
+    """小物档案里有腰围就跟裙子一样按实测比，不能因为类目被跳过。"""
+    profile = {
+        "style": "Accessory",
+        "measurements": [
+            {"label": "Length", "value": "23 cm"},
+            {"label": "Waist", "value": "62-102 cm"},
+        ],
+    }
+
+    text, step = fit.judge(profile, [{"kind": "waist", "value": "70cm"}], "这个穿得下吗")
+
+    assert "腰围：档案 62~102cm，你 70cm 在范围内，合身" in text
+    assert step is not None
+    assert step["status"] == "measured"
+    # 小物的 Length 是物件大小，不能拿身高推裙长落点。
+    assert "【裙长】" not in text
+
+
+def test_small_item_without_body_parts_reports_item_dimensions():
+    """发饰只有长度/宽度：说清档案写了什么、比不了身体哪个部位，不猜。"""
+    profile = {
+        "style": "Hair Accessory",
+        "measurements": [
+            {"label": "Length", "value": "31 cm"},
+            {"label": "Width", "value": "11 cm"},
+        ],
+    }
+
+    text, step = fit.judge(
+        profile,
+        [{"kind": "bust", "value": "85cm"}, {"kind": "height", "value": "160cm"}],
+        "这个我戴得下吗",
+    )
+
+    assert "这份档案是小物（Hair Accessory）" in text
+    assert "只写了长度 31 cm、宽度 11 cm" in text
+    assert "没有胸围/腰围/臀围" in text
+    assert "我不猜" in text
+    assert "【裙长】" not in text
+    assert step is not None
+    assert step["status"] == "no_archive_data"
+
+
+def test_small_item_without_measurements_says_it_cannot_judge():
+    profile = {"style": "Hair Accessory", "measurements": []}
+
+    text, step = fit.judge(profile, FACTS, "这个我戴得下吗")
+
+    assert "没有写平铺尺寸" in text
+    assert "判断不了" in text
+    assert step is not None
+    assert step["status"] == "no_archive_data"
+
+
 # --------------------------------------------------------------------- 接线
 
 
