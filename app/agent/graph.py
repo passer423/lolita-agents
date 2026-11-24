@@ -1255,6 +1255,65 @@ def _fit_note(
     return fit.judge(profile, facts, question, planner)
 
 
+#: 「记住身材数据」只认这几个 kind：颜色/品牌等偏好由正常回答覆盖，不单独确认。
+_MEMORY_BODY_KINDS = ("bust", "waist", "hips", "height", "weight")
+
+
+def _memory_reply(
+    question: str, facts: list[dict], ctx: RecallContext
+) -> tuple[str, dict | None]:
+    """身材数据消息：确认已记住，并说清下一步。
+
+    两种消息会走这里：
+
+    * 整句只有数据（``long_memory.is_body_data``）：不是裙子问题，直接确认；
+    * 数据 + 问合身，但这句里没有能识别的裙名（``fit.is_fit_question`` 且
+      ``resolve_dress`` 返回 None）：合身工具这轮没有档案可比，先确认数据、
+      再要裙名，避免写作阶段借上一轮话题编出「你问的这条裙子」。
+
+    数据夹着别的正经问题（「身高160，AP 最近有什么上新」）不拦，照常召回。
+    """
+    if not facts:
+        return "", None
+    body = [fact for fact in facts if fact.get("kind") in _MEMORY_BODY_KINDS]
+    if not body:
+        return "", None
+    body_only = long_memory.is_body_data(question)
+    if not body_only and not (
+        fit.asks_fit(question) and dress.resolve_dress(question, ctx) is None
+    ):
+        return "", None
+    shown = "、".join(
+        f"{long_memory.KIND_LABELS.get(fact['kind'], fact['kind'])} {fact['value']}"
+        for fact in body
+    )
+    kinds = {fact["kind"] for fact in body}
+    if body_only:
+        if kinds & {"bust", "waist", "hips"}:
+            tail = "以后问某条裙子穿不穿得下，报上裙名我就按这个三围判断；身高也会用来估裙长。"
+        elif kinds == {"height", "weight"}:
+            tail = (
+                "以后问某条裙子穿不穿得下，报上裙名就行；只凭身高体重只能估算，"
+                "结论会标「仅供参考」。补上三围（胸围/腰围/臀围）我能按实测判断，更准。"
+            )
+        else:
+            tail = "要判断穿不穿得下，还得再给三围或身高体重；只报一项我只能先记着。"
+    else:
+        if kinds & {"bust", "waist", "hips"}:
+            how = "按这个三围判断"
+        elif kinds == {"height", "weight"}:
+            how = "按身高体重估算，结论会标「仅供参考」"
+        else:
+            how = "再看看这些数据够不够判断"
+        tail = f"要看哪条裙子？报上裙名或货号，我就能{how}。"
+    return f"【记住你的身材数据】{shown}。{tail}", {
+        "kind": "memory",
+        "label": "记住身材数据",
+        "status": "stored",
+        "summary": shown,
+    }
+
+
 def _finish(
     question: str,
     state: AgentState,
@@ -1355,13 +1414,30 @@ def run(
     started = time.perf_counter()
     budget = _deadline_of(ctx)
     deadline_at = time.monotonic() + budget if budget > 0 else None
+    # 用户在这轮里明确说过的稳定事实先落库，再读历史：这样本轮写作阶段也能
+    # 看到刚说的身高体重，不用等下一轮。
+    facts = long_memory.remember(
+        ctx.settings.db_path, ctx.account_id, question, ctx.settings
+    )
+    # 历史在进图之前就压成要点：planner / dress / writer 共用同一份，避免各取一段原文。
+    turns = _history_for_context(history, ctx)
+    # 纯身材数据（「我身高160cm，体重150斤」）不是裙子问题：直接确认已记住，
+    # 不进召回。否则会被当成裸裙名去搜网页，答成「你问的这条裙子…」。
+    memory_text, memory_step = _memory_reply(question, facts, ctx)
+    if memory_step:
+        return _finish(
+            question,
+            {"answer": memory_text, "steps": [memory_step], "evidence": []},
+            ctx=ctx,
+            planner=planner,
+            writer=writer,
+            history=turns,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            route=None,
+        )
     # 路由在召回之前定：规则判不出来时可能有一次极小判断，它也吃整体预算。
     route = routing.decide(question, ctx.settings)
     progress = _Progress()
-    # 历史在进图之前就压成要点：planner / dress / writer 共用同一份，避免各取一段原文。
-    turns = _history_for_context(history, ctx)
-    # 用户在这轮里明确说过的稳定事实单独落库（读与写都走 graph 的 ctx，不占短期窗口）。
-    long_memory.remember(ctx.settings.db_path, ctx.account_id, question, ctx.settings)
     graph = build_graph(planner, writer, ctx, stream=False, progress=progress, route=route)
     state, timed_out = _invoke_with_deadline(
         graph,
@@ -1419,12 +1495,35 @@ def stream(
     started = time.perf_counter()
     budget = _deadline_of(ctx)
     deadline_at = time.monotonic() + budget if budget > 0 else None
+    # 与 run() 同一顺序：先落库，再读历史，让本轮也能看到刚说的数据。
+    facts = long_memory.remember(
+        ctx.settings.db_path, ctx.account_id, question, ctx.settings
+    )
+    # 与非流式共用同一份压缩要点；写作阶段也用它，不再回头读 raw history。
+    turns = _history_for_context(history, ctx)
+    # 纯身材数据：不发召回、不写作，直接确认已记住（见 _memory_reply）。
+    memory_text, memory_step = _memory_reply(question, facts, ctx)
+    if memory_step:
+        yield {"type": "step", **memory_step}
+        yield {"type": "delta", "text": memory_text}
+        payload = _finish(
+            question,
+            {"answer": memory_text, "steps": [memory_step], "evidence": []},
+            ctx=ctx,
+            planner=planner,
+            writer=writer,
+            history=turns,
+            duration_ms=int((time.perf_counter() - started) * 1000),
+            route=None,
+        )
+        # 与正常流式的 final 保持同一形状，前端不必为本轮加分支。
+        payload["citation_problems"] = []
+        payload["invalid_citations"] = []
+        yield {"type": "final", **payload}
+        return
     # 与 run() 同一套路由；轻量判断也吃整体预算。
     route = routing.decide(question, ctx.settings)
     progress = _Progress(events=True)
-    # 与非流式共用同一份压缩要点；写作阶段也用它，不再回头读 raw history。
-    turns = _history_for_context(history, ctx)
-    long_memory.remember(ctx.settings.db_path, ctx.account_id, question, ctx.settings)
     graph = build_graph(planner, writer, ctx, stream=True, progress=progress, route=route)
 
     result: dict = {}

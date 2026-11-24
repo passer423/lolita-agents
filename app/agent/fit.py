@@ -73,8 +73,9 @@ _PART_EXCLUDES = {
     "length": ("sleeve", "bodice", "handle", "owner", "shoulder", "cuff"),
 }
 
-#: 提到这些词时才做合身/裙长判断，避免每条裙子回答都塞一段估算。
-FIT_MARKERS = (
+#: 明确在问「穿不穿得下」的说法。身高/体重只是数据，单独出现不算问句，
+#: 否则「我身高160，最近有什么上新」也会被当成合身问题。
+FIT_ASK_MARKERS = (
     "穿得下",
     "穿不下",
     "合身",
@@ -85,9 +86,10 @@ FIT_MARKERS = (
     "选码",
     "码数",
     "尺码",
-    "身高",
-    "体重",
 )
+
+#: 提到这些词时才做合身/裙长判断，避免每条裙子回答都塞一段估算。
+FIT_MARKERS = (*FIT_ASK_MARKERS, "身高", "体重")
 LENGTH_MARKERS = ("裙长", "多长", "长度", "到哪", "及膝", "过膝", "及踝", "长不长", "短不短")
 
 GUIDE_TEXT = (
@@ -332,6 +334,12 @@ def _color_section(profile: dict, facts: list[dict]) -> str:
 def _wants_fit(question: str) -> bool:
     text = question or ""
     return any(marker in text for marker in FIT_MARKERS)
+
+
+def asks_fit(question: str) -> bool:
+    """是否明确在问「穿不穿得下」；只是报了身高体重不算。"""
+    text = question or ""
+    return any(marker in text for marker in FIT_ASK_MARKERS)
 
 
 def _wants_length(question: str) -> bool:

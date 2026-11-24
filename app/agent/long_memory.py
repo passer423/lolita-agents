@@ -209,6 +209,27 @@ def _measurement_only(sentence: str) -> bool:
     return not rest.strip()
 
 
+_BODY_ONLY_PUNCT = re.compile(r"[\s,，。.、；;：:！!？?~～/]+")
+
+
+def is_body_data(text: str) -> bool:
+    """整条消息只有身体数据，没有别的内容。
+
+    「我身高160cm，体重150斤」「身高160，腰围90」为 True；只要还夹着裙名、
+    问法或其他实词（「这件穿得下吗」）就是 False。调用方用它把「报数据」和
+    「报裙名」分开：数据不是裙子问题，不该被当成裸裙名去搜。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    rest = raw
+    for token in (*_MEASURE_TOKENS, "斤", "本人", "自己"):
+        rest = rest.replace(token, "")
+    rest = _BODY_ONLY_PUNCT.sub("", rest)
+    rest = re.sub(r"[\d.]", "", rest)
+    return not rest.strip()
+
+
 def _body_facts(clause: str) -> list[tuple[str, str]]:
     """从一句话里取三围：优先「三围 85/70/90」，其次逐部位「胸围 85cm」。
 

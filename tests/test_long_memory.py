@@ -116,6 +116,16 @@ def test_body_facts_survive_a_trailing_fit_question(memory_settings):
     }
 
 
+def test_is_body_data_only_matches_pure_measurements():
+    assert long_memory.is_body_data("我身高160cm，体重150斤")
+    assert long_memory.is_body_data("身高160，腰围90")
+    assert long_memory.is_body_data("本人胸围85cm")
+    # 夹了裙名、问法或别的实词就不是纯数据：不能用来拦裙子识别。
+    assert not long_memory.is_body_data("我身高160cm，体重150斤，这条穿得下吗")
+    assert not long_memory.is_body_data("Krakatuk Military OP 我身高160")
+    assert not long_memory.is_body_data("")
+
+
 def test_negative_or_question_colors_are_not_stored(memory_settings):
     assert long_memory.extract("我不喜欢粉色", memory_settings) == []
     assert long_memory.extract("粉色适合我吗", memory_settings) == []
@@ -272,3 +282,80 @@ def test_run_records_explicit_facts_for_account(data_dir, memory_settings, monke
     assert ("color", "黑色") in {
         (fact["kind"], fact["value"]) for fact in facts
     }
+
+
+def test_body_data_only_gets_a_confirmation_instead_of_recall(memory_settings):
+    """纯身材数据不是裙子问题：直接确认已记住，不进召回。"""
+    from app.agent.channels import RecallContext
+
+    db.init_db(memory_settings.db_path)
+    account = _account(memory_settings.db_path, "body-only-run")
+    ctx = RecallContext(settings=memory_settings, account_id=account["id"])
+
+    result = graph.run("我身高160cm，体重150斤", ctx=ctx, planner=object())
+
+    assert result["answer"].startswith("【记住你的身材数据】")
+    assert "身高 160cm" in result["answer"]
+    assert "体重 75kg" in result["answer"]
+    assert "仅供参考" in result["answer"]
+    memory_steps = [step for step in result["steps"] if step["kind"] == "memory"]
+    assert memory_steps and memory_steps[0]["summary"] == "身高 160cm、体重 75kg"
+    stored = {
+        (fact["kind"], fact["value"])
+        for fact in db.list_memories(memory_settings.db_path, account["id"])
+    }
+    assert ("height", "160cm") in stored
+    assert ("weight", "75kg") in stored
+
+
+def test_body_data_only_streams_a_confirmation_and_final(memory_settings):
+    from app.agent.channels import RecallContext
+
+    db.init_db(memory_settings.db_path)
+    account = _account(memory_settings.db_path, "body-only-stream")
+    ctx = RecallContext(settings=memory_settings, account_id=account["id"])
+
+    events = list(graph.stream("我身高160cm，体重150斤", ctx=ctx, planner=object()))
+
+    steps = [event for event in events if event["type"] == "step"]
+    assert steps and steps[0]["kind"] == "memory"
+    deltas = [event for event in events if event["type"] == "delta"]
+    assert deltas and deltas[0]["text"].startswith("【记住你的身材数据】")
+    final = [event for event in events if event["type"] == "final"][-1]
+    assert final["answer"] == deltas[0]["text"]
+    assert final["steps"][0]["kind"] == "memory"
+
+
+def test_memory_reply_handles_fit_question_without_a_dress(monkeypatch):
+    facts = [
+        {"kind": "height", "value": "160cm"},
+        {"kind": "weight", "value": "75kg"},
+    ]
+    # 数据 + 问合身、但这句里没有裙名：确认数据并要裙名。
+    monkeypatch.setattr(graph.dress, "resolve_dress", lambda *args, **kwargs: None)
+    text, step = graph._memory_reply("我身高160cm，体重150斤，这条穿得下吗", facts, None)
+    assert step is not None and step["status"] == "stored"
+    assert "要看哪条裙子" in text
+
+    # 点名了裙子就不拦：正常流程里合身工具会按档案算。
+    monkeypatch.setattr(graph.dress, "resolve_dress", lambda *args, **kwargs: object())
+    text, step = graph._memory_reply("我身高160cm，Krakatuk 穿得下吗", facts, None)
+    assert text == "" and step is None
+
+    # 只是顺带报了数据，问的是别的事：不拦。
+    text, step = graph._memory_reply("我身高160cm，最近有什么上新", facts, None)
+    assert text == "" and step is None
+
+    # 有三围时确认语不说「仅供参考」：那是实测结论。
+    text, step = graph._memory_reply(
+        "我胸围85cm，腰围68cm，臀围90cm",
+        [
+            {"kind": "bust", "value": "85cm"},
+            {"kind": "waist", "value": "68cm"},
+            {"kind": "hips", "value": "90cm"},
+        ],
+        None,
+    )
+    assert step is not None and step["status"] == "stored"
+    assert "按这个三围判断" in text
+    assert "仅供参考" not in text

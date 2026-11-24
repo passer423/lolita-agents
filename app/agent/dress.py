@@ -1402,6 +1402,13 @@ def resolve_dress(
     original = (question or "").strip()
     if not original:
         return None
+    # 「我身高160cm，体重150斤」是身材数据，不是裙名。放过去会被当成裸名：
+    # 先让模型认一次，再把 160cm 当缩写去搜网页（真实踩过，答成「你问的这条裙子」）。
+    # 延迟导入：long_memory 在模块层依赖本模块的 load_brands，直接互引会成环。
+    from app.agent import long_memory
+
+    if long_memory.is_body_data(original):
+        return None
     brands = load_brands(ctx.settings) if brands is None else brands
     aliases = load_series_aliases(ctx.settings) if aliases is None else aliases
     records = channels.load_catalog(ctx) if records is None else records

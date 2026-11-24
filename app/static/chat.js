@@ -113,6 +113,10 @@
       // 具名工具「判断合身」：结论来源（实测/估算/缺数据）写在 summary 里。
       return '· ' + (step.label || '判断合身') + '：' + esc(step.summary || '');
     }
+    if (step.kind === 'memory') {
+      // 纯身材数据消息的落库确认：写清记了哪几项，不混进裙子结论。
+      return '· ' + (step.label || '记住身材数据') + '：' + esc(step.summary || '');
+    }
     if (step.kind === 'timeout') {
       // 整体预算用尽：说清"等到哪一步"，别让用户以为是某一路挂死
       const waited = step.deadline_s ? Math.round(step.deadline_s) + ' 秒' : '';
@@ -156,6 +160,8 @@
         put('dress_name', text, true);
       } else if (step.kind === 'fit') {
         put('fit', text, true);
+      } else if (step.kind === 'memory') {
+        put('memory', text, true);
       } else if (step.kind === 'timeout') {
         put('timeout', text, true);
       }

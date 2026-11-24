@@ -176,6 +176,13 @@ def test_bare_chitchat_not_triggered(workdir):
     assert dress.resolve_dress("今天好累", RecallContext(settings=app)) is None
 
 
+def test_body_data_is_not_a_dress_name(workdir):
+    # 「报数据」不是「报裙名」：不能进待定/裸名识别，否则会拿 160cm 去搜网页。
+    app = make_app(workdir)
+    for text in ("我身高160cm，体重150斤", "身高160，腰围90", "本人胸围85cm"):
+        assert dress.resolve_dress(text, RecallContext(settings=app)) is None, text
+
+
 def test_brand_plus_bare_name_goes_to_model(workdir):
     app = make_app(workdir)
     query = dress.resolve_dress("Baby 秋日私语", RecallContext(settings=app))
