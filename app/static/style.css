@@ -896,8 +896,8 @@ ul.plain li { margin-bottom: 2px; }
   /* 窄屏：对话栏变成左侧抽屉，浮在聊天区上方，不挤压正文 */
   .chat-shell { display: block; }
 
-  /* 弹层里的会话入口列表：占满标题与新对话之后的剩余高度，一屏放更多会话 */
-  .thread-list { flex: 1 1 auto; }
+  /* 列表高度跟会话条数走：内容少时不撑高，超过弹层可用高度才内部滚动 */
+  .thread-list { flex: 0 1 auto; }
 
   /* 抽屉标题与关闭键只在移动端出现，桌面左栏保持原样 */
   .thread-side-head {
@@ -927,24 +927,25 @@ ul.plain li { margin-bottom: 2px; }
   }
   .thread-close:active { background: var(--accent-soft); color: var(--accent); }
 
-  /* 底部登出：与列表用分隔线隔开，钉在弹层最下面；桌面仍用聊天卡头的登出 */
+  /* 底部登出：紧跟在列表后面，与列表用分隔线隔开；桌面仍用聊天卡头的登出 */
   .thread-side-foot {
     display: block;
-    margin-top: auto;
     padding-top: 10px;
     border-top: 1px solid var(--line);
   }
   .thread-logout { display: inline-flex; width: 100%; }
   /* 比 button.ghost 的特异性高，确保移动端只剩弹层底部的登出 */
   .chat-actions .chat-logout-desktop { display: none; }
+  /* 抽屉高度跟着内容走，最高不超一屏；内容多时由 .thread-list 内部滚动 */
   .thread-side {
     position: fixed;
     top: 0;
-    bottom: 0;
+    bottom: auto;
     left: 0;
     z-index: 50;
     width: min(80vw, 300px);
-    max-height: none;
+    max-height: 100vh;
+    max-height: 100dvh;
     padding: 12px 12px calc(12px + env(safe-area-inset-bottom));
     border-radius: 0 14px 14px 0;
     border-left: 0;
