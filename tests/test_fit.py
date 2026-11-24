@@ -24,6 +24,19 @@ FACTS = [
 ]
 
 
+class FakePlanner:
+    def __init__(self, values=None, error: bool = False):
+        self.values = values or {"bust": 88, "waist": 70, "hips": 92}
+        self.error = error
+        self.calls: list[tuple[float, float]] = []
+
+    def estimate_measurements(self, height_cm, weight_kg):
+        self.calls.append((height_cm, weight_kg))
+        if self.error:
+            raise RuntimeError("estimate failed")
+        return self.values
+
+
 # --------------------------------------------------------------------- 尺寸
 
 
@@ -125,10 +138,85 @@ def test_liked_color_matches_english_alias():
     assert text == "【配色偏好】这个款式有天蓝。"
 
 
+# --------------------------------------------------------------------- 具名工具
+
+
+def test_judge_real_measurements_returns_fit_step():
+    text, step = fit.judge(PROFILE, FACTS, "这条我穿得下吗")
+
+    assert "【按你的身材】" in text
+    assert "整体合身" in text
+    assert step is not None
+    assert step["kind"] == "fit"
+    assert step["label"] == "判断合身"
+    assert step["status"] == "measured"
+
+
+def test_judge_estimated_is_labeled_reference_only():
+    planner = FakePlanner({"bust": 88, "waist": 70, "hips": 92})
+    facts = [{"kind": "height", "value": "160cm"}, {"kind": "weight", "value": "55kg"}]
+
+    text, step = fit.judge(PROFILE, facts, "这条我穿得下吗", planner)
+
+    assert planner.calls == [(160.0, 55.0)]
+    # 估算结论必须单独一段、明确写「仅供参考」，不能和实测混在一起。
+    assert "【按身高体重估算，仅供参考】" in text
+    assert "不是实测" in text
+    assert "【按你的身材】" not in text
+    assert "整体合身" in text
+    assert step is not None
+    assert step["status"] == "estimated"
+    assert "仅供参考" in step["summary"]
+
+
+def test_judge_asks_for_data_when_nothing_stored():
+    text, step = fit.judge(PROFILE, [], "这条我穿得下吗")
+
+    assert "三围" in text
+    assert "身高和体重" in text
+    assert "只能估算" in text
+    assert step is not None
+    assert step["status"] == "need_data"
+
+
+def test_judge_asks_for_data_even_if_estimate_fails():
+    facts = [{"kind": "height", "value": "160cm"}, {"kind": "weight", "value": "55kg"}]
+
+    text, step = fit.judge(PROFILE, facts, "这条我穿得下吗", FakePlanner(error=True))
+
+    assert "三围" in text
+    assert step is not None
+    assert step["status"] == "need_data"
+
+
+def test_judge_no_archive_measurements_never_guesses():
+    text, step = fit.judge(
+        {"measurements": [], "colors": ["Pink"]}, FACTS, "这条我穿得下吗"
+    )
+
+    assert "没有写平铺尺寸" in text
+    for verdict in ("合身", "宽松", "略小"):
+        assert verdict not in text
+    assert step is not None
+    assert step["status"] == "no_archive_data"
+
+
+def test_judge_uses_height_for_skirt_length():
+    facts = [{"kind": "height", "value": "160cm"}]
+
+    text, step = fit.judge(PROFILE, facts, "这条裙子多长，到哪")
+
+    # 89 / 160 ≈ 0.556 → 及膝
+    assert "着丈 89cm" in text
+    assert "大约到及膝" in text
+    assert step is not None
+    assert step["status"] == "length_only"
+
+
 # --------------------------------------------------------------------- 接线
 
 
-def test_finish_appends_note_for_resolved_dress(data_dir):
+def test_finish_appends_fit_note_for_resolved_dress(data_dir):
     db.init_db(settings.db_path)
     account = db.create_account(settings.db_path, "owner", "scrypt$1$1$1$x$y")
     for kind, value in (("bust", "85cm"), ("waist", "70cm"), ("color", "粉色")):
@@ -157,6 +245,7 @@ def test_finish_appends_note_for_resolved_dress(data_dir):
     assert payload["answer"].startswith("这条是 Lovely Princess JSK。")
     assert "整体合身" in payload["answer"]
     assert "这个款式有粉色" in payload["answer"]
+    assert any(step.get("kind") == "fit" for step in payload["steps"])
 
     # 未核实的档案不参与判断：不拿猜的尺寸下结论。
     unverified = dict(state, dress_unverified=True)

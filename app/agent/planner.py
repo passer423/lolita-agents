@@ -47,6 +47,9 @@ PLANNER_TIMEOUT = 30.0
 DRESS_TIMEOUT = 12.0
 # 保守扩展只做「候选名字」，超时短，失败就当没扩展。
 EXPAND_TIMEOUT = 6.0
+# 只凭身高体重估三围：短输出、短超时，估不出来就退回反问用户。
+ESTIMATE_MAX_TOKENS = 80
+ESTIMATE_TIMEOUT = 8.0
 
 # 实时意图 → 要补的通道。命中哪一组，就把该组通道全开；多组命中按顺序去重合并。
 #
@@ -413,6 +416,56 @@ class DeepSeekPlanner:
         self._record_usage(response)
         text = (response.choices[0].message.content or "").strip()
         return parse_expand_reply(text)
+
+    def estimate_measurements(self, height_cm: float, weight_kg: float) -> dict[str, float]:
+        """只凭身高体重估算三围；调用方必须把结果标成「仅供参考」。"""
+        messages: list[dict] = [
+            {"role": "user", "content": build_estimate_prompt(height_cm, weight_kg)},
+        ]
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=0,
+                max_tokens=ESTIMATE_MAX_TOKENS,
+                response_format={"type": "json_object"},
+                timeout=ESTIMATE_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001 - 估不出来不阻塞回答
+            raise PlannerOutputError(f"三围估算模型调用失败：{type(exc).__name__}: {exc}") from exc
+
+        self._record_usage(response)
+        text = (response.choices[0].message.content or "").strip()
+        return parse_estimate_reply(text)
+
+
+def build_estimate_prompt(height_cm: float, weight_kg: float) -> str:
+    return (
+        f"用户身高 {height_cm:g}cm、体重 {weight_kg:g}kg，请按常见成年女性体型估算三围。\n"
+        "只输出 JSON，不要解释、不要范围，单位 cm："
+        '{"bust": 85, "waist": 68, "hips": 90}'
+    )
+
+
+def parse_estimate_reply(text: str) -> dict[str, float]:
+    """校验估算结果；任何字段缺失或越界都当失败，让上层反问用户。"""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise PlannerOutputError(f"三围估算没有返回合法 JSON：{text[:80]}") from exc
+    if not isinstance(data, dict):
+        raise PlannerOutputError("三围估算返回的不是 JSON 对象")
+
+    estimates: dict[str, float] = {}
+    for key in ("bust", "waist", "hips"):
+        value = data.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise PlannerOutputError(f"三围估算缺少有效字段：{key}")
+        number = float(value)
+        if not 40 <= number <= 150:
+            raise PlannerOutputError(f"三围估算数值越界：{key}={number}")
+        estimates[key] = number
+    return estimates
 
 
 def parse_query(text: str) -> str:

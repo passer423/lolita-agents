@@ -74,9 +74,46 @@ def test_extracts_body_measurements_with_explicit_cm(memory_settings):
         ("hips", "90cm"),
     }
 
-    # 没有 cm/厘米/公分 的裸数字不当围度。
-    assert long_memory.extract("我胸围85", memory_settings) == []
-    assert long_memory.extract("胸围85cm", memory_settings) == []
+
+def test_extracts_height_weight_and_unitless_body(memory_settings):
+    # 单位可省略：纯身体数据句按 cm 记。
+    facts = long_memory.extract("身高160，腰围90", memory_settings)
+    assert {(fact["kind"], fact["value"]) for fact in facts} == {
+        ("height", "160cm"),
+        ("waist", "90cm"),
+    }
+
+    facts = long_memory.extract("我身高160cm，体重55kg", memory_settings)
+    assert {(fact["kind"], fact["value"]) for fact in facts} == {
+        ("height", "160cm"),
+        ("weight", "55kg"),
+    }
+
+    # 斤折半。
+    facts = long_memory.extract("我体重110斤", memory_settings)
+    assert [(fact["kind"], fact["value"]) for fact in facts] == [("weight", "55kg")]
+
+
+def test_dress_dimensions_without_self_subject_are_not_stored(memory_settings):
+    # 描述裙子尺寸、第三人称、疑问句都不算本人数据。
+    for text in ("我胸围90的裙子", "她身高160cm", "这条腰围90cm吗", "裙长85cm"):
+        assert long_memory.extract(text, memory_settings) == [], text
+
+
+def test_body_facts_survive_a_trailing_fit_question(memory_settings):
+    # 「报数据 + 问能不能穿」是主用法：陈述分句照记，只排除疑问分句。
+    facts = long_memory.extract("我胸围95cm，腰围74cm，臀围98cm，这件穿得下吗？", memory_settings)
+    assert {(fact["kind"], fact["value"]) for fact in facts} == {
+        ("bust", "95cm"),
+        ("waist", "74cm"),
+        ("hips", "98cm"),
+    }
+
+    facts = long_memory.extract("我身高160cm，体重55kg，这件穿得下吗？", memory_settings)
+    assert {(fact["kind"], fact["value"]) for fact in facts} == {
+        ("height", "160cm"),
+        ("weight", "55kg"),
+    }
 
 
 def test_negative_or_question_colors_are_not_stored(memory_settings):
@@ -160,6 +197,8 @@ def test_render_marks_source_kind(tmp_path):
             {"kind": "color", "value": "粉色"},
             {"kind": "size", "value": "M"},
             {"kind": "hips", "value": "90cm"},
+            {"kind": "height", "value": "160cm"},
+            {"kind": "weight", "value": "55kg"},
             {"kind": "bust", "value": "85cm"},
             {"kind": "waist", "value": "70cm"},
         ]
@@ -170,6 +209,8 @@ def test_render_marks_source_kind(tmp_path):
     assert "胸围：85cm" in block["content"]
     assert "腰围：70cm" in block["content"]
     assert "臀围：90cm" in block["content"]
+    assert "身高：160cm" in block["content"]
+    assert "体重：55kg" in block["content"]
     assert "尺码：M" in block["content"]
     assert "喜欢的颜色：粉色" in block["content"]
     assert "常买品牌：Angelic Pretty" in block["content"]

@@ -60,7 +60,30 @@ _PART_TITLES = {
     "bust": ("bust", "胸围"),
     "waist": ("waist", "腰围"),
     "hips": ("hips", "hip", "臀围"),
+    "length": ("length", "着丈", "总长", "裙长", "衣长"),
 }
+
+#: 提到这些词时才做合身/裙长判断，避免每条裙子回答都塞一段估算。
+FIT_MARKERS = (
+    "穿得下",
+    "穿不下",
+    "合身",
+    "能不能穿",
+    "能穿",
+    "穿多大",
+    "穿什么码",
+    "选码",
+    "码数",
+    "尺码",
+    "身高",
+    "体重",
+)
+LENGTH_MARKERS = ("裙长", "多长", "长度", "到哪", "及膝", "过膝", "及踝", "长不长", "短不短")
+
+GUIDE_TEXT = (
+    "【判断合身】想判断穿不穿得下，最好给我三围：胸围 / 腰围 / 臀围（cm）。"
+    "只给身高和体重也能算，但只能估算，仅供参考。"
+)
 
 #: 平铺下限比身体大多少以内仍算合身——布料与版型有放松量，
 #: 超过这个差距才算明显宽松。
@@ -75,6 +98,10 @@ _NUMBER = re.compile(r"(\d+(?:\.\d+)?)")
 
 def _fmt(value: float) -> str:
     return str(int(value)) if value == int(value) else f"{value:g}"
+
+
+def _range_text(low: float, high: float) -> str:
+    return f"{_fmt(low)}cm" if low == high else f"{_fmt(low)}~{_fmt(high)}cm"
 
 
 def _cm_range(value: str) -> tuple[float, float] | None:
@@ -110,59 +137,137 @@ def _measurement(profile: dict, part: str) -> tuple[str, tuple[float, float] | N
     return "", None
 
 
-def _fit_section(profile: dict, facts: list[dict]) -> str:
+def _compare(part: str, user: float, profile: dict) -> tuple[str, str | None]:
+    """把一个部位和档案比一次；返回 ``(结论行, 宽松/合身/略小)``。"""
+    part_label = PART_LABELS[part]
+    value, cm_range = _measurement(profile, part)
+    if not value:
+        return f"{part_label}：档案没写，这个部位不判断。", None
+    if cm_range is None:
+        return f"{part_label}：档案写的是「{value}」，取不到 cm 数值，不判断。", None
+
+    low, high = cm_range
+    user_text = _fmt(user)
+    if user > high:
+        diff = user - high
+        verdict = "略小"
+        detail = f"档案上限 {_fmt(high)}cm，比你（{user_text}cm）小 {_fmt(diff)}cm"
+    elif user < low and low - user > LOOSE_MARGIN_CM:
+        diff = low - user
+        verdict = "宽松"
+        detail = f"档案下限 {_fmt(low)}cm，比你（{user_text}cm）大 {_fmt(diff)}cm"
+    elif user < low:
+        diff = low - user
+        verdict = "合身"
+        detail = (
+            f"档案 {_range_text(low, high)}，你 {user_text}cm 比下限小 "
+            f"{_fmt(diff)}cm，在 {_fmt(LOOSE_MARGIN_CM)}cm 放松量内"
+        )
+    else:
+        verdict = "合身"
+        detail = f"档案 {_range_text(low, high)}，你 {user_text}cm 在范围内"
+    return f"{part_label}：{detail}，{verdict}（{value}）。", verdict
+
+
+def _overall(verdicts: list[str]) -> str:
+    if "略小" in verdicts:
+        return "整体略小、会偏紧"
+    if verdicts and all(verdict == "宽松" for verdict in verdicts):
+        return "整体宽松"
+    if "宽松" in verdicts:
+        return "整体合身偏宽松"
+    return "整体合身"
+
+
+def _fit_section(profile: dict, facts: list[dict]) -> tuple[str, str]:
     users = {part: _user_cm(facts, part) for part in PART_LABELS}
     if all(value is None for value in users.values()):
-        return ""
+        return "", ""
     if not profile.get("measurements"):
-        return "【按你的身材】这份档案没有写平铺尺寸，判断不了穿不穿得下，我不猜。"
+        return "【按你的身材】这份档案没有写平铺尺寸，判断不了穿不穿得下，我不猜。", ""
 
     lines: list[str] = []
     verdicts: list[str] = []
-    for part, part_label in PART_LABELS.items():
-        user = users[part]
+    for part, user in users.items():
         if user is None:
             continue
-        value, cm_range = _measurement(profile, part)
-        if not value:
-            lines.append(f"{part_label}：档案没写，这个部位不判断。")
-            continue
-        if cm_range is None:
-            lines.append(f"{part_label}：档案写的是「{value}」，取不到 cm 数值，不判断。")
-            continue
+        line, verdict = _compare(part, user, profile)
+        lines.append(line)
+        if verdict:
+            verdicts.append(verdict)
+    overall = _overall(verdicts)
+    return "【按你的身材】" + "".join(lines) + f"{overall}。", overall
 
-        low, high = cm_range
-        user_text = _fmt(user)
-        if user > high:
-            diff = user - high
-            verdict = "略小"
-            detail = f"档案上限 {_fmt(high)}cm，比你（{user_text}cm）小 {_fmt(diff)}cm"
-        elif user < low and low - user > LOOSE_MARGIN_CM:
-            diff = low - user
-            verdict = "宽松"
-            detail = f"档案下限 {_fmt(low)}cm，比你（{user_text}cm）大 {_fmt(diff)}cm"
-        elif user < low:
-            diff = low - user
-            verdict = "合身"
-            detail = (
-                f"档案 {_fmt(low)}~{_fmt(high)}cm，你 {user_text}cm 比下限小 "
-                f"{_fmt(diff)}cm，在 {_fmt(LOOSE_MARGIN_CM)}cm 放松量内"
-            )
-        else:
-            verdict = "合身"
-            detail = f"档案 {_fmt(low)}~{_fmt(high)}cm，你 {user_text}cm 在范围内"
-        verdicts.append(verdict)
-        lines.append(f"{part_label}：{detail}，{verdict}（{value}）。")
 
-    if "略小" in verdicts:
-        overall = "整体略小、会偏紧"
-    elif verdicts and all(verdict == "宽松" for verdict in verdicts):
-        overall = "整体宽松"
-    elif "宽松" in verdicts:
-        overall = "整体合身偏宽松"
+def _length_section(profile: dict, facts: list[dict]) -> str:
+    """身高 + 着丈 → 裙长落点。阈值按肩点到膝/踝的人体比例估。"""
+    height = _user_cm(facts, "height")
+    if height is None:
+        return ""
+    value, cm_range = _measurement(profile, "length")
+    if not cm_range:
+        return ""
+    low, high = cm_range
+    length = (low + high) / 2
+    ratio = length / height
+    if ratio < 0.50:
+        where = "膝上"
+    elif ratio < 0.56:
+        where = "及膝"
+    elif ratio < 0.70:
+        where = "过膝"
+    elif ratio < 0.76:
+        where = "及小腿"
     else:
-        overall = "整体合身"
-    return "【按你的身材】" + "".join(lines) + f"{overall}。"
+        where = "及踝"
+    shown = _fmt(low) if low == high else f"{_fmt(low)}~{_fmt(high)}"
+    return (
+        f"【裙长】按你 {_fmt(height)}cm 的身高，着丈 {shown}cm 大约到{where}"
+        "（按肩点到裙摆估算，实际受腰线和版型影响）。"
+    )
+
+
+def _estimated_section(
+    profile: dict, estimates: dict[str, float], height: float, weight: float
+) -> tuple[str, str]:
+    lines: list[str] = []
+    verdicts: list[str] = []
+    for part, user in estimates.items():
+        line, verdict = _compare(part, user, profile)
+        lines.append(line)
+        if verdict:
+            verdicts.append(verdict)
+    overall = _overall(verdicts)
+    values = "、".join(
+        f"{PART_LABELS[part]} {_fmt(estimates[part])}cm" for part in PART_LABELS
+    )
+    return (
+        f"【按身高体重估算，仅供参考】按 {_fmt(height)}cm / {_fmt(weight)}kg "
+        f"估算三围：{values}（不是实测，不能当准确结论）。"
+        + "".join(lines)
+        + f"{overall}。",
+        overall,
+    )
+
+
+def _estimate(planner, height: float, weight: float) -> dict[str, float] | None:
+    """让模型按身高体重估三围；planner 不支持或结果越界都当失败。"""
+    if planner is None:
+        return None
+    try:
+        values = planner.estimate_measurements(height, weight)
+    except Exception:  # noqa: BLE001 - 估不出来就退回反问，不猜
+        return None
+    estimates: dict[str, float] = {}
+    for part in PART_LABELS:
+        try:
+            value = float(values.get(part))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not 40 <= value <= 150:
+            return None
+        estimates[part] = value
+    return estimates
 
 
 def _alias_hit(color: str, alias: str) -> bool:
@@ -193,6 +298,20 @@ def _color_section(profile: dict, facts: list[dict]) -> str:
     return "【配色偏好】这个款式有" + "、".join(liked) + "。"
 
 
+def _wants_fit(question: str) -> bool:
+    text = question or ""
+    return any(marker in text for marker in FIT_MARKERS)
+
+
+def _wants_length(question: str) -> bool:
+    text = question or ""
+    return any(marker in text for marker in LENGTH_MARKERS)
+
+
+def is_fit_question(question: str) -> bool:
+    return _wants_fit(question) or _wants_length(question)
+
+
 def advice(profile: dict, facts: list[dict]) -> str:
     """基于档案与长期记忆生成补充结论；没有可用信息时返回空串。
 
@@ -201,9 +320,83 @@ def advice(profile: dict, facts: list[dict]) -> str:
     """
     if not profile or not facts:
         return ""
+    fit_text, _overall_text = _fit_section(profile, facts)
     sections = [
-        section
-        for section in (_fit_section(profile, facts), _color_section(profile, facts))
-        if section
+        section for section in (fit_text, _color_section(profile, facts)) if section
     ]
     return "\n".join(sections)
+
+
+def judge(
+    profile: dict,
+    facts: list[dict],
+    question: str,
+    planner=None,
+) -> tuple[str, dict | None]:
+    """具名工具「判断合身」：返回 ``(补充文本, 步骤)``。
+
+    优先级：真实三围 > 身高体重估算（明确标注仅供参考）> 反问要数据。
+    档案没写平铺尺寸时不做任何推断。``steps`` 里的 ``kind="fit"``
+    由调用方并入轨迹，页面显示为「判断合身」。
+    """
+    if not profile:
+        return "", None
+
+    fit_question = is_fit_question(question)
+    wants_fit = _wants_fit(question)
+    wants_length = _wants_length(question)
+    parts: list[str] = []
+    status = ""
+    summary = ""
+
+    real = any(_user_cm(facts, part) is not None for part in PART_LABELS)
+    height = _user_cm(facts, "height")
+    weight = _user_cm(facts, "weight")
+
+    if not profile.get("measurements"):
+        if real or height is not None or fit_question:
+            parts.append(
+                "【按你的身材】这份档案没有写平铺尺寸，判断不了穿不穿得下，我不猜。"
+            )
+            status, summary = "no_archive_data", "档案没写尺寸，不判断"
+    elif real:
+        text, overall = _fit_section(profile, facts)
+        if text:
+            parts.append(text)
+            status, summary = "measured", f"按三围：{overall}"
+    elif wants_fit and height is not None and weight is not None:
+        estimates = _estimate(planner, height, weight)
+        if estimates:
+            text, overall = _estimated_section(profile, estimates, height, weight)
+            parts.append(text)
+            status, summary = "estimated", f"按身高体重估算（仅供参考）：{overall}"
+        elif wants_fit:
+            parts.append(GUIDE_TEXT)
+            status, summary = "need_data", "缺三围，已询问"
+    elif wants_fit:
+        parts.append(GUIDE_TEXT)
+        status, summary = "need_data", "缺三围，已询问"
+
+    if height is not None and (wants_length or wants_fit):
+        length = _length_section(profile, facts)
+        if length:
+            parts.append(length)
+            if not status:
+                status, summary = "length_only", "按身高判断裙长"
+
+    color = _color_section(profile, facts)
+    if color:
+        parts.append(color)
+
+    text = "\n".join(parts)
+    if not text or not status:
+        # 只有配色命中时不产出「判断合身」步骤：它不是一个尺码结论。
+        return text, None
+    step = {
+        "kind": "fit",
+        "label": "判断合身",
+        "status": status,
+        "summary": summary,
+    }
+    return text, step
+

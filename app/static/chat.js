@@ -109,6 +109,10 @@
         (item.verified ? '校验通过' : '校验未通过') + '）');
       return '· ' + (step.label || '解析裙名') + '：' + (parts.join('；') || '未识别');
     }
+    if (step.kind === 'fit') {
+      // 具名工具「判断合身」：结论来源（实测/估算/缺数据）写在 summary 里。
+      return '· ' + (step.label || '判断合身') + '：' + esc(step.summary || '');
+    }
     if (step.kind === 'timeout') {
       // 整体预算用尽：说清"等到哪一步"，别让用户以为是某一路挂死
       const waited = step.deadline_s ? Math.round(step.deadline_s) + ' 秒' : '';
@@ -150,6 +154,8 @@
       } else if (step.kind === 'dress_name') {
         // 同一轮可能先本地、再模型：用固定 key，后面的结果覆盖前面的。
         put('dress_name', text, true);
+      } else if (step.kind === 'fit') {
+        put('fit', text, true);
       } else if (step.kind === 'timeout') {
         put('timeout', text, true);
       }

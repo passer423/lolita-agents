@@ -23,6 +23,7 @@ from app.agent.channels import ChannelUnavailable, RecallContext
 from app.agent.planner import (
     PlannerOutputError,
     build_query_prompt,
+    parse_estimate_reply,
     parse_expand_reply,
     parse_query,
     plan_channels,
@@ -209,6 +210,27 @@ def test_parse_query_accepts_valid(text, expected):
 def test_parse_query_rejects_invalid(text, fragment):
     with pytest.raises(PlannerOutputError) as exc:
         parse_query(text)
+    assert fragment in str(exc.value)
+
+
+def test_parse_estimate_reply_accepts_valid_json():
+    assert parse_estimate_reply('{"bust": 88, "waist": 70, "hips": 92}') == {
+        "bust": 88.0,
+        "waist": 70.0,
+        "hips": 92.0,
+    }
+
+
+@pytest.mark.parametrize("text, fragment", [
+    ("不是 JSON", "合法 JSON"),
+    ('{"bust": 88, "waist": 70}', "hips"),
+    ('{"bust": 88, "waist": 700, "hips": 92}', "越界"),
+    ('{"bust": true, "waist": 70, "hips": 92}', "bust"),
+    ('["88"]', "JSON 对象"),
+])
+def test_parse_estimate_reply_rejects_invalid(text, fragment):
+    with pytest.raises(PlannerOutputError) as exc:
+        parse_estimate_reply(text)
     assert fragment in str(exc.value)
 
 

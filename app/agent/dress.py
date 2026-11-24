@@ -29,7 +29,7 @@ from app.agent import channels
 from app.agent.channels import RecallContext
 from app.config import AppSettings
 from app.config import settings as default_settings
-from app.services import lolibrary_online
+from app.services import lolibrary_backfill, lolibrary_online
 
 logger = logging.getLogger(__name__)
 
@@ -1823,6 +1823,34 @@ def lookup_archive(
     record = _find_archive_record(current, records)
     if record is not None:
         item = _record_item(record)
+        # 回填过的条目直接吃 sidecar（尺寸/配色/价格），不再联网。
+        entry = lolibrary_backfill.find(
+            ctx.settings, url=item.url, slug=str(record.get("slug") or "")
+        )
+        if entry is not None:
+            if entry.get("ok"):
+                item = ArchiveItem(
+                    title=item.title or str(entry.get("title") or ""),
+                    brand=item.brand or str(entry.get("brand") or ""),
+                    category=item.category or str(entry.get("category") or ""),
+                    release_year=str(entry.get("release_year") or "") or item.release_year,
+                    original_price=str(entry.get("original_price") or "")
+                    or item.original_price,
+                    colors=tuple(str(c) for c in entry.get("colors") or ())
+                    or item.colors,
+                    measurements=tuple(
+                        (str(pair[0]), str(pair[1]))
+                        for pair in entry.get("measurements") or ()
+                        if isinstance(pair, (list, tuple)) and len(pair) == 2
+                    )
+                    or item.measurements,
+                    url=item.url,
+                    product_number=str(entry.get("product_number") or "")
+                    or item.product_number,
+                    alias=item.alias or str(entry.get("alias") or ""),
+                )
+            # 失败条目也标记为「已尝试」，否则每次查询都会重新联网。
+            return [item], ""
         needs_detail = not (
             item.release_year and item.original_price and item.colors and item.measurements
         )

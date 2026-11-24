@@ -1238,19 +1238,21 @@ def _cost_block(
     )
 
 
-def _fit_note(state: AgentState, ctx: RecallContext) -> str:
-    """按长期记忆里的三围/喜欢的颜色，给已解析的裙子档案补一段结论。
+def _fit_note(
+    question: str, state: AgentState, ctx: RecallContext, planner
+) -> tuple[str, dict | None]:
+    """具名工具「判断合身」：按记忆里的三围/身高体重/喜欢的颜色补结论。
 
     只对「已解析且已核实」的档案生效：未解析/未核实的档案本来就不是事实，
     拿它去比尺寸会给出更糟的假结论。
     """
     if state.get("dress_unresolved") or state.get("dress_unverified"):
-        return ""
+        return "", None
     profile = state.get("dress_profile") or {}
     if not profile:
-        return ""
+        return "", None
     facts = long_memory.facts_for(ctx.settings.db_path, ctx.account_id)
-    return fit.advice(profile, facts)
+    return fit.judge(profile, facts, question, planner)
 
 
 def _finish(
@@ -1271,9 +1273,12 @@ def _finish(
         limit=ctx.settings.evidence_max_items,
     )
     answer = state.get("answer", "")
-    note = _fit_note(state, ctx)
+    note, fit_step = _fit_note(question, state, ctx, planner)
     if note:
         answer = f"{answer}\n\n{note}" if answer.strip() else note
+    steps = list(state.get("steps", []))
+    if fit_step:
+        steps.append(fit_step)
     cost_block = _cost_block(planner, writer, ctx.settings, route)
     conflict_block = conflicts.diagnose(question, answer, evidence)
     payload = {
@@ -1281,7 +1286,7 @@ def _finish(
         "answer": answer,
         "refused": not evidence,
         "evidence": _numbered(evidence),
-        "steps": state.get("steps", []),
+        "steps": steps,
         "stopped_reason": state.get("stopped_reason", ""),
         "follow_suggestion": _follow_suggestion(question, state, evidence, ctx),
         "dress": state.get("dress_profile") or None,
@@ -1546,9 +1551,12 @@ def stream(
 
     # 尺码/配色补充只拼进 final：前端收到 final 会整段替换，既不会重复，
     # 也不会在写作中途插一行打断阅读。
-    note = _fit_note(state, ctx)
+    note, fit_step = _fit_note(question, state, ctx, planner)
     if note:
         text = f"{text}\n\n{note}" if text.strip() else note
+    if fit_step:
+        state.setdefault("steps", []).append(fit_step)
+        yield {"type": "step", **fit_step}
 
     if (
         state.get("dress_unresolved")

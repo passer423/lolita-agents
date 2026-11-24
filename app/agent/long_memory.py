@@ -42,6 +42,8 @@ KIND_LABELS = {
     "bust": "胸围",
     "waist": "腰围",
     "hips": "臀围",
+    "height": "身高",
+    "weight": "体重",
     "size": "尺码",
     "color": "喜欢的颜色",
     "brand": "常买品牌",
@@ -49,7 +51,17 @@ KIND_LABELS = {
 }
 
 #: 渲染顺序：身材数据在前（查裙子时要拿来比），软偏好放最后。
-KIND_ORDER = ("bust", "waist", "hips", "size", "color", "brand", "preference")
+KIND_ORDER = (
+    "bust",
+    "waist",
+    "hips",
+    "height",
+    "weight",
+    "size",
+    "color",
+    "brand",
+    "preference",
+)
 
 _FIRST_PERSON = ("我", "本人", "自己")
 #: 「我朋友胸围…」里的数字不是本人的，不写进本人档案。
@@ -83,12 +95,61 @@ _QUESTION_MARKERS = (
 _CLAUSE_SPLIT = re.compile(r"[，。；;,.!?！？\n]")
 _SENTENCE_SPLIT = re.compile(r"[。；;!?！？\n]")
 
-#: 三围只认显式带 cm/厘米/公分的陈述；没有单位的数字（「我穿170」）不当围度。
+#: 三围/身高/体重只认显式陈述。单位可以省略（「腰围90」按 cm），
+#: 但数字必须紧跟部位词并且落在合理范围，避免把裙子的尺寸记成人的。
 _BODY_MARKERS = {"bust": ("胸围",), "waist": ("腰围",), "hips": ("臀围",)}
-_CM_VALUE = re.compile(r"(\d{2,3}(?:\.\d+)?)\s*(?:cm|厘米|公分)", re.IGNORECASE)
+_BODY_VALUE = re.compile(
+    r"^\s*[:：]?\s*(?:是|为|约|大约|大概)?\s*(\d{2,3}(?:\.\d+)?)\s*"
+    r"(cm|厘米|公分)?\s*(?:左右)?\s*$",
+    re.IGNORECASE,
+)
+_HEIGHT_VALUE = re.compile(
+    r"身高\s*[:：]?\s*(?:是|为|约|大约|大概)?\s*(\d{2,3}(?:\.\d+)?)\s*"
+    r"(cm|厘米|公分)?",
+    re.IGNORECASE,
+)
+_WEIGHT_VALUE = re.compile(
+    r"体重\s*[:：]?\s*(?:是|为|约|大约|大概)?\s*(\d{2,3}(?:\.\d+)?)\s*"
+    r"(kg|公斤|千克|斤)?",
+    re.IGNORECASE,
+)
 _THREE_SIZES = re.compile(
     r"三围\s*[:：]?\s*(\d{2,3}(?:\.\d+)?)\s*[/、,，]\s*(\d{2,3}(?:\.\d+)?)"
     r"\s*[/、,，]\s*(\d{2,3}(?:\.\d+)?)"
+)
+
+#: 只有「身高160，腰围90」这种纯身体数据句，才允许省略第一人称。
+#: 句子里出现裙子/款式等词时不能当本人数据。
+_MEASURE_TOKENS = (
+    "身高",
+    "体重",
+    "胸围",
+    "腰围",
+    "臀围",
+    "三围",
+    "厘米",
+    "公分",
+    "公斤",
+    "千克",
+    "我",
+    "的",
+    "是",
+    "为",
+    "约",
+    "大约",
+    "大概",
+    "左右",
+    "cm",
+    "CM",
+    "kg",
+    "KG",
+    "，",
+    ",",
+    "、",
+    "：",
+    ":",
+    " ",
+    "/",
 )
 
 #: 颜色只认「我 + 喜欢/偏爱… + 颜色词」；否定句与疑问句都不写。
@@ -126,25 +187,73 @@ def _cm_text(value: str) -> str:
     return f"{value}cm"
 
 
+def _weight_text(value: float) -> str:
+    text = str(int(value)) if value == int(value) else f"{value:g}"
+    return f"{text}kg"
+
+
+def _plausible(value: str, low: float, high: float) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return low <= number <= high
+
+
+def _measurement_only(sentence: str) -> bool:
+    """整句只有身体数据（可省略「我」）：「身高160，腰围90」。"""
+    rest = sentence
+    for token in _MEASURE_TOKENS:
+        rest = rest.replace(token, "")
+    rest = re.sub(r"[\d.]", "", rest)
+    return not rest.strip()
+
+
 def _body_facts(clause: str) -> list[tuple[str, str]]:
-    """从一句话里取三围：优先「三围 85/70/90」，其次逐部位「胸围 85cm」。"""
+    """从一句话里取三围：优先「三围 85/70/90」，其次逐部位「胸围 85cm」。
+
+    单位可省略，但数字必须紧跟部位词且落在 40–150cm；「我胸围90的裙子」
+    这种描述裙子尺寸的句子不会被当成本人数据。
+    """
     triple = _THREE_SIZES.search(clause)
     if triple:
-        return [
-            ("bust", _cm_text(triple.group(1))),
-            ("waist", _cm_text(triple.group(2))),
-            ("hips", _cm_text(triple.group(3))),
-        ]
+        values = [triple.group(1), triple.group(2), triple.group(3)]
+        if all(_plausible(value, 40, 150) for value in values):
+            return [
+                ("bust", _cm_text(values[0])),
+                ("waist", _cm_text(values[1])),
+                ("hips", _cm_text(values[2])),
+            ]
+
     found: list[tuple[str, str]] = []
     for kind, markers in _BODY_MARKERS.items():
         for marker in markers:
             index = clause.find(marker)
             if index < 0:
                 continue
-            match = _CM_VALUE.search(clause[index: index + 12])
-            if match:
+            match = _BODY_VALUE.search(clause[index + len(marker):])
+            if match and _plausible(match.group(1), 40, 150):
                 found.append((kind, _cm_text(match.group(1))))
             break
+    return found
+
+
+def _height_weight_facts(clause: str) -> list[tuple[str, str]]:
+    """身高按 cm、体重按 kg；「斤」折半。范围明显不对的不记。"""
+    found: list[tuple[str, str]] = []
+    height = _HEIGHT_VALUE.search(clause)
+    if height and _plausible(height.group(1), 120, 220):
+        found.append(("height", _cm_text(height.group(1))))
+    weight = _WEIGHT_VALUE.search(clause)
+    if weight:
+        try:
+            value = float(weight.group(1))
+        except ValueError:
+            value = 0.0
+        if (weight.group(2) or "").strip() == "斤":
+            value /= 2
+        if 30 <= value <= 150:
+            found.append(("weight", _weight_text(value)))
     return found
 
 
@@ -190,11 +299,16 @@ def extract(text: str, app: AppSettings) -> list[dict]:
 
     # 「我胸围85cm，腰围70cm」里第一人称只出现在第一个分句；先按句切，
     # 让整句共享同一个「我」，再按逗号分句判断各自的事实。
+    #
+    # 整句带问号不代表整句是疑问：「我身高160，腰围90，这件穿得下吗？」
+    # 前两个分句是陈述。疑问只按分句排除（下面那层），否则最常见的
+    # 「报数据 + 问能不能穿」句式会把数据整句丢掉。
     for sentence in _SENTENCE_SPLIT.split(str(text or "")):
-        if not sentence.strip() or _is_question(sentence):
+        if not sentence.strip():
             continue
         first_person = any(marker in sentence for marker in _FIRST_PERSON)
         other_person = any(marker in sentence for marker in _OTHER_PERSON)
+        self_report = first_person or _measurement_only(sentence)
 
         for clause in (part.strip() for part in _CLAUSE_SPLIT.split(sentence)):
             if not clause or _is_question(clause):
@@ -204,12 +318,12 @@ def extract(text: str, app: AppSettings) -> list[dict]:
             if size:
                 add("size", size, clause)
 
-            if not first_person:
+            if not self_report:
                 continue
 
-            # 三围与颜色必须是「本人」的：朋友/家人的数字不写进本人档案。
+            # 三围/身高/体重与颜色必须是「本人」的：朋友/家人的数字不写进本人档案。
             if not other_person:
-                for kind, value in _body_facts(clause):
+                for kind, value in _body_facts(clause) + _height_weight_facts(clause):
                     add(kind, value, clause)
 
             liked_color = "" if other_person else _liked_color(clause)
