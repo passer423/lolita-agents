@@ -6,6 +6,10 @@ Lolita 垂直领域的问答 agent：**多路召回 → 生成回答 → 关注�
 
 编排层用 **LangGraph** 的 `StateGraph` 实现（[ADR-0002](docs/adr/0002-用LangGraph编排多路召回.md)）；召回层坚持**一源一通道、互不混写**（[ADR-0001](docs/adr/0001-多路召回一源一通道.md)）。
 
+## 线上访问
+
+线上演示已部署在 **<https://lolitaagent.online>**：80 端口收到请求会 301 跳到 443，证书为 Let's Encrypt，直接用浏览器打开即可。本地开发与自部署仍按下文「快速开始」跑在 `http://127.0.0.1:8787`。
+
 ## 项目快照（2026-11，全量数据见「评测口径」）
 
 | 维度 | 数字 |
@@ -211,7 +215,7 @@ START ──fanout──▶ own ─┐
 - **登录态**：服务端会话。cookie `lolita_session` 是随机 token，库里只存其 SHA-256；`HttpOnly` + `SameSite=Lax`，HTTPS（或 `X-Forwarded-Proto: https`）时加 `Secure`。绝对有效期 30 天，刷新页面不用重登；登出或过期后服务端删/拒掉该 token，接口返回 401。
 - **门禁**：默认拒绝。除 `/api/health`、`/api/chat/status` 与 `/api/auth/*` 外，所有 `/api/*` 都由 `AccountGate` 中间件校验 cookie，未登录直接 401；不是前端藏按钮。
 - **多对话**：`GET/POST /api/threads`、`GET /api/threads/{id}/messages`、`DELETE /api/threads/{id}`。标题取首问摘要（折叠空白、截 30 字）。流式请求第一帧返回 `{"type":"conversation","id":...}`，前端据此把新对话挂到侧栏。
-- **上下文**：带 `conversation_id` 的请求从该线程取最近 `MAX_HISTORY_TURNS` 条；服务端不会跨线程/跨账号取历史。显式传 `history` 仍兼容，但新前端不再传。
+- **上下文**：带 `conversation_id` 的请求从该线程取最近 `HISTORY_FETCH_MESSAGES`（12 条，约 6 轮）；缩写扩展看 6 轮、检索词改写与裙子识别看 4 轮，写作阶段再按 `MAX_HISTORY_TURNS`（8 条）收窄。服务端不会跨线程/跨账号取历史。显式传 `history` 仍兼容，但新前端不再传。
 - **编号**：落库与回填都会剥掉 assistant 内容里的 `[n]`——编号只在单轮内有效。
 - **只落最终回答**：流式回答中途断开时不写库，半截回答不会进入下一轮上下文。
 - **保留与清理**（`data/app.db`，WAL）：
