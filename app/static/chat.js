@@ -936,6 +936,8 @@
 
   function renderThreads() {
     const bar = document.getElementById('thread-bar');
+    const count = document.getElementById('thread-count');
+    if (count) count.textContent = state.threads.length ? String(state.threads.length) : '';
     if (!bar) return;
     // 空态不渲染占位文字或空白块：列表为空时侧栏只剩「新对话」按钮。
     if (!state.threads.length) {
@@ -1071,18 +1073,26 @@
     // 不占首屏、也不需要用户先滑过设置才能提问。
     root.innerHTML =
       '<div class="chat-shell">' +
-        '<aside class="thread-side card" id="thread-side" aria-label="对话列表">' +
+        '<aside class="thread-side card" id="thread-side" aria-label="历史会话">' +
+          '<div class="thread-side-head">' +
+            '<span>历史会话</span>' +
+            '<button class="thread-close" id="thread-close" aria-label="关闭会话列表">×</button>' +
+          '</div>' +
           '<button class="primary thread-new" id="thread-new">新对话</button>' +
           '<div class="thread-list" id="thread-bar"></div>' +
         '</aside>' +
         '<div class="chat-main">' +
+          // 手机端显式入口；桌面由左侧栏承担，不显示这一行。
+          '<div class="thread-switch">' +
+            '<button class="thread-switch-btn" id="thread-toggle" ' +
+              'aria-expanded="false" aria-controls="thread-side">切换会话' +
+              '<span class="thread-switch-count" id="thread-count"></span></button>' +
+          '</div>' +
           '<div class="card chat-card">' +
             '<div class="chat-head">' +
               '<span class="chat-model">' + esc(displayName) +
                 (username ? ' · ' + esc(username) : '') + '</span>' +
               '<div class="chat-actions">' +
-                '<button class="ghost sm thread-toggle" id="thread-toggle" ' +
-                  'aria-expanded="false" aria-controls="thread-side">对话</button>' +
                 '<button class="ghost sm" id="chat-stop" style="display:none" disabled>停止</button>' +
                 '<button class="ghost sm" id="chat-logout">登出</button>' +
               '</div>' +
@@ -1170,6 +1180,7 @@
       setSidebar(!(side && side.classList.contains('open')));
     });
     document.getElementById('thread-backdrop').addEventListener('click', () => setSidebar(false));
+    document.getElementById('thread-close').addEventListener('click', () => setSidebar(false));
 
     // 首屏：有对话就打开最近一个，没有就留空等首问自动新建。
     renderThreads();
