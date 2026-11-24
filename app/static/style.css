@@ -41,8 +41,18 @@ html, body {
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--line);
 }
-#topbar h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: .02em; }
-.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+#topbar h1 {
+  font-size: 17px;
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: .02em;
+  /* 展示名变长时截断标题，别把状态点顶出屏幕 */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
 .dot.ok { background: var(--ok); }
 .dot.bad { background: #c0554d; }
 
@@ -417,7 +427,7 @@ ul.plain li { margin-bottom: 2px; }
 .chat-card { display: flex; flex-direction: column; gap: 10px; }
 .chat-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .chat-actions { display: flex; align-items: center; gap: 8px; }
-.chat-model { font-size: 12px; color: var(--muted); }
+.chat-model { min-width: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 
 /* 桌面：左侧固定对话栏 + 右侧聊天区 */
 .chat-shell {
@@ -608,7 +618,14 @@ ul.plain li { margin-bottom: 2px; }
   background: var(--card);
 }
 .dress-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.dress-name { font-size: 13px; font-weight: 600; color: var(--ink); line-height: 1.5; }
+.dress-name {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
 .dress-tag {
   flex: 0 0 auto;
   font-size: 11px;
@@ -711,7 +728,7 @@ ul.plain li { margin-bottom: 2px; }
   border-bottom: 1px solid var(--line);
 }
 .follow-row .grow { flex: 1; min-width: 0; }
-.follow-row .name { font-size: 14px; font-weight: 600; }
+.follow-row .name { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 .follow-row .meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
 .follow-del {
   flex: 0 0 auto;
@@ -751,6 +768,15 @@ ul.plain li { margin-bottom: 2px; }
 @media (max-width: 600px) {
   :root { --pad: 10px; }
 
+  /* 顶栏不再把标题和状态点分别拉到屏幕两端：手机上一行内容收紧，
+     状态点跟着标题走，左右留白也抬到 14px，避免贴边。 */
+  #topbar {
+    justify-content: flex-start;
+    gap: 8px;
+    padding-left: max(14px, env(safe-area-inset-left));
+    padding-right: max(14px, env(safe-area-inset-right));
+  }
+
   /* 卡片去掉左右外框贴边，把 14px 的左右留白还给正文 */
   #view { padding: 8px 0 calc(20px + env(safe-area-inset-bottom)); }
   #view > .card {
@@ -759,7 +785,8 @@ ul.plain li { margin-bottom: 2px; }
     border-radius: 0;
     margin-bottom: 8px;
   }
-  #view > .card:not(.fold) { padding: 12px; }
+  /* 贴边卡片的正文留 14px，和顶栏、折叠面板对齐，不再顶着屏幕边框 */
+  #view > .card:not(.fold) { padding: 14px; }
 
   /* 长回答：正文 15px，行高略松，读起来不挤 */
   .bubble { font-size: 15px; line-height: 1.75; padding: 10px 12px; }
@@ -787,12 +814,33 @@ ul.plain li { margin-bottom: 2px; }
   .evidence summary { padding: 4px 0; }
   .ev-link { font-size: 11.5px; }
 
-  /* 关注项摘要在 375 宽下允许换行，箭头仍然贴右 */
-  .fold > summary { flex-wrap: wrap; row-gap: 2px; padding: 12px; }
-  .fold-body { padding: 0 12px 12px; }
+  /* 折叠摘要保持一行：提示文字超长时省略，箭头始终贴右 */
+  .fold > summary { flex-wrap: nowrap; padding: 12px 14px; }
+  .fold > summary .badge { flex: 0 0 auto; }
+  .fold-hint {
+    min-width: 0;
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .fold-body { padding: 0 14px 14px; }
 
   .follow-event .head { font-size: 11.5px; }
   .follow-actions { gap: 8px; }
+
+  /* 推荐问题：单条太长时在胶囊内折行，不撑破容器 */
+  .chat-chips .chip {
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: left;
+  }
+
+  /* 逐通道进度：长通道名/长错误串折行，圆点对齐首行 */
+  .recall-live { overflow-wrap: anywhere; }
+  .recall-row { min-width: 0; align-items: flex-start; }
+  .recall-row .dot { margin-top: 4px; }
 
   /* 登录页不居中留白，整屏可用；输入框 16px 避免 iOS 自动放大 */
   .auth-card { max-width: none; margin: 0; }
@@ -841,10 +889,10 @@ ul.plain li { margin-bottom: 2px; }
     justify-content: center;
     min-height: 40px;
   }
-  button.ghost.sm, a.ghost.sm { min-height: 38px; }
+  button.ghost.sm, a.ghost.sm { min-height: 40px; }
   .chat-input .primary { min-height: 46px; }
   .thread-open { min-height: 40px; padding-top: 0; padding-bottom: 0; }
-  .thread-del { min-width: 34px; }
+  .thread-del { min-width: 40px; }
 
   /* 引用编号视觉不变，热区向四周扩 9px */
   .cite::after {
@@ -858,8 +906,14 @@ ul.plain li { margin-bottom: 2px; }
     padding-bottom: 6px;
   }
 
+  /* 记忆/关注项的删除键：视觉仍是小 ×，热区抬到 40×40 */
   .follow-del {
-    padding: 8px 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 40px;
+    min-height: 40px;
+    padding: 0;
     margin: -8px -6px -8px 0;
   }
 }
