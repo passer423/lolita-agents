@@ -63,6 +63,16 @@ _PART_TITLES = {
     "length": ("length", "着丈", "总长", "裙长", "衣长"),
 }
 
+#: 带这些词的复合标签不是要判断的部位：`Sleeve Length` / `Bodice Length` /
+#: `Handle Length` 都不是裙长，`Owner Bust` 是样品持有人的尺寸。档案里
+#: 这类标签出现得比正牌标签还早，只按「包含」匹配会把胸衣长当裙长。
+_PART_EXCLUDES = {
+    "bust": ("underbust", "owner"),
+    "waist": ("owner",),
+    "hips": ("owner",),
+    "length": ("sleeve", "bodice", "handle", "owner", "shoulder", "cuff"),
+}
+
 #: 提到这些词时才做合身/裙长判断，避免每条裙子回答都塞一段估算。
 FIT_MARKERS = (
     "穿得下",
@@ -125,16 +135,34 @@ def _user_cm(facts: list[dict], kind: str) -> float | None:
 
 
 def _measurement(profile: dict, part: str) -> tuple[str, tuple[float, float] | None]:
-    """按部位取档案平铺尺寸，返回 ``(原始值, cm 区间)``；没写返回 ``("", None)``。"""
+    """按部位取档案平铺尺寸，返回 ``(原始值, cm 区间)``；没写返回 ``("", None)``。
+
+    同一部位可能有多个标签（`Bodice Length` 与 `Length`、`Sleeve Length` 与
+    `Length`），按「完全等于标题 > 以标题开头 > 包含标题」排序取最贴合的那个，
+    并跳过袖长/胸衣长/样品持有人尺寸这类同名不同义的标签。
+    """
     titles = _PART_TITLES[part]
+    excludes = _PART_EXCLUDES.get(part, ())
+    best: tuple[int, str, tuple[float, float] | None] | None = None
     for item in profile.get("measurements") or []:
         label = str(item.get("label") or "").strip()
         lowered = label.lower()
-        if not any(title in lowered for title in titles):
+        if not label or any(bad in lowered for bad in excludes):
             continue
-        value = str(item.get("value") or "").strip()
-        return value, _cm_range(value)
-    return "", None
+        if lowered in titles:
+            rank = 0
+        elif any(lowered.startswith(title) for title in titles):
+            rank = 1
+        elif any(title in lowered for title in titles):
+            rank = 2
+        else:
+            continue
+        if best is None or rank < best[0]:
+            value = str(item.get("value") or "").strip()
+            best = (rank, value, _cm_range(value))
+    if best is None:
+        return "", None
+    return best[1], best[2]
 
 
 def _compare(part: str, user: float, profile: dict) -> tuple[str, str | None]:
@@ -170,6 +198,9 @@ def _compare(part: str, user: float, profile: dict) -> tuple[str, str | None]:
 
 
 def _overall(verdicts: list[str]) -> str:
+    if not verdicts:
+        # 一个部位都没比出来（档案缺这几项）时不能给「整体合身」的假结论。
+        return ""
     if "略小" in verdicts:
         return "整体略小、会偏紧"
     if verdicts and all(verdict == "宽松" for verdict in verdicts):
@@ -363,13 +394,20 @@ def judge(
         text, overall = _fit_section(profile, facts)
         if text:
             parts.append(text)
+        if overall:
             status, summary = "measured", f"按三围：{overall}"
+        else:
+            # 档案有尺寸，但不是胸/腰/臀：没有可比对的部位，不算「按三围判断」。
+            status, summary = "no_archive_data", "档案没写对应部位，不判断"
     elif wants_fit and height is not None and weight is not None:
         estimates = _estimate(planner, height, weight)
         if estimates:
             text, overall = _estimated_section(profile, estimates, height, weight)
             parts.append(text)
-            status, summary = "estimated", f"按身高体重估算（仅供参考）：{overall}"
+            if overall:
+                status, summary = "estimated", f"按身高体重估算（仅供参考）：{overall}"
+            else:
+                status, summary = "no_archive_data", "档案没写对应部位，不判断"
         elif wants_fit:
             parts.append(GUIDE_TEXT)
             status, summary = "need_data", "缺三围，已询问"

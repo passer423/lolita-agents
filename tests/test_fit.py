@@ -96,9 +96,50 @@ def test_fullwidth_tilde_range_is_parsed():
     assert "合身" in text
 
 
+def test_length_prefers_exact_label_over_sleeve_and_bodice():
+    """档案里 `Sleeve Length` / `Bodice Length` 常排在 `Length` 前面，不能当裙长。"""
+    profile = {
+        "measurements": [
+            {"label": "Bodice Length", "value": "38 cm"},
+            {"label": "Bust", "value": "90 cm"},
+            {"label": "Length", "value": "99 cm"},
+            {"label": "Sleeve Length", "value": "58 cm"},
+        ]
+    }
+    text, _ = fit.judge(
+        profile, [{"kind": "height", "value": "160cm"}, {"kind": "bust", "value": "90cm"}], "裙长到哪"
+    )
+
+    assert "着丈 99cm" in text
+    assert "99cm 大约到过膝" in text
+
+
+def test_length_uses_skirt_length_when_total_length_absent():
+    profile = {
+        "measurements": [
+            {"label": "Sleeve Length", "value": "58 cm"},
+            {"label": "Skirt Length", "value": "88 cm"},
+        ]
+    }
+    text, step = fit.judge(profile, [{"kind": "height", "value": "160cm"}], "裙长到哪")
+
+    assert "着丈 88cm" in text
+    assert step is not None
+    assert step["status"] == "length_only"
+
+
+def test_owner_measurements_are_not_used():
+    """`Owner Bust` 是样品持有人的尺寸，不是衣服平铺尺寸。"""
+    profile = {"measurements": [{"label": "Owner Bust", "value": "86 cm"}]}
+    text, step = fit.judge(profile, [{"kind": "bust", "value": "95cm"}], "我穿得下吗")
+
+    assert "胸围：档案没写" in text
+    assert step is not None
+    assert step["status"] == "no_archive_data"
+
+
 def test_missing_measurements_says_so_without_guessing():
     text = fit.advice({"colors": [], "measurements": []}, FACTS)
-
     assert "没有写平铺尺寸" in text
     assert "判断不了" in text
     # 没有任何「合身 / 宽松 / 略小」的假结论。
